@@ -16,10 +16,10 @@ def xipm_patch_auto(inds, cos_sin_2_phi_1, cos_sin_2_phi_2, bin_inds, g11, g21, 
     
     xip, xim = np.zeros(nbins, dtype=np.float32), np.zeros(nbins, dtype=np.float32)
 
-    gt1 = - g11[inds[0]]*cos_sin_2_phi_1[0] - g21[inds[0]]*cos_sin_2_phi_1[1]
-    gx1 = - g11[inds[0]]*cos_sin_2_phi_1[1] + g21[inds[0]]*cos_sin_2_phi_1[0]
-    gt2 = - g12[inds[1]]*cos_sin_2_phi_2[0] - g22[inds[1]]*cos_sin_2_phi_2[1]
-    gx2 = - g12[inds[1]]*cos_sin_2_phi_2[1] + g22[inds[1]]*cos_sin_2_phi_2[0]
+    gt1 =  g11[inds[0]]*cos_sin_2_phi_1[0] - g21[inds[0]]*cos_sin_2_phi_1[1]
+    gx1 =  g11[inds[0]]*cos_sin_2_phi_1[1] + g21[inds[0]]*cos_sin_2_phi_1[0]
+    gt2 =  g12[inds[1]]*cos_sin_2_phi_2[0] - g22[inds[1]]*cos_sin_2_phi_2[1]
+    gx2 =  g12[inds[1]]*cos_sin_2_phi_2[1] + g22[inds[1]]*cos_sin_2_phi_2[0]
 
     gt = gt1*gt2
     gx = gx1*gx2
@@ -48,3 +48,22 @@ def M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area):
     M_a_Re = Q_patch_area * np.sum(Q_w*gt*Q_val) / np.sum(Q_w)
 
     return M_a_Re
+
+
+@njit(fastmath=False)
+def xipm_coord(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins):
+
+    xip, xim = np.zeros(nbins, dtype='c8'), np.zeros(nbins, dtype='c8')
+    
+    g1 = ((g11[inds[0]]) + 1j* g21[inds[0]]) * exp2theta[0] # minus in front of all g1?
+    g2 = ((g12[inds[1]]) + 1j* g22[inds[1]]) * exp2theta[1]
+
+    bin_edges = np.append([0], np.cumsum(bin_inds))
+    
+    for bin in range(nbins):
+        xip[bin] = np.sum(g1[bin_edges[bin]:bin_edges[bin+1]] * np.conjugate(g2[bin_edges[bin]:bin_edges[bin+1]]))/(bin_inds[bin])
+        xim[bin] = np.sum(g1[bin_edges[bin]:bin_edges[bin+1]] * g2[bin_edges[bin]:bin_edges[bin+1]])/(bin_inds[bin])
+        
+
+    return np.real(xip), np.real(xim)
+
