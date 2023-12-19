@@ -1,5 +1,6 @@
 import numpy as np
 from numba import njit
+import math
 
 @njit(fastmath=True)
 def rotate_shear(ra1, dec1, ra2, dec2):
@@ -12,33 +13,6 @@ def rotate_shear(ra1, dec1, ra2, dec2):
     
     return cos_2phi, sin_2phi
 
-def xipm_patch_auto(inds, cos_sin_2_phi_1, cos_sin_2_phi_2, bin_inds, g11, g21, g12, g22, w1, w2, nbins):
-    
-    xip, xim = np.zeros(nbins, dtype=np.float32), np.zeros(nbins, dtype=np.float32)
-
-    gt1 =  g11[inds[0]]*cos_sin_2_phi_1[0] - g21[inds[0]]*cos_sin_2_phi_1[1]
-    gx1 =  g11[inds[0]]*cos_sin_2_phi_1[1] + g21[inds[0]]*cos_sin_2_phi_1[0]
-    gt2 =  g12[inds[1]]*cos_sin_2_phi_2[0] - g22[inds[1]]*cos_sin_2_phi_2[1]
-    gx2 =  g12[inds[1]]*cos_sin_2_phi_2[1] + g22[inds[1]]*cos_sin_2_phi_2[0]
-
-    gt = gt1*gt2
-    gx = gx1*gx2
-    
-    bin_edges = np.append([0], np.cumsum(bin_inds)).astype('int')
-    
-    for bin in range(nbins):
-        xip[bin] = np.sum(gt[bin_edges[bin]:bin_edges[bin+1]]+gx[bin_edges[bin]:bin_edges[bin+1]])/(bin_inds[bin])
-        xim[bin] = np.sum(gt[bin_edges[bin]:bin_edges[bin+1]]-gx[bin_edges[bin]:bin_edges[bin+1]])/(bin_inds[bin])
-
-    return xip, xim
-
-def xipm_patch_cross(inds, cos_sin_2_phi_1, cos_sin_2_phi_2, bin_inds, g11, g21, g12, g22, w1, w2, nbins):
-
-    xip1, xim1 = xipm_patch_auto(inds, cos_sin_2_phi_1, cos_sin_2_phi_2, bin_inds, g11, g21, g12, g22, w1, w2, nbins)
-    xip2, xim2 = xipm_patch_auto(inds, cos_sin_2_phi_2, cos_sin_2_phi_1, bin_inds, g12, g22, g11, g21, w2, w1, nbins)
-
-    return xip1+xip2/2, xim1+xim2/2
-
 
 def M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area):
     
@@ -50,8 +24,7 @@ def M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area):
     return M_a_Re
 
 
-@njit(fastmath=False)
-def xipm_coord(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins):
+def xipm_patch(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins):
 
     xip, xim = np.zeros(nbins, dtype='c8'), np.zeros(nbins, dtype='c8')
     
@@ -63,7 +36,87 @@ def xipm_coord(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins):
     for bin in range(nbins):
         xip[bin] = np.sum(g1[bin_edges[bin]:bin_edges[bin+1]] * np.conjugate(g2[bin_edges[bin]:bin_edges[bin+1]]))/(bin_inds[bin])
         xim[bin] = np.sum(g1[bin_edges[bin]:bin_edges[bin+1]] * g2[bin_edges[bin]:bin_edges[bin+1]])/(bin_inds[bin])
-        
 
     return np.real(xip), np.real(xim)
 
+@njit(fastmath=False)
+def radec_to_xyz(ra, dec):
+    """Convert ra, dec (in radians) to 3D x,y,z coordinates on the unit sphere.
+
+    :param ra:      The right ascension(s) in radians. May be a numpy array.
+    :param dec:     The declination(s) in radians. May be a numpy array.
+
+    :returns: x, y, z as a tuple.
+    """
+    cosdec = np.cos(dec)
+    x = cosdec * np.cos(ra)
+    y = cosdec * np.sin(ra)
+    z = np.sin(dec)
+    return x,y,z
+
+
+@njit(fastmath=False)
+def getAngle(ra1, dec1, ra2, dec2, ra3=0, dec3=np.pi/2):
+    """Find the open angle at location 1  between (ra2,dec2) and (ra3, dec3) (north pole by default).
+
+    The current coordinate along with the two other coordinates form a spherical triangle
+    on the sky.  This function calculates the angle between the two sides at the location of
+    the current coordinate.
+
+    Note that this returns a signed angle.  The angle is positive if the sweep direction from
+    ``coord2`` to ``coord3`` is counter-clockwise (as observed from Earth).  It is negative if
+    the direction is clockwise.
+
+    :param ra1:       A second CelestialCoord
+    :param dec1:       A second CelestialCoord
+    :param ra2:       A third CelestialCoord
+    :param dec2:       A second CelestialCoord
+
+    :returns: the angle between the great circles joining the other two coordinates to the
+                current coordinate.
+    """
+    # Call A = coord2, B = coord3, C = self
+    # Then we are looking for the angle ACB.
+    # If we treat each coord as a (x,y,z) vector, then we can use the following spherical
+    # trig identities:
+    #
+    # (A x C) . B = sina sinb sinC
+    # (A x C) . (B x C) = sina sinb cosC
+    #
+    # Then we can just use atan2 to find C, and atan2 automatically gets the sign right.
+    # And we only need 1 trig call, assuming that x,y,z are already set up, which is often
+    # the case.
+    
+    c1 = radec_to_xyz(ra1, dec1)
+    c2 = radec_to_xyz(ra2, dec2)
+    c3 = radec_to_xyz(ra3, dec3)
+
+    a = np.array( [ [ c3[0], c3[1], c3[2] ],
+                    [ c1[0], c1[1], c1[2] ],
+                    [ c2[0], c2[1], c2[2] ] ])
+
+    sinC =  (a[0][0] * (a[1][1] * a[2][2] - a[2][1] * a[1][2])
+            -a[1][0] * (a[0][1] * a[2][2] - a[2][1] * a[0][2])
+            +a[2][0] * (a[0][1] * a[1][2] - a[1][1] * a[0][2]))
+    
+    dsq_AC = (c1[0]-c3[0])**2 + (c1[1]-c3[1])**2 + (c1[2]-c3[2])**2
+    dsq_BC = (c1[0]-c2[0])**2 + (c1[1]-c2[1])**2 + (c1[2]-c2[2])**2
+    dsq_AB = (c2[0]-c3[0])**2 + (c2[1]-c3[1])**2 + (c2[2]-c3[2])**2
+    cosC = 0.5 * (dsq_AC + dsq_BC - dsq_AB - 0.5 * dsq_AC * dsq_BC)
+
+    C = math.atan2(sinC, cosC)
+    return C
+
+
+def Q_T(self, theta):
+    """The compensated filter used for aperture mass.
+
+    Args:
+        theta (float): Great Circle distance to center of filter.
+
+    Returns:
+        (float): Value of compensated filter.
+    """
+    
+    theta_Q = np.radians(self.theta_Q/60)
+    return theta**2/(4*np.pi*theta_Q**4)*np.exp(-theta**2/(2*theta_Q**2))

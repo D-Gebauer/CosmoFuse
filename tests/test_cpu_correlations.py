@@ -26,8 +26,9 @@ class TestCPUCorrelation(unittest.TestCase):
         self.theta_center = np.loadtxt("./data/patch_center_theta.dat")
     
         self.corr = Correlation_CPU(self.nside, self.phi_center, self.theta_center, nbins=self.nbins, patch_size=self.radius_patch, theta_min=self.theta_min, theta_max=self.theta_max, mask=self.des_map, fastmath=False)
-    
-        self.shear_maps = np.load("./data/shear_maps.npy")        
+
+        self.shear_maps = np.zeros((2,2,hp.nside2npix(self.nside)))
+        self.shear_maps[:,:, self.map_inds] = np.load("./data/shear_maps.npy")        
         
         self.w1 = np.ones(len(self.shear_maps[0,0]))
         self.w2 = self.w1
@@ -63,158 +64,69 @@ class TestCPUCorrelation(unittest.TestCase):
             self.npairs_treecorr_cross[i,:] = correlation.npairs
         self.rnom = correlation.rnom
         print("Setup complete")
-        
-
     
     
     def find_pairs_single(self):
         self.corr.calculate_pairs_2PCF(threads=1)
-        #print(f"Number of pairs: {self.corr.bins}")
-        #print(f"Number of pairs: {np.sum(self.corr.bins)}")
-        #print(f"Number of pairs Tree: {np.sum(self.npairs_treecorr_auto)}")
-        #self.assertTrue((np.array(self.npairs_treecorr_auto).astype('int') == np.array(self.corr.bins)).all())
-        #self.assertTrue((np.array(self.npairs_treecorr_cross).astype('int') == 2*np.array(self.corr.bins)).all())
+        self.assertTrue((np.array(self.npairs_treecorr_auto).astype('int') == np.array(self.corr.bins)).all())
+        self.assertTrue((np.array(self.npairs_treecorr_cross).astype('int') == 2*np.array(self.corr.bins)).all())
     
     def find_pairs_multi(self):
         self.corr.calculate_pairs_2PCF(threads=5)
-        #print(f"Number of pairs: {np.sum(self.corr.bins)}")
-        #print(f"Number of pairs Tree: {np.sum(self.npairs_treecorr_auto)}")
-        #self.assertTrue((np.array(self.npairs_treecorr_auto).astype('int') == np.array(self.corr.bins)).all())
-        #self.assertTrue((np.array(self.npairs_treecorr_cross).astype('int') == 2*np.array(self.corr.bins)).all())
+        self.assertTrue((np.array(self.npairs_treecorr_auto).astype('int') == np.array(self.corr.bins)).all())
+        self.assertTrue((np.array(self.npairs_treecorr_cross).astype('int') == 2*np.array(self.corr.bins)).all())
     
     
     def get_auto_correlation_single(self):
       
-        self.corr.load_maps(self.shear_maps[1,0], self.shear_maps[1,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, )
-        self.assertTrue(self.corr.autocorrelation)
-        
-        
-        xip = np.zeros((len(self.theta_center),self.nbins))
-        xim = np.zeros((len(self.theta_center),self.nbins))
-    
+        self.corr.load_maps(self.shear_maps[1,0], self.shear_maps[1,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, flip_g1=True)     
         xip, xim = self.corr.calculate_2PCF(threads=1)
-       
-        fig, ax = plt.subplots(1,2, figsize=(16,8))
-       
-        for i in range(len(self.theta_center)):
-            ax[0].plot(self.corr.bincenters, np.abs((xip[i]-self.xip_treecorr_auto[i])/(xip[i]+self.xip_treecorr_auto[i])), alpha=.15, c='k')
-            ax[1].plot(self.corr.bincenters, np.abs((xim[i]-self.xim_treecorr_auto[i])/(xim[i]+self.xim_treecorr_auto[i])), alpha=.15, c='k')
-        ax[0].plot(self.corr.bincenters, np.abs((xip.mean(axis=0) - self.xip_treecorr_auto.mean(axis=0))/(xip.mean(axis=0) + self.xip_treecorr_auto.mean(axis=0))), label="xip")
-        ax[1].plot(self.corr.bincenters, np.abs((xim.mean(axis=0) - self.xim_treecorr_auto.mean(axis=0))/(xim.mean(axis=0) + self.xim_treecorr_auto.mean(axis=0))), label="xim")
-        ax[0].legend()
-        ax[1].legend()
-        ax[0].set_xscale('log')
-        ax[0].set_yscale('log')
-        ax[1].set_xscale('log')
-        ax[1].set_yscale('log')
-
-        plt.savefig("corrs.png")
-        plt.close()
-
-        print(f"Auto Single xi+ {(1-(xip/self.xip_treecorr_auto)).max():.3e}")
-        print(f"Auto Single xi- {(1-(xim/self.xim_treecorr_auto)).max():.3e}")
         
-        """
-        for i in range(self.nbins):
-            self.assertAlmostEqual(1-(xip.mean(axis=0)[i]/self.xip_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual(1-(xim.mean(axis=0)[i]/self.xim_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual((xip.mean(axis=0)[i]-self.xip_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-10)
-            self.assertAlmostEqual((xim.mean(axis=0)[i]-self.xim_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-10)
-        """
+        self.assertAlmostEqual(np.abs(1-(xip/self.xip_treecorr_auto)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(1-(xim/self.xim_treecorr_auto)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(xip-self.xip_treecorr_auto).max(), 0.0, delta=1e-10)
+        self.assertAlmostEqual(np.abs(xim-self.xim_treecorr_auto).max(), 0.0, delta=1e-10)
         
     def get_auto_correlation_mult(self):
 
-        self.corr.load_maps(self.shear_maps[1,0], self.shear_maps[1,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, )
-        self.assertTrue(self.corr.autocorrelation)
-        
-        
-        xip = np.zeros((len(self.theta_center),self.nbins))
-        xim = np.zeros((len(self.theta_center),self.nbins))
-    
+        self.corr.load_maps(self.shear_maps[1,0], self.shear_maps[1,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, flip_g1=True)
         xip, xim = self.corr.calculate_2PCF(threads=5)
 
-        print(f"Auto Multi xi+ {(1-(xip/self.xip_treecorr_auto)).max():.3e}")
-        print(f"Auto Multi xi- {(1-(xim/self.xim_treecorr_auto)).max():.3e}")
-
-        """
-        for i in range(self.nbins):
-            self.assertAlmostEqual(1-(xip.mean(axis=0)[i]/self.xip_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual(1-(xim.mean(axis=0)[i]/self.xim_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual((xip.mean(axis=0)[i]-self.xip_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-10)
-            self.assertAlmostEqual((xim.mean(axis=0)[i]-self.xim_treecorr_auto.mean(axis=0)[i]), 0.0, delta=1e-10)
-        """
+        self.assertAlmostEqual(np.abs(1-(xip/self.xip_treecorr_auto)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(1-(xim/self.xim_treecorr_auto)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(xip-self.xip_treecorr_auto).max(), 0.0, delta=1e-10)
+        self.assertAlmostEqual(np.abs(xim-self.xim_treecorr_auto).max(), 0.0, delta=1e-10)
          
     def get_cross_correlation_single(self):
        
-        self.corr.load_maps(self.shear_maps[0,0], self.shear_maps[0,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, )
-        self.assertFalse(self.corr.autocorrelation) 
-        
-        xip = np.zeros((len(self.theta_center),self.nbins))
-        xim = np.zeros((len(self.theta_center),self.nbins))
-        
+        self.corr.load_maps(self.shear_maps[0,0], self.shear_maps[0,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, flip_g1=True)
         xip, xim = self.corr.calculate_2PCF(threads=1)
         
-        print(f"Cross single xi+ {(1-(xip/self.xip_treecorr_cross)).max():.3e}")
-        print(f"Cross single xi- {(1-(xim/self.xim_treecorr_cross)).max():.3e}")
-        
-        """
-        
-        for i in range(self.nbins):
-            self.assertAlmostEqual(1-(xip.mean(axis=0)[i]/self.xip_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual(1-(xim.mean(axis=0)[i]/self.xim_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual((xip.mean(axis=0)[i]-self.xip_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-10)
-            self.assertAlmostEqual((xim.mean(axis=0)[i]-self.xim_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-10)
-        """
+        self.assertAlmostEqual(np.abs(1-(xip/self.xip_treecorr_cross)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(1-(xim/self.xim_treecorr_cross)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(xip-self.xip_treecorr_cross).max(), 0.0, delta=1e-10)
+        self.assertAlmostEqual(np.abs(xim-self.xim_treecorr_cross).max(), 0.0, delta=1e-10)
+
 
     def get_cross_correlation_mult(self):
        
-        self.corr.load_maps(self.shear_maps[0,0], self.shear_maps[0,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, )
-        self.assertFalse(self.corr.autocorrelation) 
-        
-        xip = np.zeros((len(self.theta_center),self.nbins))
-        xim = np.zeros((len(self.theta_center),self.nbins))
-        
+        self.corr.load_maps(self.shear_maps[0,0], self.shear_maps[0,1], self.shear_maps[1,0], self.shear_maps[1,1], self.w1, self.w2, flip_g1=True)
         xip, xim = self.corr.calculate_2PCF(threads=5)
         
-        print(f"Cross Multi xi+ {(1-(xip/self.xip_treecorr_cross)).max():.3e}")
-        print(f"Cross Multi xi- {(1-(xim/self.xim_treecorr_cross)).max():.3e}")
-        
-        """
-        for i in range(self.nbins):
-            self.assertAlmostEqual(1-(xip.mean(axis=0)[i]/self.xip_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual(1-(xim.mean(axis=0)[i]/self.xim_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-8)
-            self.assertAlmostEqual((xip.mean(axis=0)[i]-self.xip_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-10)
-            self.assertAlmostEqual((xim.mean(axis=0)[i]-self.xim_treecorr_cross.mean(axis=0)[i]), 0.0, delta=1e-10)
-        """
+        self.assertAlmostEqual(np.abs(1-(xip/self.xip_treecorr_cross)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(1-(xim/self.xim_treecorr_cross)).max(), 0.0, delta=1e-6)
+        self.assertAlmostEqual(np.abs(xip-self.xip_treecorr_cross).max(), 0.0, delta=1e-10)
+        self.assertAlmostEqual(np.abs(xim-self.xim_treecorr_cross).max(), 0.0, delta=1e-10)
         
     def test_single_core(self):
-        print()
-        start_time = time.time()
         self.find_pairs_single()
-        print(f"Time to find pairs: {(time.time()-start_time):.3f}s")
-
-        start_time = time.time()
         self.get_auto_correlation_single()
-        print(f"Time to get auto correlation: {(time.time()-start_time):.3f}s")
-
-        start_time = time.time()
         self.get_cross_correlation_single()    
-        print(f"Time to get cross correlation: {(time.time()-start_time):.3f}s")
-    
     
     def test_multi_core(self):
-        print()
-        start_time = time.time()
         self.find_pairs_multi()
-        print(f"Time to find pairs: {(time.time()-start_time):.3f}s")
-
-        start_time = time.time()
         self.get_auto_correlation_mult()
-        print(f"Time to get auto correlation: {(time.time()-start_time):.3f}s")
-
-        start_time = time.time()
         self.get_cross_correlation_mult()
-        print(f"Time to get cross correlation: {(time.time()-start_time):.3f}s")
 
 
 if __name__ == '__main__':
