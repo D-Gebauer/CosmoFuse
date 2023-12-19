@@ -28,7 +28,7 @@ def xipm_patch(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins):
 
     xip, xim = np.zeros(nbins, dtype='c8'), np.zeros(nbins, dtype='c8')
     
-    g1 = ((g11[inds[0]]) + 1j* g21[inds[0]]) * exp2theta[0] # minus in front of all g1?
+    g1 = ((g11[inds[0]]) + 1j* g21[inds[0]]) * exp2theta[0]
     g2 = ((g12[inds[1]]) + 1j* g22[inds[1]]) * exp2theta[1]
 
     bin_edges = np.append([0], np.cumsum(bin_inds))

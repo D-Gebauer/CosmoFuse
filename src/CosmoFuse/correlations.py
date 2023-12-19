@@ -8,6 +8,7 @@ import healpy as hp
 import itertools
 from functools import partial
 import h5py
+import cupy as cp
 
 class Correlation():
     
@@ -246,11 +247,70 @@ class Correlation_CPU(Correlation):
 
 class Correlation_GPU(Correlation):
     
-    def __init__(self, nside, phi_center, theta_center, nbins=10, theta_min=10, theta_max=170, patch_size=90, theta_Q=90, mask=None, fastmath=True):
-        print("GPU not implemented yet.")
-        print("Use Correlation_CPU instead.")
+    def __init__(self, nside, phi_center, theta_center, nbins=10, theta_min=10, theta_max=170, patch_size=90, theta_Q=90, mask=None, fastmath=True, device=0):
+        self.device = device
         super().__init__(nside, phi_center, theta_center, nbins, theta_min, theta_max, patch_size, theta_Q, mask, fastmath)
     
     def prepare_gpu(self):
-        pass
+        size = 0
+        ninds = []
+        for i in range(self.n_patches):
+            patchsize = np.sum(self.bins[i])
+            size += patchsize
+            ninds.append(patchsize)
+
+        first_patch_ind = np.append(0, np.cumsum(ninds))    
+        temp_inds = np.zeros((2,size), dtype=np.uint32)
+        temp_exp2phi = np.zeros((2,size), dtype=np.complex64)
+        temp_bins = np.zeros((self.n_patches*self.nbins), dtype=np.float32)
+        temp_bins_tot = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
+             
+        for i in range(self.n_patches):
+            temp_inds[:,first_patch_ind[i]:first_patch_ind[i+1]] = self.pair_inds[i]
+            temp_exp2phi[:,first_patch_ind[i]:first_patch_ind[i+1]] = self.pair_exp2phi[i]
+            temp_bins[i*self.nbins:(i+1)*self.nbins] = self.bins[i]
+            temp_bins_tot[i*self.nbins:(i+1)*self.nbins] = first_patch_ind[i] + self.bins[i].cumsum()
+        temp_bins_tot = np.append([0], temp_bins_tot)
         
+        self.inds_gpu = cp.asarray(temp_inds.astype(np.uint32))
+        self.exp2phi_gpu = cp.asarray(temp_exp2phi.astype(np.complex64))
+        self.bins_gpu = cp.asarray(temp_bins.astype(np.uint32))
+        self.tot_bins_gpu = cp.asarray(temp_bins_tot.astype(np.uint32))
+        self.ntotpairs = size
+        
+    def load_maps(self, g11, g21, g12, g22, w1, w2, flip_g1=True, flip_g2=False):
+        self.g11 = cp.asarray(g11.astype(np.float32))
+        self.g21 = cp.asarray(g21.astype(np.float32))
+        self.g12 = cp.asarray(g12.astype(np.float32))
+        self.g22 = cp.asarray(g22.astype(np.float32))
+        self.w1 = cp.asarray(w1.astype(np.float32))
+        self.w2 = cp.asarray(w2.astype(np.float32))
+        
+        if flip_g1: 
+            self.g11 = -self.g11
+            self.g12 = -self.g12
+        if flip_g2: 
+            self.g21 = -self.g21
+            self.g22 = -self.g22
+        
+    def get_all_xipm(self):
+        
+        xip1, xim1 = cp.zeros((self.n_patches * self.nbins), dtype=cp.complex64), cp.zeros((self.n_patches * self.nbins), dtype=cp.complex64)
+        xip2, xim2 = cp.zeros((self.n_patches * self.nbins), dtype=cp.complex64), cp.zeros((self.n_patches * self.nbins), dtype=cp.complex64)
+        
+        gt1 = ((self.g11[self.inds_gpu[0]]) + 1j* self.g21[self.inds_gpu[0]]) * self.exp2phi_gpu[0]
+        gx1 = ((self.g12[self.inds_gpu[1]]) + 1j* self.g22[self.inds_gpu[1]]) * self.exp2phi_gpu[1]
+        gt2 = ((self.g12[self.inds_gpu[0]]) + 1j* self.g22[self.inds_gpu[0]]) * self.exp2phi_gpu[0]
+        gx2 = ((self.g11[self.inds_gpu[1]]) + 1j* self.g21[self.inds_gpu[1]]) * self.exp2phi_gpu[1]
+
+
+        for bin in range(self.n_patches*self.nbins):
+            xip1[bin] = cp.sum(gt1[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]] * cp.conjugate(gx1[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]]))/(self.bins_gpu[bin])
+            xim1[bin] = cp.sum(gx1[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]] * gt1[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]])/(self.bins_gpu[bin])
+            xip2[bin] = cp.sum(gt2[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]] * cp.conjugate(gx2[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]]))/(self.bins_gpu[bin])
+            xim2[bin] = cp.sum(gx2[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]] * gt2[self.tot_bins_gpu[bin]:self.tot_bins_gpu[bin+1]])/(self.bins_gpu[bin])
+        
+        xip = (xip1 + xip2).reshape((self.n_patches, self.nbins))/2
+        xim = (xim1 + xim2).reshape((self.n_patches, self.nbins))/2
+        
+        return xip.real, xim.real
