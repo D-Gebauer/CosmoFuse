@@ -373,10 +373,10 @@ class Correlation_GPU(Correlation):
         sumofweights_gpu = cp.asarray(sumofweights)
         
         if flip_g1:
-            shear_maps_gpu[:,0] *= -1
+            g1 = -1
 
         if flip_g2:
-            shear_maps_gpu[:,1] *= -1
+            g2 = -1
         
         M_ap = np.zeros([nzbins, self.n_patches])
         xim1 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
@@ -386,10 +386,10 @@ class Correlation_GPU(Correlation):
         
         k=0
         for i in range(nzbins):
-            M_ap[i] = self.get_M_a(shear_maps[i,0], shear_maps[i,1], w[i])
+            M_ap[i] = self.get_M_a(g1*shear_maps[i,0], g2*shear_maps[i,1], w[i])
             for j in range(i, nzbins):
-                xip1[k], xim1[k] = self.xipm(shear_maps_gpu[i,0], shear_maps_gpu[i,1], shear_maps_gpu[j,0], shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
-                xip2[k], xim2[k] = self.xipm(shear_maps_gpu[j,0], shear_maps_gpu[j,1], shear_maps_gpu[i,0], shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
+                xip1[k], xim1[k] = self.xipm(g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
+                xip2[k], xim2[k] = self.xipm(g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
                 k += 1
                 
         xip = (xip1 + xip2)/2
