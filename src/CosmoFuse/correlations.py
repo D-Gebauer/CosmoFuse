@@ -388,8 +388,12 @@ class Correlation_GPU(Correlation):
         for i in range(nzbins):
             M_ap[i] = self.get_M_a(g1*shear_maps[i,0], g2*shear_maps[i,1], w[i])
             for j in range(i, nzbins):
-                xip1[k], xim1[k] = self.xipm(g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
-                xip2[k], xim2[k] = self.xipm(g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
+                if i == j:
+                    xip1[k], xim1[k] = self.xipm(g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
+                    xip2[k], xim2[k] = xip1[k], xim1[k]
+                else:
+                    xip1[k], xim1[k] = self.xipm(g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
+                    xip2[k], xim2[k] = self.xipm(g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
                 k += 1
                 
         xip = (xip1 + xip2)/2
