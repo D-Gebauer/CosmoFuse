@@ -372,9 +372,9 @@ class Correlation_GPU(Correlation):
         w_gpu = cp.asarray(w)
         sumofweights_gpu = cp.asarray(sumofweights)
         
+        g1, g2 = 1, 1
         if flip_g1:
             g1 = -1
-
         if flip_g2:
             g2 = -1
         
