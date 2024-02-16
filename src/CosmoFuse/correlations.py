@@ -9,6 +9,8 @@ import itertools
 from functools import partial
 import h5py
 import cupy as cp
+from scipy.special import binom
+
 
 class Correlation():
     
@@ -30,7 +32,10 @@ class Correlation():
         self.theta_center = theta_center
         self.n_patches = len(phi_center)
         self.fastmath = fastmath
-        self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
+        #self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
+        self.M_A_patch = M_a_patch
+        self.radius_filter = 5 * self.theta_Q
+        
         
         if mask is not None:
             self.map_inds = np.where(mask)[0]
@@ -110,21 +115,40 @@ class Correlation():
         cos_2phi = cos_phi*cos_phi - sin_phi*sin_phi
         sin_2phi = 2*sin_phi*cos_phi
 
-        Q = Q_T(vartheta)
+        Q = Q_T(vartheta, self.theta_Q)
 
         return cos_2phi, sin_2phi, Q
 
     def calculate_pairs_M_a(self, threads=1):
-        #TODO
-        pass
+        
+        self.Q_cos, self.Q_sin, self.Q_val, self.Q_inds, self.Q_patch_area = [], [], [], [], []
+        
+        for i in range(self.n_patches):    
+            
+            vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
+            pix_center = hp.ang2pix(self.nside, self.theta_center[i], self.phi_center[i])
+            patch_inds = hp.query_disc(self.nside, vec=vec, radius=np.radians(5*90/60))
+            Qpix_inds = np.intersect1d(patch_inds, self.map_inds)
+            ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
+            Qpix_inds = Qpix_inds[~np.isin(Qpix_inds, pix_center)]
+            Q_ra, Q_dec = pixel2RaDec(Qpix_inds, self.nside)
+            Q_cos, Q_sin, Q_val = self.get_pairs_patch_M_a(Q_ra, Q_dec, ra_center, dec_center)
+            
+            self.Q_cos.append(Q_cos.astype(np.float32))
+            self.Q_sin.append(Q_sin.astype(np.float32))
+            self.Q_val.append(Q_val.astype(np.float32))
+            self.Q_inds.append(Qpix_inds.astype(np.uint32))
+            self.Q_patch_area.append(Qpix_inds.size*hp.nside2pixarea(self.nside))
 
     def preprocess(self, threads=1):
         
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
         """
-        #TODO
-        pass
+        print("Calculating pairs for Aperture Mass...")
+        self.calculate_pairs_M_a(threads)
+        print("Calculating pairs for 2PCF...")
+        self.calculate_pairs_2PCF(threads)
 
     def save_pairs(self, filepath):
         with h5py.File(filepath, 'w') as fp:
@@ -141,16 +165,27 @@ class Correlation():
             
             for i in range (self.n_patches):
                 gp = fp.create_group(f'patch_{i:02d}')
+                
                 gp.create_dataset(f'pair_inds', data=self.pair_inds[i])
                 gp.create_dataset(f'pair_exp2phi', data=self.pair_exp2phi[i])
                 gp.create_dataset(f'bins', data=self.bins[i])
-
+                
+                gp.create_dataset(f'Q_inds', data=self.Q_inds[i])
+                gp.create_dataset(f'Q_cos', data=self.Q_cos[i])
+                gp.create_dataset(f'Q_sin', data=self.Q_sin[i])
+                gp.create_dataset(f'Q_val', data=self.Q_val[i])
+                gp.create_dataset(f'Q_patch_area', data=self.Q_patch_area[i])
     
     def load_pairs(self, filepath):
         
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
+        self.Q_inds = []
+        self.Q_cos = []
+        self.Q_sin = []
+        self.Q_val = []
+        self.Q_patch_area = []
 
         with h5py.File(filepath, 'r') as fp:
             self.nside = fp.attrs['nside']
@@ -160,7 +195,7 @@ class Correlation():
             self.patch_size = fp.attrs['patch_size']
             self.theta_Q = fp.attrs['theta_Q']
             self.n_patches = fp.attrs['n_patches']
-            self.map_inds = fp['map_inds']
+            self.map_inds = fp['map_inds'][:]
             self.phi_center = fp['phi_center'][:]
             self.theta_center = fp['theta_center'][:]
             
@@ -169,25 +204,19 @@ class Correlation():
                 self.pair_inds.append(gp['pair_inds'][:])
                 self.pair_exp2phi.append(gp['pair_exp2phi'][:])
                 self.bins.append(gp['bins'][:])
+                self.Q_inds.append(gp['Q_inds'][:])
+                self.Q_cos.append(gp['Q_cos'][:])
+                self.Q_sin.append(gp['Q_sin'][:])
+                self.Q_val.append(gp['Q_val'][:])
+                self.Q_patch_area.append(gp['Q_patch_area'][()])
     
-    def get_M_a(self, i, g1, g2, w):
-        M_a = self.M_A_patch(self.Q_inds[i], self.Q_cos[i], self.Q_sin[i], self.Q_val[i], g1, g2, w, self.Q_patch_area[i])
+    def get_M_a(self, g1, g2, w):
+        M_a = np.zeros(self.n_patches)
+        for i in range(self.n_patches):
+            M_a[i] = self.M_A_patch(self.Q_inds[i], self.Q_cos[i], self.Q_sin[i], self.Q_val[i], g1, g2, w, self.Q_patch_area[i])
         return M_a
     
-    def calculate_M_a(self, g1, g2, w, threads=1):
         
-        M_a = np.zeros(self.n_patches)
-        
-        with Pool(threads) as p:
-            result = p.map(partial(self.get_M_a, g1=g1, g2=g2, w=w), range(self.n_patches))
-        
-        for i in range(self.n_patches):
-            M_a[i] = result[i]
-        
-        self.M_a = M_a
-        
-
-
 class Correlation_CPU(Correlation):
     
     def __init__(self, nside, phi_center, theta_center, nbins=10, theta_min=10, theta_max=170, patch_size=90, theta_Q=90, mask=None, fastmath=True):
@@ -264,7 +293,7 @@ class Correlation_GPU(Correlation):
         temp_exp2phi = np.zeros((2,size), dtype=np.complex128)
         temp_bins = np.zeros((self.n_patches*self.nbins), dtype=np.uint32)
         temp_bins_tot = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
-             
+
         for i in range(self.n_patches):
             temp_inds[:,first_patch_ind[i]:first_patch_ind[i+1]] = self.pair_inds[i]
             temp_exp2phi[:,first_patch_ind[i]:first_patch_ind[i+1]] = self.pair_exp2phi[i]
@@ -298,17 +327,15 @@ class Correlation_GPU(Correlation):
             self.g22 = -self.g22
             
         
-    def get_all_xipm_cross(self):
+    def xipm(self, g11, g21, g12, g22, w1, w2, sumofweights):
         
-        gt1 = ((self.g11[self.inds_gpu[0]]) + 1j* self.g21[self.inds_gpu[0]]) * self.exp2phi_gpu[0]
-        gx1 = ((self.g12[self.inds_gpu[1]]) + 1j* self.g22[self.inds_gpu[1]]) * self.exp2phi_gpu[1]
-        gt2 = ((self.g12[self.inds_gpu[0]]) + 1j* self.g22[self.inds_gpu[0]]) * self.exp2phi_gpu[0]
-        gx2 = ((self.g11[self.inds_gpu[1]]) + 1j* self.g21[self.inds_gpu[1]]) * self.exp2phi_gpu[1]
+        g2 = w1[self.inds_gpu[0]]*((g11[self.inds_gpu[0]]) + 1j* g21[self.inds_gpu[0]]) * self.exp2phi_gpu[0]
+        g1 = w2[self.inds_gpu[1]]*((g12[self.inds_gpu[1]]) + 1j* g22[self.inds_gpu[1]]) * self.exp2phi_gpu[1]
+
+        xip = ((cp.add.reduceat(g1 * cp.conjugate(g2), self.tot_bins_gpu[:-1]))/sumofweights).reshape((self.n_patches, self.nbins))
+        xim = ((cp.add.reduceat(g1 * g2, self.tot_bins_gpu[:-1]))/sumofweights).reshape((self.n_patches, self.nbins))
         
-        xip = ((cp.add.reduceat(gt1 * cp.conjugate(gx1), self.tot_bins_gpu[:-1]) + cp.add.reduceat(gt2 * cp.conjugate(gx2), self.tot_bins_gpu[:-1]))/2*self.bins_gpu).reshape((self.n_patches, self.nbins))/2
-        xim = ((cp.add.reduceat(gx1 * gt1, self.tot_bins_gpu[:-1]) + cp.add.reduceat(gx2 * gt2, self.tot_bins_gpu[:-1]))/self.bins_gpu).reshape((self.n_patches, self.nbins))/2
-        
-        return xip.real, xim.real
+        return xip.real, xim.real   
         
     def __xipm(self):
         
@@ -336,3 +363,37 @@ class Correlation_GPU(Correlation):
         xip2, xim2 = self.__xipm_c()
         
         return (xip1 + xip2)/2, (xim1 + xim2)/2
+    
+    def get_full_tomo(self, shear_maps, w, sumofweights, flip_g1=True, flip_g2=False):
+        
+        nzbins = shear_maps.shape[0]
+        nzbin_combs = int(binom(nzbins+1, 2))
+        shear_maps_gpu = cp.asarray(shear_maps)
+        w_gpu = cp.asarray(w)
+        sumofweights_gpu = cp.asarray(sumofweights)
+        
+        if flip_g1:
+            shear_maps_gpu[:,0] *= -1
+
+        if flip_g2:
+            shear_maps_gpu[:,1] *= -1
+        
+        M_ap = np.zeros([nzbins, self.n_patches])
+        xim1 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
+        xim2 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
+        xip1 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
+        xip2 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
+        
+        k=0
+        for i in range(nzbins):
+            M_ap[i] = self.get_M_a(shear_maps[i,0], shear_maps[i,1], w[i])
+            for j in range(i, nzbins):
+                xip1[k], xim1[k] = self.xipm(shear_maps_gpu[i,0], shear_maps_gpu[i,1], shear_maps_gpu[j,0], shear_maps_gpu[j,1], w_gpu[i], w_gpu[j], sumofweights_gpu[0,k])
+                xip2[k], xim2[k] = self.xipm(shear_maps_gpu[j,0], shear_maps_gpu[j,1], shear_maps_gpu[i,0], shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
+                k += 1
+                
+        xip = (xip1 + xip2)/2
+        xim = (xim1 + xim2)/2
+        
+        return M_ap, xip.get(), xim.get()
+        

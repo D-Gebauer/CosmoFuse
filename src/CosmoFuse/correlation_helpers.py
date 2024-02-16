@@ -16,10 +16,8 @@ def rotate_shear(ra1, dec1, ra2, dec2):
 
 def M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area):
     
-    gt = g1[Q_inds]*Q_cos - g2[Q_inds]*Q_sin
-    gx = g1[Q_inds]*Q_sin + g2[Q_inds]*Q_cos
-
-    M_a_Re = Q_patch_area * np.sum(Q_w*gt*Q_val) / np.sum(Q_w)
+    gt = - g1[Q_inds]*Q_cos - g2[Q_inds]*Q_sin
+    M_a_Re = Q_patch_area * np.sum(Q_w[Q_inds]*gt*Q_val) / np.sum(Q_w[Q_inds])
 
     return M_a_Re
 
@@ -108,7 +106,7 @@ def getAngle(ra1, dec1, ra2, dec2, ra3=0, dec3=np.pi/2):
     return C
 
 
-def Q_T(self, theta):
+def Q_T(theta, theta_Q):
     """The compensated filter used for aperture mass.
 
     Args:
@@ -118,5 +116,5 @@ def Q_T(self, theta):
         (float): Value of compensated filter.
     """
     
-    theta_Q = np.radians(self.theta_Q/60)
+    theta_Q = np.radians(theta_Q/60)
     return theta**2/(4*np.pi*theta_Q**4)*np.exp(-theta**2/(2*theta_Q**2))
