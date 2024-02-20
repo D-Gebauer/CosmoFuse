@@ -192,6 +192,8 @@ class Correlation():
             self.nbins = fp.attrs['nbins']
             self.theta_min = fp.attrs['theta_min']
             self.theta_max = fp.attrs['theta_max']
+            self.binedges = np.geomspace(self.theta_min, self.theta_max, self.nbins+1)
+            self.bincenters = np.sqrt(self.binedges[1:] * self.binedges[:-1])*60*180/np.pi
             self.patch_size = fp.attrs['patch_size']
             self.theta_Q = fp.attrs['theta_Q']
             self.n_patches = fp.attrs['n_patches']
