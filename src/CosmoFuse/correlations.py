@@ -176,7 +176,10 @@ class Correlation():
                 gp.create_dataset(f'Q_val', data=self.Q_val[i])
                 gp.create_dataset(f'Q_patch_area', data=self.Q_patch_area[i])
     
-    def load_pairs(self, filepath):
+    def load_pairs(self, filepath, start_ind=0, stop_ind=None):
+        
+        if stop_ind is None:
+            stop_ind = self.n_patches
         
         self.pair_inds = []
         self.pair_exp2phi = []
@@ -196,12 +199,12 @@ class Correlation():
             self.bincenters = np.sqrt(self.binedges[1:] * self.binedges[:-1])*60*180/np.pi
             self.patch_size = fp.attrs['patch_size']
             self.theta_Q = fp.attrs['theta_Q']
-            self.n_patches = fp.attrs['n_patches']
+            self.n_patches = stop_ind - start_ind
             self.map_inds = fp['map_inds'][:]
-            self.phi_center = fp['phi_center'][:]
-            self.theta_center = fp['theta_center'][:]
+            self.phi_center = fp['phi_center'][start_ind:stop_ind]
+            self.theta_center = fp['theta_center'][start_ind:stop_ind]
             
-            for i in range(self.n_patches):
+            for i in range(start_ind, stop_ind):
                 gp = fp[f'patch_{i:02d}']
                 self.pair_inds.append(gp['pair_inds'][:])
                 self.pair_exp2phi.append(gp['pair_exp2phi'][:])

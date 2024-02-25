@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit
 import math
 
-@njit(fastmath=True)
+@njit(fastmath=False)
 def rotate_shear(ra1, dec1, ra2, dec2):
     cos_vartheta = np.cos(ra1 - ra2)*np.cos(dec2)*np.cos(dec1) + np.sin(dec2)*np.sin(dec1)
     sin_vartheta = np.sqrt(1-cos_vartheta**2)
