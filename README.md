@@ -5,6 +5,7 @@ A package for efficiently measuring integrated 3-point correlation functions on 
 The integrated 3-point correlation function probes squeezed configurations of the bispectrum without the computational expense of the full 3-point correlation function.
 
 The shear i3PCF is calculated with 
+
 $$ \zeta_{\pm} = \langle M_{ap} \xi_{\pm} \rangle $$
 
 where $M_{ap}$ is the aperture mass and $\xi_{\pm}$ are the 2PCFs. These are measured in patches. On a pixelised map the aperture mass is calculated as
@@ -16,6 +17,7 @@ where $A$ is the patch area, $w_p$ is the pixel's weight, $g_t$ is the tangentia
 The 2PCFs are calculated as:
 
 $$ \xi_+ = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2^*}}{\sum_{\text{pairs}}{w_1 w_2}} $$
+
 $$ \xi_- = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
 
 where $g_1$ and $g_2$ are the complex shear values rotated relative to the 2 positions ($g_i = g_x + i g_t$).
