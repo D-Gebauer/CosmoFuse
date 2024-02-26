@@ -1,5 +1,4 @@
 import numpy as np
-import coord
 from numba import njit
 from multiprocessing import Pool
 from .utils import pixel2RaDec, eval_func_tuple
@@ -369,7 +368,7 @@ class Correlation_GPU(Correlation):
         
         return (xip1 + xip2)/2, (xim1 + xim2)/2
     
-    def get_full_tomo(self, shear_maps, w, sumofweights, flip_g1=True, flip_g2=False):
+    def get_full_tomo(self, shear_maps, w, sumofweights, flip_g1=False, flip_g2=False):
         
         nzbins = shear_maps.shape[0]
         nzbin_combs = int(binom(nzbins+1, 2))

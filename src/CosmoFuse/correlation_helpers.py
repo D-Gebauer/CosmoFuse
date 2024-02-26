@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit
 import math
+import itertools
 
 @njit(fastmath=False)
 def rotate_shear(ra1, dec1, ra2, dec2):
@@ -118,3 +119,38 @@ def Q_T(theta, theta_Q):
     
     theta_Q = np.radians(theta_Q/60)
     return theta**2/(4*np.pi*theta_Q**4)*np.exp(-theta**2/(2*theta_Q**2))
+
+
+def zeta(M_ap, xip, xim):
+    """Calculate the i3PCF from aperture mass and local 2PCF.
+
+    Args:
+        M_ap (float): Aperture mass, shape:(nmaps, n_zbins, n_patches)
+        xip (float): Shear 2PCF, shape:(nmaps, n_correlations, n_patches, nbins)
+        xim (float): Shear 2PCF, shape:(nmaps, n_correlations, n_patches, nbins)
+
+    Returns:
+        (float): The i3PCF zetap & zetam.
+    """
+    
+    nmaps = M_ap.shape[0]
+    zbins = M_ap.shape[1]
+    nbins = xip.shape[3]
+    zbin_combs = np.array(list(itertools.combinations_with_replacement(range(zbins),2)))
+    zeta_combs = np.array(list(itertools.combinations_with_replacement(range(zbins),3)))
+    
+    zeta_2combs = list(range(len(zbin_combs)))
+    min = 0
+    for i in range(zbins-1):
+        min += zbins-i
+        for j in range(min, len(zbin_combs)):
+            zeta_2combs.append(j)
+    
+    zetap = np.zeros((nmaps, len(zeta_combs), nbins))
+    zetam = np.zeros((nmaps, len(zeta_combs), nbins))
+
+    for i, (z1, z2) in enumerate(zip(zeta_combs[:,0], zeta_2combs)):
+        zetap[:,i,:] = np.mean(M_ap[:,z1,:,None] * xip[:,z2], axis=1) - np.mean(M_ap[:,z1,:,None], axis=1) * np.mean(xip[:,z2], axis=1)
+        zetam[:,i,:] = np.mean(M_ap[:,z1,:,None] * xim[:,z2], axis=1) - np.mean(M_ap[:,z1,:,None], axis=1) * np.mean(xim[:,z2], axis=1)
+
+    return zetap, zetam
