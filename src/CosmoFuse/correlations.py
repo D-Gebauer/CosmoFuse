@@ -32,8 +32,7 @@ class Correlation():
         self.theta_center = theta_center
         self.n_patches = len(phi_center)
         self.fastmath = fastmath
-        #self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
-        self.M_A_patch = M_a_patch
+        self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
         self.radius_filter = 5 * self.theta_Q
         
         
@@ -227,6 +226,7 @@ class Correlation_CPU(Correlation):
     def __init__(self, nside, phi_center, theta_center, nbins=10, theta_min=10, theta_max=170, patch_size=90, theta_Q=90, mask=None, fastmath=True):
         super().__init__(nside, phi_center, theta_center, nbins, theta_min, theta_max, patch_size, theta_Q, mask, fastmath)
         self.xipm_patch = njit(fastmath=fastmath)(xipm_patch)
+        print("CPU correlation is still in development, it's better/faster too use GPU correlation if possible.")
         
     def load_maps(self, g11, g21, g12, g22, w1, w2, flip_g1=True, flip_g2=False):
         self.g11 = g11
