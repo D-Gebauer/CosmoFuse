@@ -1,9 +1,14 @@
 import numpy as np
 from .correlations import Correlation
 import healpy as hp
-import cupy as cp
 from scipy.special import binom
+from sys import exit
 
+try:
+    import cupy as cp
+except ImportError:
+    print("Cupy not installed. Please install Cupy or use Correlation_GPU.")
+    exit(1)
 
 class Correlation_GPU(Correlation):
     

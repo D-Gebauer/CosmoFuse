@@ -29,8 +29,11 @@ where $g_1$ and $g_2$ are the complex shear values rotated relative to the 2 pos
 - Reuse pairs to measure i3PCF across maps
 
 ## Installation
+Install using:
 
     pip install git+https://github.com/D-Gebauer/CosmoFuse/tree/main
+
+Note: to use full functionality including correlation_GPU, Cupy has to be installed additionally.
 
 ## USAGE
 

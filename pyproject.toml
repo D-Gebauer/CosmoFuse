@@ -16,7 +16,6 @@ dependencies = [
     "numba>=0.50",
     "healpy>=1.10",
     "h5py>=3.0",
-    "cupy>=12.0",
     "matplotlib>=3.5",
 ]
 
