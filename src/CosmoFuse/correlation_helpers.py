@@ -3,18 +3,6 @@ from numba import njit
 import math
 import itertools
 
-@njit(fastmath=False)
-def rotate_shear(ra1, dec1, ra2, dec2):
-    cos_vartheta = np.cos(ra1 - ra2)*np.cos(dec2)*np.cos(dec1) + np.sin(dec2)*np.sin(dec1)
-    sin_vartheta = np.sqrt(1-cos_vartheta**2)
-    cos_phi1 = np.sin(ra1 - ra2)*np.cos(dec1) / sin_vartheta
-    sin_phi1 = (np.cos(dec1)*np.sin(dec2) - np.sin(dec1)*np.cos(dec2)*np.cos(ra1 - ra2)) / sin_vartheta
-    cos_2phi = cos_phi1*cos_phi1 - sin_phi1*sin_phi1
-    sin_2phi = 2*sin_phi1*cos_phi1
-    
-    return cos_2phi, sin_2phi
-
-
 def M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area):
     
     gt = - g1[Q_inds]*Q_cos - g2[Q_inds]*Q_sin

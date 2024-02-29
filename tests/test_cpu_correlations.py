@@ -3,8 +3,6 @@ import numpy as np
 import treecorr
 import healpy as hp
 import sys
-import matplotlib.pyplot as plt
-import time
 
 sys.path.insert(1,'../src/')
 
