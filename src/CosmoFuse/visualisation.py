@@ -76,7 +76,7 @@ def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', f
                     ax[i,j].axvline(theta_obs[i], c='k', ls='--')
                 ax[i,j].set_xlabel(param_names[i], fontsize=20)
                 if label:
-                    ax[i,j].legend()
+                    ax[i,j].legend(fontsize=20)
                 continue
             
             if theta_obs is not None:
