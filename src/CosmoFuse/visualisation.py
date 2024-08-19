@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
-def contours(ax, xplot, yplot, labels, truths, bins=200, smooth=0.5):
+def contours(ax, xplot, yplot, labels, truths=None, fill=True, colour='k', bins=200, smooth=0.5):
     
     hist, xedges, yedges = np.histogram2d(xplot, yplot, bins)
     hist = hist.T
@@ -44,8 +44,9 @@ def contours(ax, xplot, yplot, labels, truths, bins=200, smooth=0.5):
     #ax.title("Posterior Contours", fontsize=22)
     ax.set_xlabel(labels[0], fontsize=20)
     ax.set_ylabel(labels[1], fontsize=20)
-    ax.contourf(X, Y, Histsmooth, 40, cmap='Spectral_r')
-    CS = ax.contour(X, Y, Histsmooth, np.sort(clevels), colors='k')
+    if fill:
+        ax.contourf(X, Y, Histsmooth, 40, cmap='Spectral_r')
+    CS = ax.contour(X, Y, Histsmooth, np.sort(clevels), colors=colour)
 
 
     fmt = {}
@@ -54,39 +55,36 @@ def contours(ax, xplot, yplot, labels, truths, bins=200, smooth=0.5):
         fmt[l] = s
 
     ax.clabel(CS, CS.levels, fmt=fmt, inline=True, fontsize=22)
-    ax.scatter(truths[0], truths[1], marker='x', color='k', s=100, label="True Value")
+    if truths is not None:
+        ax.scatter(truths[0], truths[1], marker='x', color='k', s=100, label="True Value")
     
-def make_corner_plot(dist, param_names, theta_obs, smooth=0.5):
+def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', fig_ax=None, smooth=0.5, label=None):
     ndims = dist.shape[1]
-    fig,ax = plt.subplots(ndims,ndims, figsize=(12,12))
+    if fig_ax is None:
+        fig,ax = plt.subplots(ndims,ndims, figsize=(ndims*6,ndims*6))
+    else:
+        fig, ax = fig_ax
 
     for i in range(ndims):
         for j in range(i+1):
             if i==j:
-                ax[i,j].hist(dist[:,i], bins='auto', density=True)
-                ax[i,j].axvline(theta_obs[i], c='k', ls='--')
+                if fill:
+                    ax[i,j].hist(dist[:,i], bins='auto', density=True, color=colour, label=label)
+                else:
+                    ax[i,j].hist(dist[:,i], bins='auto', histtype='step', density=True, color=colour, label=label)
+                if theta_obs is not None:
+                    ax[i,j].axvline(theta_obs[i], c='k', ls='--')
                 ax[i,j].set_xlabel(param_names[i], fontsize=20)
+                if label:
+                    ax[i,j].legend()
                 continue
             
-            contours(ax[i,j], dist[:,j], dist[:,i], [param_names[j], param_names[i]], [theta_obs[j], theta_obs[i]], smooth=smooth)
-            fig.delaxes(ax[j,i])
-            
-    fig.tight_layout()
-
-def make_corner_plot(dist, param_names, theta_obs, smooth=0.5):
-    ndims = dist.shape[1]
-    fig,ax = plt.subplots(ndims,ndims, figsize=(ndims*6,ndims*6))
-
-    for i in range(ndims):
-        for j in range(i+1):
-            if i==j:
-                ax[i,j].hist(dist[:,i], bins='auto', density=True)
-                ax[i,j].axvline(theta_obs[i], c='k', ls='--')
-                ax[i,j].set_xlabel(param_names[i], fontsize=20)
-                continue
-            
-            contours(ax[i,j], dist[:,j], dist[:,i], [param_names[j], param_names[i]], [theta_obs[j], theta_obs[i]], smooth=smooth)
-            fig.delaxes(ax[j,i])
+            if theta_obs is not None:
+                contours(ax[i,j], dist[:,j], dist[:,i], [param_names[j], param_names[i]], [theta_obs[j], theta_obs[i]], colour=colour, fill=fill, smooth=smooth)
+            else:
+                contours(ax[i,j], dist[:,j], dist[:,i], [param_names[j], param_names[i]], colour=colour, fill=fill, smooth=smooth)
+            if fig_ax is None:
+                fig.delaxes(ax[j,i])
             
     fig.tight_layout()
     
