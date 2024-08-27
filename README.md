@@ -39,7 +39,7 @@ Note: to use full functionality including correlation_GPU, Cupy has to be instal
 
 First create a Correlation object:
 
-    from CosmoFuse.correlations import Correlation_GPU
+    from CosmoFuse.correlations_GPU import Correlation_GPU
     correlation = Correlation_GPU(nside,                        # resolution of healpy maps
                                  phi_center, theta_center,      # center of patches (in radians)
                                  patch_size=90,                 # size of each patch (in arcminutes)
