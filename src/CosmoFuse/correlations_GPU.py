@@ -139,7 +139,7 @@ class Correlation_GPU(Correlation):
         
         
         
-class Correlation_GPU_lowmem(Correlation):
+class Correlation_GPU_lowmem(Correlation_GPU):
     
     def __init__(self, nside, phi_center, theta_center, nbins=10, theta_min=10, theta_max=170, patch_size=90, theta_Q=90, mask=None, fastmath=True, device=0):
         self.device = device
@@ -182,8 +182,8 @@ class Correlation_GPU_lowmem(Correlation):
         xip, xim = cp.zeros((self.n_patches*self.nbins)), cp.zeros((self.n_patches*self.nbins))
         
         for tot_ind in range(self.n_patches*self.nbins):
-            xip[tot_ind] = cp.sum(g1[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]] * cp.conjugate(g2[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]]))/(sumofweights[tot_ind])
-            xim[tot_ind] = cp.sum(g1[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]] * g2[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]])/(sumofweights[tot_ind])
+            xip[tot_ind] = cp.sum(g1[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]] * cp.conjugate(g2[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]]))/(sumofweights[tot_ind]).real
+            xim[tot_ind] = cp.sum(g1[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]] * g2[self.tot_bins_gpu[tot_ind]:self.tot_bins_gpu[tot_ind+1]])/(sumofweights[tot_ind]).real
         
         return xip.real, xim.real
     
@@ -192,7 +192,7 @@ class Correlation_GPU_lowmem(Correlation):
         
         nzbins = shear_maps.shape[0]
         nzbin_combs = int(binom(nzbins+1, 2))
-        shear_maps_gpu = cp.asarray(shear_maps.astype(np.float(16)))
+        shear_maps_gpu = cp.asarray(shear_maps.astype(np.float16))
         w_gpu = cp.asarray(w.astype(np.float16))
         sumofweights_gpu = cp.asarray(sumofweights.astype(np.float16))
         
@@ -203,10 +203,10 @@ class Correlation_GPU_lowmem(Correlation):
             g2 = -1
         
         M_ap = np.zeros([nzbins, self.n_patches])
-        xim1 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
-        xim2 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
-        xip1 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
-        xip2 = cp.zeros([nzbin_combs, self.n_patches, self.nbins])
+        xim1 = cp.zeros([nzbin_combs, self.n_patches * self.nbins])
+        xim2 = cp.zeros([nzbin_combs, self.n_patches * self.nbins])
+        xip1 = cp.zeros([nzbin_combs, self.n_patches * self.nbins])
+        xip2 = cp.zeros([nzbin_combs, self.n_patches * self.nbins])
         
         k=0
         for i in range(nzbins):
@@ -220,7 +220,7 @@ class Correlation_GPU_lowmem(Correlation):
                     xip2[k], xim2[k] = self.xipm(g1*shear_maps_gpu[j,0], g2*shear_maps_gpu[j,1], g1*shear_maps_gpu[i,0], g2*shear_maps_gpu[i,1], w_gpu[j], w_gpu[i], sumofweights_gpu[1,k])
                 k += 1
                 
-        xip = (xip1 + xip2)/2
-        xim = (xim1 + xim2)/2
+        xip = ((xip1 + xip2)/2).reshape((nzbin_combs, self.n_patches, self.nbins))
+        xim = ((xim1 + xim2)/2).reshape((nzbin_combs, self.n_patches, self.nbins))
         
         return M_ap, xip.get(), xim.get()

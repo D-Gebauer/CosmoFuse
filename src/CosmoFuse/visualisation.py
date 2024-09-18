@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
+from scipy.stats import gaussian_kde
 
 def contours(ax, xplot, yplot, labels, truths=None, fill=True, colour='k', bins=200, smooth=0.5):
     
@@ -58,20 +59,40 @@ def contours(ax, xplot, yplot, labels, truths=None, fill=True, colour='k', bins=
     if truths is not None:
         ax.scatter(truths[0], truths[1], marker='x', color='k', s=100, label="True Value")
     
-def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', fig_ax=None, smooth=0.5, label=None):
+def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', fig_ax=None, smooth=0.5, label=None, kde=False):
     ndims = dist.shape[1]
     if fig_ax is None:
         fig,ax = plt.subplots(ndims,ndims, figsize=(ndims*6,ndims*6))
+        fig.subplots_adjust(wspace=0.0, hspace=0.0)
+        
     else:
         fig, ax = fig_ax
 
     for i in range(ndims):
         for j in range(i+1):
+            
+            if i!=0 and j==0:
+                ax[i,j].set_ylabel(param_names[j], fontsize=20)
+            else:
+                ax[i,j].set_yticks([])
+            if i == ndims-1:
+                ax[i,j].set_xlabel(param_names[i], fontsize=16)
+            else:
+                ax[i,j].set_xticks([])
+            
+            
+            
             if i==j:
                 if fill:
                     ax[i,j].hist(dist[:,i], bins='auto', density=True, color=colour, label=label)
                 else:
-                    ax[i,j].hist(dist[:,i], bins='auto', histtype='step', density=True, color=colour, label=label)
+                    if kde:
+                        param_kde = gaussian_kde(dist[::10,i])
+                        x = np.linspace(dist[:,i].min(), dist[:,i].max(), 1000)
+                        ax[i,j].plot(x, param_kde(x), color=colour, label=label)
+                    else:
+                        ax[i,j].hist(dist[:,i], bins='auto', histtype='step', density=True, color=colour, label=label)
+                    
                 if theta_obs is not None:
                     ax[i,j].axvline(theta_obs[i], c='k', ls='--')
                 ax[i,j].set_xlabel(param_names[i], fontsize=20)
@@ -86,7 +107,7 @@ def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', f
             if fig_ax is None:
                 fig.delaxes(ax[j,i])
             
-    fig.tight_layout()
+    #fig.tight_layout()
     
     return fig, ax
     
