@@ -41,10 +41,6 @@ def contours(ax, xplot, yplot, labels, truths=None, fill=True, colour='k', bins=
     X, Y = np.meshgrid(xbin, ybin)
  
 
-    
-    #ax.title("Posterior Contours", fontsize=22)
-    ax.set_xlabel(labels[0], fontsize=20)
-    ax.set_ylabel(labels[1], fontsize=20)
     if fill:
         ax.contourf(X, Y, Histsmooth, 40, cmap='Spectral_r')
     CS = ax.contour(X, Y, Histsmooth, np.sort(clevels), colors=colour)
@@ -59,7 +55,7 @@ def contours(ax, xplot, yplot, labels, truths=None, fill=True, colour='k', bins=
     if truths is not None:
         ax.scatter(truths[0], truths[1], marker='x', color='k', s=100, label="True Value")
     
-def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', fig_ax=None, smooth=0.5, label=None, kde=False):
+def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', fig_ax=None, smooth=0.5, label=None, kde=False, result=False, fontsize=16):
     ndims = dist.shape[1]
     if fig_ax is None:
         fig,ax = plt.subplots(ndims,ndims, figsize=(ndims*6,ndims*6))
@@ -71,33 +67,36 @@ def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', f
     for i in range(ndims):
         for j in range(i+1):
             
-            if i!=0 and j==0:
-                ax[i,j].set_ylabel(param_names[j], fontsize=20)
+            if j==0: 
+                if i!=0:
+                    ax[i,j].set_ylabel(param_names[i], fontsize=fontsize)
             else:
-                ax[i,j].set_yticks([])
+                ax[i,j].set_yticklabels([])
             if i == ndims-1:
-                ax[i,j].set_xlabel(param_names[i], fontsize=16)
+                ax[i,j].set_xlabel(param_names[j], fontsize=fontsize)
             else:
-                ax[i,j].set_xticks([])
+                ax[i,j].set_xticklabels([])
             
-            
+            ax[i,j].tick_params(axis='both', which='major', size=12, direction='inout', labelsize=fontsize-4)
+            ax[i,j].tick_params(axis='both', which='minor', size=10, direction='inout')
             
             if i==j:
                 if fill:
-                    ax[i,j].hist(dist[:,i], bins='auto', density=True, color=colour, label=label)
+                    counts, binedges, _ = ax[i,j].hist(dist[:,i], bins='auto', density=True, color=colour, label=label)
                 else:
-                    if kde:
-                        param_kde = gaussian_kde(dist[::10,i])
-                        x = np.linspace(dist[:,i].min(), dist[:,i].max(), 1000)
-                        ax[i,j].plot(x, param_kde(x), color=colour, label=label)
-                    else:
-                        ax[i,j].hist(dist[:,i], bins='auto', histtype='step', density=True, color=colour, label=label)
+                    counts, binedges, _ = ax[i,j].hist(dist[:,i], bins='auto', histtype='step', density=True, color=colour, label=label)
                     
                 if theta_obs is not None:
                     ax[i,j].axvline(theta_obs[i], c='k', ls='--')
-                ax[i,j].set_xlabel(param_names[i], fontsize=20)
                 if label:
-                    ax[i,j].legend(fontsize=20)
+                    ax[i,j].legend(fontsize=fontsize-4)
+                
+                if result:
+                    bins = (binedges[1:] + binedges[:-1]) / 2
+                    best = bins[np.argmax(counts)]
+                    var = np.std(dist[:,i])
+                    ax[i,j].set_title(rf"{param_names[i]}$ = {best:.2f} \pm {var:.2f}$", fontsize=fontsize+2)
+                
                 continue
             
             if theta_obs is not None:
@@ -107,8 +106,6 @@ def make_corner_plot(dist, param_names, theta_obs=None, fill=True, colour='k', f
             if fig_ax is None:
                 fig.delaxes(ax[j,i])
             
-    #fig.tight_layout()
-    
     return fig, ax
     
     
