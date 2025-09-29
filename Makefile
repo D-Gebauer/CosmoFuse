@@ -9,21 +9,18 @@ install: ## Install the package
 
 install-dev: ## Install the package with development dependencies
 	pip install -e ".[dev]"
-	pre-commit install
 
 test: ## Run tests
-	pytest
+	conda run -n cosmo python -m unittest discover tests/ -v
 
 test-cov: ## Run tests with coverage
-	pytest --cov=CosmoFuse --cov-report=html --cov-report=term-missing
+	conda run -n cosmo pytest --cov=CosmoFuse --cov-report=html --cov-report=term-missing
 
-lint: ## Run linting
-	flake8 src tests
-	mypy src
+test-pytest: ## Run tests with pytest
+	conda run -n cosmo pytest tests/ -v
 
-format: ## Format code
-	black src tests
-	isort src tests
+test-env: ## Run tests in specific environment (usage: make test-env ENV=myenv)
+	conda run -n $(ENV) python -m unittest discover tests/ -v
 
 clean: ## Clean build artifacts
 	rm -rf build/
