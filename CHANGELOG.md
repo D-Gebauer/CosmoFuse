@@ -29,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation and error handling
 - Logging support
 - Comprehensive test suite
-- Pre-commit hooks for code quality
 - Makefile for common development tasks
 - Proper package structure with __init__.py exports
 
@@ -45,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Variable naming conflicts (e.g., `bin` -> `bin_idx`, `min` -> `min_idx`)
 - Code style issues and formatting
 
-## [0.2.0] - Previous Release
+## [0.2.0]
 
 ### Added
 - Initial implementation of integrated 3-point correlation functions

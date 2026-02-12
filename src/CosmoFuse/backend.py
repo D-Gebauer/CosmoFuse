@@ -75,6 +75,7 @@ def get_backend(device='auto'):
             device_id = 0
             device_type = 'gpu'
         except ImportError:
+            warnings.warn("Cupy not installed, falling back to CPU (numpy).")
             device_id = None
             device_type = 'cpu'
     else:

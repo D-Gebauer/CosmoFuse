@@ -1,3 +1,7 @@
+[![codecov](https://codecov.io/github/D-Gebauer/CosmoFuse/graph/badge.svg?token=F4JC08UEJP)](https://codecov.io/github/D-Gebauer/CosmoFuse)
+
+
+
 # CosmoFuse
 
 A package for efficiently measuring integrated 3-point correlation functions on GPU/CPU written in Python 3.

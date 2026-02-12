@@ -79,6 +79,24 @@ class TestCorrelationHelpers(unittest.TestCase):
         self.assertGreaterEqual(angle, 0.0)
         self.assertLessEqual(angle, np.pi)
 
+    def test_getAngle_right_angle(self):
+        """Test getAngle against an independent vector-based formula."""
+        ra1, dec1 = 0.0, 0.0
+        ra2, dec2 = 0.0, np.pi / 2
+        ra3, dec3 = np.pi / 2, 0.0
+
+        angle = getAngle(ra1, dec1, ra2, dec2, ra3, dec3)
+
+        c1 = np.array(radec_to_xyz(ra1, dec1))
+        c2 = np.array(radec_to_xyz(ra2, dec2))
+        c3 = np.array(radec_to_xyz(ra3, dec3))
+        sin_term = np.dot(c1, np.cross(c2, c3))
+        cos_term = np.dot(np.cross(c1, c2), np.cross(c1, c3))
+        expected = np.arctan2(sin_term, cos_term)
+
+        self.assertIsInstance(angle, float)
+        np.testing.assert_allclose(angle, expected, rtol=0.0, atol=1e-7)
+
     def test_Q_T(self):
         """Test Q_T function."""
         theta = 1.0

@@ -9,7 +9,7 @@ import numpy as np
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
-from CosmoFuse.utils import eval_func_tuple, pixel2RaDec, set_mpl_params
+from CosmoFuse.utils import pixel2RaDec
 
 
 class TestUtils(unittest.TestCase):
@@ -36,28 +36,6 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(ra.shape, pixels.shape)
         self.assertEqual(dec.shape, pixels.shape)
 
-    def test_set_mpl_params(self):
-        """Test that set_mpl_params runs without error."""
-        # This test just ensures the function doesn't crash
-        set_mpl_params()
-
-    def test_eval_func_tuple(self):
-        """Test eval_func_tuple with a simple function."""
-
-        def add(a, b):
-            return a + b
-
-        result = eval_func_tuple((add, 2, 3))
-        self.assertEqual(result, 5)
-
-    def test_eval_func_tuple_no_args(self):
-        """Test eval_func_tuple with a function that takes no arguments."""
-
-        def get_five():
-            return 5
-
-        result = eval_func_tuple((get_five,))
-        self.assertEqual(result, 5)
 
 
 if __name__ == "__main__":

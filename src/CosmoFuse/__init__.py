@@ -7,8 +7,7 @@ on GPU/CPU, with support for shear measurements and aperture mass calculations.
 
 from .correlation_helpers import zeta
 from .correlations import Correlation
-from .utils import pixel2RaDec, set_mpl_params
-from .visualisation import contours, make_corner_plot
+from .utils import pixel2RaDec
 
 __version__ = "3.0.0"
 __author__ = "David Gebauer"
@@ -18,7 +17,4 @@ __all__ = [
     "Correlation",
     "zeta",
     "pixel2RaDec",
-    "set_mpl_params",
-    "contours",
-    "make_corner_plot",
 ]

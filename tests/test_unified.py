@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 import sys
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,15 +35,17 @@ class TestUnifiedCorrelation(unittest.TestCase):
     def test_auto_device_fallback(self):
         # Without cupy, auto should fallback to cpu
         with patch.dict('sys.modules', {'cupy': None}):
-             corr = Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                nbins=self.nbins,
-                device='auto'
-            )
-             # Depending on implementation, device attribute might remain 'auto' but backend is numpy
-             self.assertEqual(corr.backend.name, 'numpy')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                corr = Correlation(
+                    nside=self.nside,
+                    phi_center=self.phi_center,
+                    theta_center=self.theta_center,
+                    nbins=self.nbins,
+                    device='auto'
+                )
+                # Depending on implementation, device attribute might remain 'auto' but backend is numpy
+                self.assertEqual(corr.backend.name, 'numpy')
 
     def test_gpu_device_missing_cupy(self):
         # Should raise ImportError or warning+fallback?
