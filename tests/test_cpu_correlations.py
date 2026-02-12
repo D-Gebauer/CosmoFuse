@@ -69,7 +69,7 @@ class TestCPUCorrelation(unittest.TestCase):
             brute=True,
             metric="Arc",
             bin_slop=0.0,
-            ang_slop=0.0,
+            angle_slop=0.0,
         )
 
         for i in range(len(self.theta_center)):
