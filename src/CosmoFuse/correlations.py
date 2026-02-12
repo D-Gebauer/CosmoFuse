@@ -1,4 +1,5 @@
 import itertools
+import logging
 from multiprocessing import Pool
 from typing import List, Optional, Tuple, Union
 
@@ -6,9 +7,13 @@ import h5py
 import healpy as hp
 import numpy as np
 from numba import njit
+from scipy.special import binom
 
+from .backend import get_backend
 from .correlation_helpers import Q_T, M_a_patch, getAngle, xipm_patch
 from .utils import eval_func_tuple, pixel2RaDec
+
+logger = logging.getLogger(__name__)
 
 
 class Correlation:
@@ -32,6 +37,7 @@ class Correlation:
         n_patches: Number of patches
         fastmath: Whether to use fastmath in JIT compiled functions
         map_inds: Indices of valid pixels in the mask
+        device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
     """
 
     def __init__(
@@ -46,6 +52,7 @@ class Correlation:
         theta_Q: float = 90,
         mask: Optional[np.ndarray] = None,
         fastmath: bool = True,
+        device: Union[str, int] = "auto",
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -60,6 +67,7 @@ class Correlation:
             theta_Q: Size of compensated filter in arcminutes
             mask: Optional mask array
             fastmath: Whether to use fastmath in JIT compiled functions
+            device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
 
         Raises:
             ValueError: If input parameters are invalid
@@ -103,6 +111,32 @@ class Correlation:
             self.map_inds = np.where(mask)[0]
         else:
             self.map_inds = np.arange(hp.nside2npix(self.nside))
+
+        self.backend = get_backend(device)
+        self.device = device
+
+        # CPU-side storage for pairs (lists of arrays)
+        self.pair_inds = []
+        self.pair_exp2phi = []
+        self.bins = []
+
+        # Attributes for prepared data (flattened and moved to device)
+        self.inds_dev = None
+        self.exp2phi_dev = None
+        self.bins_dev = None
+        self.tot_bins_dev = None
+        self.ntotpairs = 0
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'backend' in state:
+            del state['backend']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Re-initialize backend
+        self.backend = get_backend(self.device)
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -172,9 +206,6 @@ class Correlation:
                 pair_inds.append(result[0])
                 pair_exp2phi.append(result[1])
                 bins.append(result[2])
-
-                # Progress tracking could be added here with logging
-                pass
 
         else:
             with Pool(threads) as p:
@@ -337,6 +368,215 @@ class Correlation:
             )
         return M_a
 
+    def prepare(self):
+        """Prepares arrays for correlation calculation (flattens and moves to device)."""
+        size = 0
+        ninds = []
+        for i in range(self.n_patches):
+            patchsize = np.sum(self.bins[i])
+            size += patchsize
+            ninds.append(patchsize)
+
+        first_patch_ind = np.append(0, np.cumsum(ninds)).astype(int)
+        temp_inds = np.zeros((2, int(size)), dtype=np.uint32)
+        temp_exp2phi = np.zeros((2, int(size)), dtype=np.complex128)
+        temp_bins = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
+        temp_bins_tot = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
+
+        for i in range(self.n_patches):
+            temp_inds[:, first_patch_ind[i] : first_patch_ind[i + 1]] = self.pair_inds[
+                i
+            ]
+            temp_exp2phi[:, first_patch_ind[i] : first_patch_ind[i + 1]] = (
+                self.pair_exp2phi[i]
+            )
+            temp_bins[i * self.nbins : (i + 1) * self.nbins] = self.bins[i]
+            temp_bins_tot[i * self.nbins : (i + 1) * self.nbins] = (
+                first_patch_ind[i] + self.bins[i].cumsum()
+            )
+        temp_bins_tot = np.append([0], temp_bins_tot)
+
+        # Move to backend device
+        self.inds_dev = self.backend.to_device(temp_inds)
+        self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
+        self.bins_dev = self.backend.to_device(temp_bins)
+        self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
+        self.ntotpairs = size
+
+    def load_maps(
+        self, g11, g21, g12, g22, w1, w2, sumofweights=None, flip_g1=True, flip_g2=False
+    ):
+        if self.inds_dev is None:
+            self.prepare()
+
+        self.g11 = self.backend.to_device(g11)
+        self.g21 = self.backend.to_device(g21)
+        self.g12 = self.backend.to_device(g12)
+        self.g22 = self.backend.to_device(g22)
+        self.w1 = self.backend.to_device(w1)
+        self.w2 = self.backend.to_device(w2)
+
+        if sumofweights is None:
+            self.sumofweights = self.backend.add.reduceat(
+                self.w1[self.inds_dev[0]] * self.w2[self.inds_dev[1]],
+                self.tot_bins_dev[:-1],
+            )
+        else:
+            self.sumofweights = sumofweights
+
+        if flip_g1:
+            self.g11 = -self.g11
+            self.g12 = -self.g12
+        if flip_g2:
+            self.g21 = -self.g21
+            self.g22 = -self.g22
+
+    def xipm(self, g11, g21, g12, g22, w1, w2, sumofweights):
+        # Arrays should already be on device if passed correctly, or we assume they are.
+        # But xipm is called with slices often, which are views.
+        # The arguments passed to xipm here are expected to be on the device.
+
+        if self.inds_dev is None:
+            self.prepare()
+
+        g2 = (
+            w1[self.inds_dev[0]]
+            * ((g11[self.inds_dev[0]]) + 1j * g21[self.inds_dev[0]])
+            * self.exp2phi_dev[0]
+        )
+        g1 = (
+            w2[self.inds_dev[1]]
+            * ((g12[self.inds_dev[1]]) + 1j * g22[self.inds_dev[1]])
+            * self.exp2phi_dev[1]
+        )
+
+        xip = (
+            (self.backend.add.reduceat(g1 * self.backend.conjugate(g2), self.tot_bins_dev[:-1]))
+            / sumofweights
+        ).reshape((self.n_patches, self.nbins))
+        xim = (
+            (self.backend.add.reduceat(g1 * g2, self.tot_bins_dev[:-1])) / sumofweights
+        ).reshape((self.n_patches, self.nbins))
+
+        # Real parts
+        return xip.real, xim.real
+
+    def get_all_xipm(self):
+        xip1, xim1 = self.xipm(
+            self.g11,
+            self.g21,
+            self.g12,
+            self.g22,
+            self.w1,
+            self.w2,
+            self.sumofweights,
+        )
+        xip2, xim2 = self.xipm(
+            self.g12,
+            self.g22,
+            self.g11,
+            self.g21,
+            self.w2,
+            self.w1,
+            self.sumofweights,
+        )
+
+        return (xip1 + xip2) / 2, (xim1 + xim2) / 2
+
+    def get_full_tomo(self, shear_maps, w, sumofweights, flip_g1=False, flip_g2=False):
+        nzbins = shear_maps.shape[0]
+        nzbin_combs = int(binom(nzbins + 1, 2))
+
+        # Move inputs to device
+        shear_maps_dev = self.backend.to_device(shear_maps)
+        w_dev = self.backend.to_device(w)
+        sumofweights_dev = self.backend.to_device(sumofweights)
+
+        g1, g2 = 1, 1
+        if flip_g1:
+            g1 = -1
+        if flip_g2:
+            g2 = -1
+
+        M_ap = np.zeros([nzbins, self.n_patches])
+
+        # Results on device
+        xim1 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
+        xim2 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
+        xip1 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
+        xip2 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
+
+        k = 0
+        for i in range(nzbins):
+            # M_a calculation remains on CPU as it uses numba njit on CPU arrays typically?
+            # get_M_a uses self.M_A_patch which is a njit function.
+            # It expects CPU arrays? Let's check get_M_a.
+            # It uses self.Q_inds[i], self.Q_cos[i] etc which are lists of numpy arrays (CPU).
+            # So shear_maps and w passed to it must be CPU arrays.
+            # shear_maps[i, 0] is a numpy array view if shear_maps is numpy array.
+
+            # Note: shear_maps passed to this function is likely numpy array.
+            # shear_maps_dev is the device copy.
+
+            M_ap[i] = self.get_M_a(g1 * shear_maps[i, 0], g2 * shear_maps[i, 1], w[i])
+            for j in range(i, nzbins):
+                if i == j:
+                    xip1[k], xim1[k] = self.xipm(
+                        g1 * shear_maps_dev[i, 0],
+                        g2 * shear_maps_dev[i, 1],
+                        g1 * shear_maps_dev[j, 0],
+                        g2 * shear_maps_dev[j, 1],
+                        w_dev[i],
+                        w_dev[j],
+                        sumofweights_dev[0, k],
+                    )
+                    xip2[k], xim2[k] = xip1[k], xim1[k]
+                else:
+                    xip1[k], xim1[k] = self.xipm(
+                        g1 * shear_maps_dev[i, 0],
+                        g2 * shear_maps_dev[i, 1],
+                        g1 * shear_maps_dev[j, 0],
+                        g2 * shear_maps_dev[j, 1],
+                        w_dev[i],
+                        w_dev[j],
+                        sumofweights_dev[0, k],
+                    )
+                    xip2[k], xim2[k] = self.xipm(
+                        g1 * shear_maps_dev[j, 0],
+                        g2 * shear_maps_dev[j, 1],
+                        g1 * shear_maps_dev[i, 0],
+                        g2 * shear_maps_dev[i, 1],
+                        w_dev[j],
+                        w_dev[i],
+                        sumofweights_dev[1, k],
+                    )
+                k += 1
+
+        xip = (xip1 + xip2) / 2
+        xim = (xim1 + xim2) / 2
+
+        # Return as numpy arrays
+        return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
+
+    def calculate_2PCF(self, threads=1):
+        """
+        Calculates the 2PCF for the loaded maps.
+
+        This method computes xip and xim using the loaded maps (loaded via load_maps).
+        It mimics the behavior of the old Correlation_CPU.calculate_2PCF but uses the vectorized xipm implementation.
+        """
+        # Ensure data is prepared
+        if self.inds_dev is None:
+             self.prepare()
+
+        # If maps are not loaded, this will fail.
+        # But wait, calculate_2PCF is usually called after load_maps.
+
+        xip, xim = self.get_all_xipm()
+        self.xip = self.backend.to_numpy(xip)
+        self.xim = self.backend.to_numpy(xim)
+        return self.xip, self.xim
+
 
 class Correlation_CPU(Correlation):
     def __init__(
@@ -352,6 +592,7 @@ class Correlation_CPU(Correlation):
         mask=None,
         fastmath=True,
     ):
+        logger.warning("Correlation_CPU is deprecated. Use Correlation(device='cpu') instead.")
         super().__init__(
             nside,
             phi_center,
@@ -363,90 +604,5 @@ class Correlation_CPU(Correlation):
             theta_Q,
             mask,
             fastmath,
+            device='cpu'
         )
-        self.xipm_patch = njit(fastmath=fastmath)(xipm_patch)
-        print(
-            "CPU correlation is still in development, it's better/faster too use GPU correlation if possible."
-        )
-
-    def load_maps(self, g11, g21, g12, g22, w1, w2, flip_g1=True, flip_g2=False):
-        self.g11 = g11
-        self.g21 = g21
-        self.g12 = g12
-        self.g22 = g22
-        self.w1 = w1
-        self.w2 = w2
-
-        if flip_g1:
-            self.g11 = -self.g11
-            self.g12 = -self.g12
-        if flip_g2:
-            self.g21 = -self.g21
-            self.g22 = -self.g22
-
-        if (g11 == g12).all() and (g21 == g22).all() and (w1 == w2).all():
-            self.auto = True
-            self.get_xipm = self.get_xipm_auto
-        else:
-            self.auto = False
-            self.get_xipm = self.get_xipm_cross
-
-    def get_xipm_auto(self, i):
-        return self.xipm_patch(
-            self.pair_inds[i],
-            self.pair_exp2phi[i],
-            self.bins[i],
-            self.g11,
-            self.g21,
-            self.g12,
-            self.g22,
-            self.nbins,
-        )
-
-    def get_xipm_cross(self, i):
-        xip1, xim1 = self.xipm_patch(
-            self.pair_inds[i],
-            self.pair_exp2phi[i],
-            self.bins[i],
-            self.g11,
-            self.g21,
-            self.g12,
-            self.g22,
-            self.nbins,
-        )
-        xip2, xim2 = self.xipm_patch(
-            self.pair_inds[i],
-            self.pair_exp2phi[i],
-            self.bins[i],
-            self.g12,
-            self.g22,
-            self.g11,
-            self.g21,
-            self.nbins,
-        )
-        return (xip1 + xip2) / 2, (xim1 + xim2) / 2
-
-    def calculate_2PCF(self, threads=1):
-        xip, xim = np.zeros((self.n_patches, self.nbins)), np.zeros(
-            (self.n_patches, self.nbins)
-        )
-
-        if threads > 1:
-            with Pool(threads) as p:
-                result = p.map(
-                    eval_func_tuple,
-                    zip(itertools.repeat(self.get_xipm), range(self.n_patches)),
-                )
-        else:
-            result = []
-            for i in range(self.n_patches):
-                result.append(self.get_xipm(i))
-
-        for i in range(self.n_patches):
-            xip[i] = result[i][0]
-            xim[i] = result[i][1]
-
-        self.xip = xip
-        self.xim = xim
-
-        return xip, xim
