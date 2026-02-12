@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0]
+
+### Added
+- Precision configuration for core data categories in `Correlation`:
+  - `map_precision` (`float16`, `float32`, `float64`)
+  - `rotation_precision` (`float16`, `float32`, `float64`)
+  - `index_precision` (`uint32`, `uint64`)
+
+### Changed
+- `Correlation` now uses logging in preprocessing status messages instead of direct prints.
+- README usage now documents the unified `Correlation` API and `load_pairs`.
+
+### Removed
+- Deprecated `Correlation_GPU_lowmem` wrapper class.
+- Package-level export of deprecated `Correlation_GPU` from `CosmoFuse.__init__`.
+
 ## [0.2.1]
 
 ### Added

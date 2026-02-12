@@ -22,15 +22,27 @@ test-pytest: ## Run tests with pytest
 test-env: ## Run tests in specific environment (usage: make test-env ENV=myenv)
 	conda run -n $(ENV) python -m unittest discover tests/ -v
 
-clean: ## Clean build artifacts
+clean: ## Clean build, test, coverage, cache and temporary artifacts
 	rm -rf build/
 	rm -rf dist/
-	rm -rf *.egg-info/
-	rm -rf .pytest_cache/
-	rm -rf .coverage
+	rm -rf .eggs/
+	rm -rf .mypy_cache/
+	rm -rf .ruff_cache/
+	rm -rf .hypothesis/
+	rm -rf .tox/
+	rm -rf .nox/
 	rm -rf htmlcov/
-	find . -type d -name __pycache__ -delete
-	find . -type f -name "*.pyc" -delete
+	rm -rf pip-wheel-metadata/
+	rm -rf wheelhouse/
+	rm -rf .coverage
+	rm -rf .coverage.*
+	rm -rf coverage.xml
+	rm -rf junit.xml
+	find . -type d -name ".pytest_cache" -prune -exec rm -rf {} +
+	find . -type d -name "*.egg-info" -prune -exec rm -rf {} +
+	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+	find . -type d -name ".ipynb_checkpoints" -prune -exec rm -rf {} +
+	find . -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*$$py.class" \) -delete
 
 build: ## Build the package
 	python -m build

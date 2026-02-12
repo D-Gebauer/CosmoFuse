@@ -1,6 +1,5 @@
-import itertools
 import logging
-from multiprocessing import Pool
+from multiprocessing import get_all_start_methods, get_context
 from typing import List, Optional, Tuple, Union
 
 import h5py
@@ -10,10 +9,45 @@ from numba import njit
 from scipy.special import binom
 
 from .backend import get_backend
-from .correlation_helpers import Q_T, M_a_patch, getAngle, xipm_patch
-from .utils import eval_func_tuple, pixel2RaDec
+from .correlation_helpers import Q_T, M_a_patch, getAngle
+from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_FLOAT_PRECISIONS = {
+    "float16": np.float16,
+    "float32": np.float32,
+    "float64": np.float64,
+}
+_ALLOWED_INDEX_PRECISIONS = {
+    "uint32": np.uint32,
+    "uint64": np.uint64,
+}
+_ROTATION_COMPLEX_PRECISION = {
+    "float16": np.complex64,
+    "float32": np.complex64,
+    "float64": np.complex128,
+}
+
+
+def _normalize_precision(
+    precision: Union[str, np.dtype, type],
+    allowed: dict,
+    name: str,
+) -> np.dtype:
+    try:
+        precision_name = np.dtype(precision).name
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be one of {list(allowed.keys())}; got {precision!r}"
+        ) from exc
+
+    if precision_name not in allowed:
+        raise ValueError(
+            f"{name} must be one of {list(allowed.keys())}; got {precision!r}"
+        )
+
+    return np.dtype(allowed[precision_name])
 
 
 class Correlation:
@@ -38,6 +72,10 @@ class Correlation:
         fastmath: Whether to use fastmath in JIT compiled functions
         map_inds: Indices of valid pixels in the mask
         device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
+        multiprocessing_start_method: multiprocessing context used when threads > 1.
+        map_precision: Float precision for map/shear/weight arrays.
+        rotation_precision: Float precision for rotation/filter values.
+        index_precision: Integer precision for index/binned arrays.
     """
 
     def __init__(
@@ -53,6 +91,10 @@ class Correlation:
         mask: Optional[np.ndarray] = None,
         fastmath: bool = True,
         device: Union[str, int] = "auto",
+        multiprocessing_start_method: str = "spawn",
+        map_precision: Union[str, np.dtype, type] = "float64",
+        rotation_precision: Union[str, np.dtype, type] = "float64",
+        index_precision: Union[str, np.dtype, type] = "uint32",
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -68,6 +110,12 @@ class Correlation:
             mask: Optional mask array
             fastmath: Whether to use fastmath in JIT compiled functions
             device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
+            multiprocessing_start_method: Start method used by multiprocessing when
+                pair calculations are parallelized. Use one of available Python start
+                methods or "default".
+            map_precision: One of float16/float32/float64 for map-like arrays.
+            rotation_precision: One of float16/float32/float64 for rotation/filter arrays.
+            index_precision: One of uint32/uint64 for index-like arrays.
 
         Raises:
             ValueError: If input parameters are invalid
@@ -85,6 +133,25 @@ class Correlation:
             raise ValueError("theta_Q must be positive")
         if len(phi_center) != len(theta_center):
             raise ValueError("phi_center and theta_center must have the same length")
+        if multiprocessing_start_method != "default":
+            available_start_methods = get_all_start_methods()
+            if multiprocessing_start_method not in available_start_methods:
+                raise ValueError(
+                    "multiprocessing_start_method must be one of "
+                    f"{available_start_methods} or 'default'"
+                )
+        self.map_dtype = _normalize_precision(
+            map_precision, _ALLOWED_FLOAT_PRECISIONS, "map_precision"
+        )
+        self.rotation_dtype = _normalize_precision(
+            rotation_precision, _ALLOWED_FLOAT_PRECISIONS, "rotation_precision"
+        )
+        self.index_dtype = _normalize_precision(
+            index_precision, _ALLOWED_INDEX_PRECISIONS, "index_precision"
+        )
+        self.rotation_complex_dtype = np.dtype(
+            _ROTATION_COMPLEX_PRECISION[self.rotation_dtype.name]
+        )
 
         self.nside = nside
         self.nbins = nbins
@@ -108,12 +175,13 @@ class Correlation:
                 raise ValueError(
                     "Mask length must match number of pixels for given nside"
                 )
-            self.map_inds = np.where(mask)[0]
+            self.map_inds = np.where(mask)[0].astype(self.index_dtype, copy=False)
         else:
-            self.map_inds = np.arange(hp.nside2npix(self.nside))
+            self.map_inds = np.arange(hp.nside2npix(self.nside), dtype=self.index_dtype)
 
         self.backend = get_backend(device)
         self.device = device
+        self.multiprocessing_start_method = multiprocessing_start_method
 
         # CPU-side storage for pairs (lists of arrays)
         self.pair_inds = []
@@ -125,6 +193,7 @@ class Correlation:
         self.exp2phi_dev = None
         self.bins_dev = None
         self.tot_bins_dev = None
+        self.tot_bins_reduceat_dev = None
         self.ntotpairs = 0
 
     def __getstate__(self):
@@ -157,7 +226,9 @@ class Correlation:
             dec_pairs2 = dec[inds[1]]
 
             all_inds.append(
-                np.array([patch_inds[inds[0]], patch_inds[inds[1]]]).astype(np.uint32)
+                np.array(
+                    [patch_inds[inds[0]], patch_inds[inds[1]]], dtype=self.index_dtype
+                )
             )
 
             for j, _ in enumerate(ra_pairs1):
@@ -170,10 +241,12 @@ class Correlation:
                 exp2phi1 = np.cos(2 * theta1) + 1j * np.sin(2 * theta1)
                 exp2phi2 = np.cos(2 * theta2) + 1j * np.sin(2 * theta2)
 
-                exp2phi1_temp.append(exp2phi1.astype(np.complex128))
-                exp2phi2_temp.append(exp2phi2.astype(np.complex128))
+                exp2phi1_temp.append(self.rotation_complex_dtype.type(exp2phi1))
+                exp2phi2_temp.append(self.rotation_complex_dtype.type(exp2phi2))
 
-        exp2phi = np.array([exp2phi1_temp, exp2phi2_temp])
+        exp2phi = np.array(
+            [exp2phi1_temp, exp2phi2_temp], dtype=self.rotation_complex_dtype
+        )
         return all_inds, exp2phi
 
     def __get_pairs_helper__(self, i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -187,15 +260,15 @@ class Correlation:
             inds,
             exp2theta,
         ) = self.get_pairs_patch(pix_inds, ra, dec)
-        ninds = np.array([len(inds[i][0]) for i in range(self.nbins)])
-        all_inds = np.zeros((2, ninds.sum()))
+        ninds = np.array([len(inds[i][0]) for i in range(self.nbins)], dtype=self.index_dtype)
+        all_inds = np.zeros((2, int(ninds.sum())), dtype=self.index_dtype)
         for bin_idx in range(self.nbins):
             start_idx = np.sum(ninds[:bin_idx])
             end_idx = np.sum(ninds[: bin_idx + 1])
             all_inds[0, start_idx:end_idx] = inds[bin_idx][0]
             all_inds[1, start_idx:end_idx] = inds[bin_idx][1]
 
-        return all_inds.astype(int), exp2theta, ninds
+        return all_inds, exp2theta.astype(self.rotation_complex_dtype, copy=False), ninds
 
     def calculate_pairs_2PCF(self, threads: int = 1) -> None:
         if threads == 1:
@@ -208,7 +281,12 @@ class Correlation:
                 bins.append(result[2])
 
         else:
-            with Pool(threads) as p:
+            # "spawn" is safest in multi-threaded contexts, but callers can override.
+            if self.multiprocessing_start_method == "default":
+                context = get_context()
+            else:
+                context = get_context(self.multiprocessing_start_method)
+            with context.Pool(threads) as p:
                 results = p.map(self.__get_pairs_helper__, range(self.n_patches))
                 pair_inds, pair_exp2phi, bins = list(map(list, zip(*results)))
 
@@ -263,7 +341,7 @@ class Correlation:
                 self.nside, self.theta_center[i], self.phi_center[i]
             )
             patch_inds = hp.query_disc(
-                self.nside, vec=vec, radius=np.radians(5 * 90 / 60)
+                self.nside, vec=vec, radius=np.radians(5 * self.theta_Q / 60)
             )
             Qpix_inds = np.intersect1d(patch_inds, self.map_inds)
             ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
@@ -273,19 +351,21 @@ class Correlation:
                 Q_ra, Q_dec, ra_center, dec_center
             )
 
-            self.Q_cos.append(Q_cos.astype(np.float64))
-            self.Q_sin.append(Q_sin.astype(np.float64))
-            self.Q_val.append(Q_val.astype(np.float64))
-            self.Q_inds.append(Qpix_inds.astype(np.uint32))
-            self.Q_patch_area.append(Qpix_inds.size * hp.nside2pixarea(self.nside))
+            self.Q_cos.append(Q_cos.astype(self.rotation_dtype, copy=False))
+            self.Q_sin.append(Q_sin.astype(self.rotation_dtype, copy=False))
+            self.Q_val.append(Q_val.astype(self.rotation_dtype, copy=False))
+            self.Q_inds.append(Qpix_inds.astype(self.index_dtype, copy=False))
+            self.Q_patch_area.append(
+                self.rotation_dtype.type(Qpix_inds.size * hp.nside2pixarea(self.nside))
+            )
 
     def preprocess(self, threads=1):
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
         """
-        print("Calculating pairs for Aperture Mass...")
+        logger.info("Calculating pairs for aperture mass")
         self.calculate_pairs_M_a(threads)
-        print("Calculating pairs for 2PCF...")
+        logger.info("Calculating pairs for 2PCF")
         self.calculate_pairs_2PCF(threads)
 
     def save_pairs(self, filepath):
@@ -338,23 +418,27 @@ class Correlation:
             self.patch_size = fp.attrs["patch_size"]
             self.theta_Q = fp.attrs["theta_Q"]
             self.n_patches = stop_ind - start_ind
-            self.map_inds = fp["map_inds"][:]
+            self.map_inds = fp["map_inds"][:].astype(self.index_dtype, copy=False)
             self.phi_center = fp["phi_center"][start_ind:stop_ind]
             self.theta_center = fp["theta_center"][start_ind:stop_ind]
 
             for i in range(start_ind, stop_ind):
                 gp = fp[f"patch_{i:02d}"]
-                self.pair_inds.append(gp["pair_inds"][:])
-                self.pair_exp2phi.append(gp["pair_exp2phi"][:])
-                self.bins.append(gp["bins"][:])
-                self.Q_inds.append(gp["Q_inds"][:])
-                self.Q_cos.append(gp["Q_cos"][:])
-                self.Q_sin.append(gp["Q_sin"][:])
-                self.Q_val.append(gp["Q_val"][:])
-                self.Q_patch_area.append(gp["Q_patch_area"][()])
+                self.pair_inds.append(
+                    gp["pair_inds"][:].astype(self.index_dtype, copy=False)
+                )
+                self.pair_exp2phi.append(
+                    gp["pair_exp2phi"][:].astype(self.rotation_complex_dtype, copy=False)
+                )
+                self.bins.append(gp["bins"][:].astype(self.index_dtype, copy=False))
+                self.Q_inds.append(gp["Q_inds"][:].astype(self.index_dtype, copy=False))
+                self.Q_cos.append(gp["Q_cos"][:].astype(self.rotation_dtype, copy=False))
+                self.Q_sin.append(gp["Q_sin"][:].astype(self.rotation_dtype, copy=False))
+                self.Q_val.append(gp["Q_val"][:].astype(self.rotation_dtype, copy=False))
+                self.Q_patch_area.append(self.rotation_dtype.type(gp["Q_patch_area"][()]))
 
     def get_M_a(self, g1, g2, w):
-        M_a = np.zeros(self.n_patches)
+        M_a = np.zeros(self.n_patches, dtype=self.map_dtype)
         for i in range(self.n_patches):
             M_a[i] = self.M_A_patch(
                 self.Q_inds[i],
@@ -378,10 +462,10 @@ class Correlation:
             ninds.append(patchsize)
 
         first_patch_ind = np.append(0, np.cumsum(ninds)).astype(int)
-        temp_inds = np.zeros((2, int(size)), dtype=np.uint32)
-        temp_exp2phi = np.zeros((2, int(size)), dtype=np.complex128)
-        temp_bins = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
-        temp_bins_tot = np.zeros((self.n_patches * self.nbins), dtype=np.uint32)
+        temp_inds = np.zeros((2, int(size)), dtype=self.index_dtype)
+        temp_exp2phi = np.zeros((2, int(size)), dtype=self.rotation_complex_dtype)
+        temp_bins = np.zeros((self.n_patches * self.nbins), dtype=self.index_dtype)
+        temp_bins_tot = np.zeros((self.n_patches * self.nbins), dtype=self.index_dtype)
 
         for i in range(self.n_patches):
             temp_inds[:, first_patch_ind[i] : first_patch_ind[i + 1]] = self.pair_inds[
@@ -394,13 +478,19 @@ class Correlation:
             temp_bins_tot[i * self.nbins : (i + 1) * self.nbins] = (
                 first_patch_ind[i] + self.bins[i].cumsum()
             )
-        temp_bins_tot = np.append([0], temp_bins_tot)
+        temp_bins_tot = np.concatenate(
+            (np.array([0], dtype=self.index_dtype), temp_bins_tot)
+        )
 
         # Move to backend device
         self.inds_dev = self.backend.to_device(temp_inds)
         self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
         self.bins_dev = self.backend.to_device(temp_bins)
         self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
+        # reduceat requires signed integer indices on numpy/cupy
+        self.tot_bins_reduceat_dev = self.backend.to_device(
+            temp_bins_tot.astype(np.int64, copy=False)
+        )
         self.ntotpairs = size
 
     def load_maps(
@@ -409,20 +499,22 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        self.g11 = self.backend.to_device(g11)
-        self.g21 = self.backend.to_device(g21)
-        self.g12 = self.backend.to_device(g12)
-        self.g22 = self.backend.to_device(g22)
-        self.w1 = self.backend.to_device(w1)
-        self.w2 = self.backend.to_device(w2)
+        self.g11 = self.backend.to_device(np.asarray(g11, dtype=self.map_dtype))
+        self.g21 = self.backend.to_device(np.asarray(g21, dtype=self.map_dtype))
+        self.g12 = self.backend.to_device(np.asarray(g12, dtype=self.map_dtype))
+        self.g22 = self.backend.to_device(np.asarray(g22, dtype=self.map_dtype))
+        self.w1 = self.backend.to_device(np.asarray(w1, dtype=self.map_dtype))
+        self.w2 = self.backend.to_device(np.asarray(w2, dtype=self.map_dtype))
 
         if sumofweights is None:
             self.sumofweights = self.backend.add.reduceat(
                 self.w1[self.inds_dev[0]] * self.w2[self.inds_dev[1]],
-                self.tot_bins_dev[:-1],
+                self.tot_bins_reduceat_dev[:-1],
             )
         else:
-            self.sumofweights = sumofweights
+            self.sumofweights = self.backend.to_device(
+                np.asarray(sumofweights, dtype=self.map_dtype)
+            )
 
         if flip_g1:
             self.g11 = -self.g11
@@ -451,11 +543,18 @@ class Correlation:
         )
 
         xip = (
-            (self.backend.add.reduceat(g1 * self.backend.conjugate(g2), self.tot_bins_dev[:-1]))
+            (
+                self.backend.add.reduceat(
+                    g1 * self.backend.conjugate(g2), self.tot_bins_reduceat_dev[:-1]
+                )
+            )
             / sumofweights
         ).reshape((self.n_patches, self.nbins))
         xim = (
-            (self.backend.add.reduceat(g1 * g2, self.tot_bins_dev[:-1])) / sumofweights
+            (
+                self.backend.add.reduceat(g1 * g2, self.tot_bins_reduceat_dev[:-1])
+            )
+            / sumofweights
         ).reshape((self.n_patches, self.nbins))
 
         # Real parts
@@ -488,9 +587,13 @@ class Correlation:
         nzbin_combs = int(binom(nzbins + 1, 2))
 
         # Move inputs to device
-        shear_maps_dev = self.backend.to_device(shear_maps)
-        w_dev = self.backend.to_device(w)
-        sumofweights_dev = self.backend.to_device(sumofweights)
+        shear_maps_dev = self.backend.to_device(
+            np.asarray(shear_maps, dtype=self.map_dtype)
+        )
+        w_dev = self.backend.to_device(np.asarray(w, dtype=self.map_dtype))
+        sumofweights_dev = self.backend.to_device(
+            np.asarray(sumofweights, dtype=self.map_dtype)
+        )
 
         g1, g2 = 1, 1
         if flip_g1:
@@ -498,13 +601,22 @@ class Correlation:
         if flip_g2:
             g2 = -1
 
-        M_ap = np.zeros([nzbins, self.n_patches])
+        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
 
         # Results on device
-        xim1 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
-        xim2 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
-        xip1 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
-        xip2 = self.backend.zeros([nzbin_combs, self.n_patches, self.nbins], dtype=self.backend.float64)
+        xim1 = self.backend.zeros(
+            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
+        )
+        xim2 = self.backend.zeros(
+            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
+        )
+        xip1 = self.backend.zeros(
+            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
+        )
+        xip2 = self.backend.zeros(
+            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
+        )
 
         k = 0
         for i in range(nzbins):
@@ -591,18 +703,26 @@ class Correlation_CPU(Correlation):
         theta_Q=90,
         mask=None,
         fastmath=True,
+        multiprocessing_start_method="spawn",
+        map_precision: Union[str, np.dtype, type] = "float64",
+        rotation_precision: Union[str, np.dtype, type] = "float64",
+        index_precision: Union[str, np.dtype, type] = "uint32",
     ):
         logger.warning("Correlation_CPU is deprecated. Use Correlation(device='cpu') instead.")
         super().__init__(
-            nside,
-            phi_center,
-            theta_center,
-            nbins,
-            theta_min,
-            theta_max,
-            patch_size,
-            theta_Q,
-            mask,
-            fastmath,
-            device='cpu'
+            nside=nside,
+            phi_center=phi_center,
+            theta_center=theta_center,
+            nbins=nbins,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            patch_size=patch_size,
+            theta_Q=theta_Q,
+            mask=mask,
+            fastmath=fastmath,
+            device="cpu",
+            multiprocessing_start_method=multiprocessing_start_method,
+            map_precision=map_precision,
+            rotation_precision=rotation_precision,
+            index_precision=index_precision,
         )

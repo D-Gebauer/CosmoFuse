@@ -21,16 +21,20 @@ class TestCPUCorrelation(unittest.TestCase):
         self.theta_min = 20
         self.theta_max = 170
         self.nbins = 10
-        
-        # Skip tests if data files are not available
-        import os
-        if not os.path.exists("./data/DESY3_Mask.fits"):
-            raise unittest.SkipTest("Test data files not found")
-            
-        self.des_map = hp.read_map("./data/DESY3_Mask.fits")
+
+        data_dir = Path(__file__).parent / "data"
+        mask_path = data_dir / "DESY3_Mask.fits"
+        phi_path = data_dir / "patch_center_phi.dat"
+        theta_path = data_dir / "patch_center_theta.dat"
+        shear_path = data_dir / "shear_maps.npy"
+
+        if not (mask_path.exists() and phi_path.exists() and theta_path.exists() and shear_path.exists()):
+            raise unittest.SkipTest(f"Test data files not found in {data_dir}")
+
+        self.des_map = hp.read_map(str(mask_path))
         self.map_inds = np.where(self.des_map != 0)[0]
-        self.phi_center = np.loadtxt("./data/patch_center_phi.dat")
-        self.theta_center = np.loadtxt("./data/patch_center_theta.dat")
+        self.phi_center = np.loadtxt(phi_path)
+        self.theta_center = np.loadtxt(theta_path)
 
         self.corr = Correlation(
             self.nside,
@@ -45,7 +49,7 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
         self.shear_maps = np.zeros((2, 2, hp.nside2npix(self.nside)))
-        self.shear_maps[:, :, self.map_inds] = np.load("./data/shear_maps.npy")
+        self.shear_maps[:, :, self.map_inds] = np.load(shear_path)
 
         self.w1 = np.ones(len(self.shear_maps[0, 0]))
         self.w2 = self.w1
@@ -65,6 +69,7 @@ class TestCPUCorrelation(unittest.TestCase):
             brute=True,
             metric="Arc",
             bin_slop=0.0,
+            ang_slop=0.0,
         )
 
         for i in range(len(self.theta_center)):
@@ -249,6 +254,48 @@ class TestCPUCorrelation(unittest.TestCase):
         self.find_pairs_multi()
         self.get_auto_correlation_mult()
         self.get_cross_correlation_mult()
+
+    def test_patch_xip_xim_cosmofuse_vs_treecorr(self):
+        """End-to-end validation of patch-wise xip/xim against TreeCorr."""
+        self.corr.calculate_pairs_2PCF(threads=1)
+
+        # Auto-correlation comparison
+        self.corr.load_maps(
+            self.shear_maps[1, 0],
+            self.shear_maps[1, 1],
+            self.shear_maps[1, 0],
+            self.shear_maps[1, 1],
+            self.w1,
+            self.w2,
+            flip_g1=True,
+        )
+        xip_auto, xim_auto = self.corr.calculate_2PCF(threads=1)
+
+        np.testing.assert_allclose(
+            xip_auto, self.xip_treecorr_auto, rtol=1e-6, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            xim_auto, self.xim_treecorr_auto, rtol=1e-6, atol=1e-10
+        )
+
+        # Cross-correlation comparison
+        self.corr.load_maps(
+            self.shear_maps[0, 0],
+            self.shear_maps[0, 1],
+            self.shear_maps[1, 0],
+            self.shear_maps[1, 1],
+            self.w1,
+            self.w2,
+            flip_g1=True,
+        )
+        xip_cross, xim_cross = self.corr.calculate_2PCF(threads=1)
+
+        np.testing.assert_allclose(
+            xip_cross, self.xip_treecorr_cross, rtol=1e-6, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            xim_cross, self.xim_treecorr_cross, rtol=1e-6, atol=1e-10
+        )
 
 
 if __name__ == "__main__":

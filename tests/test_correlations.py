@@ -126,6 +126,61 @@ class TestCorrelation(unittest.TestCase):
                 mask=mask,
             )
 
+    def test_init_invalid_multiprocessing_start_method(self):
+        """Test initialization with invalid multiprocessing start method."""
+        with self.assertRaises(ValueError):
+            Correlation(
+                nside=self.nside,
+                phi_center=self.phi_center,
+                theta_center=self.theta_center,
+                multiprocessing_start_method="definitely_invalid",
+            )
+
+    def test_init_precision_configuration(self):
+        """Test initialization with custom precision configuration."""
+        corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+            map_precision="float32",
+            rotation_precision="float32",
+            index_precision="uint64",
+        )
+        self.assertEqual(corr.map_dtype, np.dtype(np.float32))
+        self.assertEqual(corr.rotation_dtype, np.dtype(np.float32))
+        self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
+        self.assertEqual(corr.index_dtype, np.dtype(np.uint64))
+
+    def test_init_invalid_map_precision(self):
+        """Test initialization with invalid map precision."""
+        with self.assertRaises(ValueError):
+            Correlation(
+                nside=self.nside,
+                phi_center=self.phi_center,
+                theta_center=self.theta_center,
+                map_precision="float80",
+            )
+
+    def test_init_invalid_rotation_precision(self):
+        """Test initialization with invalid rotation precision."""
+        with self.assertRaises(ValueError):
+            Correlation(
+                nside=self.nside,
+                phi_center=self.phi_center,
+                theta_center=self.theta_center,
+                rotation_precision="bfloat16",
+            )
+
+    def test_init_invalid_index_precision(self):
+        """Test initialization with invalid index precision."""
+        with self.assertRaises(ValueError):
+            Correlation(
+                nside=self.nside,
+                phi_center=self.phi_center,
+                theta_center=self.theta_center,
+                index_precision="int32",
+            )
+
     def test_get_pairs_patch(self):
         """Test get_pairs_patch method."""
         corr = Correlation(

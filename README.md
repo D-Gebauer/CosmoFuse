@@ -31,23 +31,29 @@ where $g_1$ and $g_2$ are the complex shear values rotated relative to the 2 pos
 ## Installation
 Install using:
 
-    pip install git+https://github.com/D-Gebauer/CosmoFuse/tree/main
+    pip install git+https://github.com/D-Gebauer/CosmoFuse.git
 
-Note: to use full functionality including correlation_GPU, Cupy has to be installed additionally.
+Note: for GPU execution, install CuPy in your environment.
 
 ## USAGE
 
 First create a Correlation object:
 
-    from CosmoFuse.correlations_GPU import Correlation_GPU
-    correlation = Correlation_GPU(nside,                        # resolution of healpy maps
-                                 phi_center, theta_center,      # center of patches (in radians)
-                                 patch_size=90,                 # size of each patch (in arcminutes)
-                                 theta_Q=90                     # Size of compensated filter
-                                 nbins=10,                      # Number of angular bins
-                                 theta_min=10, theta_max=170,   # Minimum and maximum angular seperation (in arcminutes)
-                                 mask=mask,                     # Mask
-                                 fastmath=False)                # Whether to use fastmath in jit compiled functions
+    from CosmoFuse import Correlation
+    correlation = Correlation(
+        nside,                              # resolution of healpy maps
+        phi_center, theta_center,           # patch centers (radians)
+        patch_size=90,                      # patch size (arcminutes)
+        theta_Q=90,                         # compensated filter scale (arcminutes)
+        nbins=10,                           # number of angular bins
+        theta_min=10, theta_max=170,        # angular range (arcminutes)
+        mask=mask,                          # mask
+        fastmath=False,                     # numba fastmath toggle
+        device="auto",                      # "cpu", "gpu", "auto", or GPU id
+        map_precision="float32",            # float16 / float32 / float64
+        rotation_precision="float32",       # float16 / float32 / float64
+        index_precision="uint32",           # uint32 / uint64
+    )
 
 Then Calculate pairs:
 
@@ -56,22 +62,21 @@ Then Calculate pairs:
 These can be saved & loaded using:
 
     correlation.save_pairs("/path/to/pairs.h5")
-    correlation.load("/path/to/pairs.h5")
+    correlation.load_pairs("/path/to/pairs.h5")
 
 To then measure the i3PCF using GPU:
 
-    correlation.prepare_gpu()
+    correlation.prepare()
     correlation.load_maps(g11, g21, g12, g22, w1, w2)
-    M_ap = correlation.get_M_a(g1, g2)
+    M_ap = correlation.get_M_a(g11, g21, w1)
     xip, xim = correlation.get_all_xipm()
 
 Or directly for all bin combinations:
 
-    correlation.prepare_gpu()
+    correlation.prepare()
     M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w, sumofweights)
 
 These (in the tomographic case) can be converted to $\zeta_+$ & $\zeta_-$:
 
     from CosmoFuse.correlation_helpers import zeta
     zetap, zetam = zeta(M_ap, xip, xim)
-

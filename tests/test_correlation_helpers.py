@@ -91,25 +91,23 @@ class TestCorrelationHelpers(unittest.TestCase):
 
     def test_zeta(self):
         """Test zeta function."""
-        # Create test data with proper dimensions
         nmaps = 1
-        zbins = 2  # Use 2 bins to avoid complex indexing issues
+        zbins = 2
         n_patches = 3
         nbins = 4
-        
-        M_ap = np.random.rand(nmaps, zbins, n_patches)
-        xip = np.random.rand(nmaps, zbins, n_patches, nbins)
-        xim = np.random.rand(nmaps, zbins, n_patches, nbins)
-        
-        # This test might fail due to the complex zeta function logic
-        # For now, just test that it doesn't crash
-        try:
-            zetap, zetam = zeta(M_ap, xip, xim)
-            self.assertIsInstance(zetap, np.ndarray)
-            self.assertIsInstance(zetam, np.ndarray)
-        except (IndexError, ValueError):
-            # Skip this test if the function has issues with the test data
-            self.skipTest("zeta function requires specific data structure")
+        n_correlations = zbins * (zbins + 1) // 2
+        n_zeta_combs = zbins * (zbins + 1) * (zbins + 2) // 6
+
+        rng = np.random.default_rng(42)
+        M_ap = rng.random((nmaps, zbins, n_patches))
+        xip = rng.random((nmaps, n_correlations, n_patches, nbins))
+        xim = rng.random((nmaps, n_correlations, n_patches, nbins))
+
+        zetap, zetam = zeta(M_ap, xip, xim)
+        self.assertIsInstance(zetap, np.ndarray)
+        self.assertIsInstance(zetam, np.ndarray)
+        self.assertEqual(zetap.shape, (nmaps, n_zeta_combs, nbins))
+        self.assertEqual(zetam.shape, (nmaps, n_zeta_combs, nbins))
 
 
 if __name__ == "__main__":

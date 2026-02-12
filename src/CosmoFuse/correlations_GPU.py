@@ -1,14 +1,10 @@
 import logging
-import warnings
+
+import numpy as np
+
 from .correlations import Correlation
 
 logger = logging.getLogger(__name__)
-
-# Check for cupy just to warn if missing, though Correlation handles it.
-try:
-    import cupy as cp
-except ImportError:
-    pass
 
 class Correlation_GPU(Correlation):
     def __init__(
@@ -24,20 +20,28 @@ class Correlation_GPU(Correlation):
         mask=None,
         fastmath=True,
         device=0,
+        multiprocessing_start_method="spawn",
+        map_precision: str | np.dtype | type = "float64",
+        rotation_precision: str | np.dtype | type = "float64",
+        index_precision: str | np.dtype | type = "uint32",
     ):
         logger.warning("Correlation_GPU is deprecated. Use Correlation(device='gpu') or Correlation(device=ID) instead.")
         super().__init__(
-            nside,
-            phi_center,
-            theta_center,
-            nbins,
-            theta_min,
-            theta_max,
-            patch_size,
-            theta_Q,
-            mask,
-            fastmath,
-            device=device
+            nside=nside,
+            phi_center=phi_center,
+            theta_center=theta_center,
+            nbins=nbins,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            patch_size=patch_size,
+            theta_Q=theta_Q,
+            mask=mask,
+            fastmath=fastmath,
+            device=device,
+            multiprocessing_start_method=multiprocessing_start_method,
+            map_precision=map_precision,
+            rotation_precision=rotation_precision,
+            index_precision=index_precision,
         )
 
     def prepare_gpu(self):
@@ -60,12 +64,3 @@ class Correlation_GPU(Correlation):
     @property
     def tot_bins_gpu(self):
         return self.tot_bins_dev
-
-
-class Correlation_GPU_lowmem(Correlation_GPU):
-    def __init__(self, *args, **kwargs):
-        logger.warning("Correlation_GPU_lowmem is deprecated. Using standard Correlation class (may use more memory).")
-        super().__init__(*args, **kwargs)
-
-    # If strictly needed, we could override xipm here to use a loop.
-    # For now, we assume the unified class is sufficient or users can contribute a lowmem mode to Correlation.

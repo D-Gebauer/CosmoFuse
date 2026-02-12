@@ -2,13 +2,12 @@ import unittest
 import numpy as np
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 from CosmoFuse.correlations import Correlation
-from CosmoFuse.backend import Backend
 
 class TestUnifiedCorrelation(unittest.TestCase):
     def setUp(self):
@@ -103,6 +102,42 @@ class TestUnifiedCorrelation(unittest.TestCase):
 
         self.assertEqual(xip.shape, (1, 2)) # 1 patch, 2 bins
         self.assertEqual(xim.shape, (1, 2))
+
+    def test_precision_applied_to_internal_arrays(self):
+        corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+            nbins=self.nbins,
+            device='cpu',
+            map_precision='float32',
+            rotation_precision='float32',
+            index_precision='uint64'
+        )
+
+        n_pairs = 6
+        corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint64)]
+        corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex64)]
+        corr.bins = [np.array([3, 3], dtype=np.uint64)]
+
+        corr.prepare()
+        self.assertEqual(corr.inds_dev.dtype, np.uint64)
+        self.assertEqual(corr.exp2phi_dev.dtype, np.complex64)
+        self.assertEqual(corr.bins_dev.dtype, np.uint64)
+        self.assertEqual(corr.tot_bins_dev.dtype, np.uint64)
+
+        npix = 12 * self.nside**2
+        g1 = np.ones(npix, dtype=np.float64)
+        g2 = np.ones(npix, dtype=np.float64)
+        w = np.ones(npix, dtype=np.float64)
+        corr.load_maps(g1, g2, g1, g2, w, w)
+
+        self.assertEqual(corr.g11.dtype, np.float32)
+        self.assertEqual(corr.g21.dtype, np.float32)
+        self.assertEqual(corr.g12.dtype, np.float32)
+        self.assertEqual(corr.g22.dtype, np.float32)
+        self.assertEqual(corr.w1.dtype, np.float32)
+        self.assertEqual(corr.w2.dtype, np.float32)
 
 if __name__ == '__main__':
     unittest.main()
