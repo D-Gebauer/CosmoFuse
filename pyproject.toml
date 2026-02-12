@@ -46,6 +46,7 @@ dev = [
     "flake8>=5.0.0",
     "mypy>=1.0.0",
     "pre-commit>=2.0.0",
+    "treecorr",
 ]
 docs = [
     "sphinx>=5.0.0",
