@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from multiprocessing import get_all_start_methods, get_context
 from typing import List, Optional, Tuple, Union
@@ -7,6 +8,7 @@ import healpy as hp
 import numpy as np
 from numba import njit
 from scipy.special import binom
+from tqdm import trange
 
 from .backend import get_backend
 from .correlation_helpers import Q_T, M_a_patch, getAngle
@@ -195,6 +197,10 @@ class Correlation:
         self.tot_bins_dev = None
         self.tot_bins_reduceat_dev = None
         self.ntotpairs = 0
+        self._prepare_version = 0
+        self._tomo_sumofweights_cache = None
+        self._tomo_sumofweights_cache_w_fingerprint = None
+        self._tomo_sumofweights_cache_prepare_version = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -206,6 +212,14 @@ class Correlation:
         self.__dict__.update(state)
         # Re-initialize backend
         self.backend = get_backend(self.device)
+        if "_prepare_version" not in self.__dict__:
+            self._prepare_version = 0
+        if "_tomo_sumofweights_cache" not in self.__dict__:
+            self._tomo_sumofweights_cache = None
+        if "_tomo_sumofweights_cache_w_fingerprint" not in self.__dict__:
+            self._tomo_sumofweights_cache_w_fingerprint = None
+        if "_tomo_sumofweights_cache_prepare_version" not in self.__dict__:
+            self._tomo_sumofweights_cache_prepare_version = None
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -273,7 +287,7 @@ class Correlation:
     def calculate_pairs_2PCF(self, threads: int = 1) -> None:
         if threads == 1:
             pair_inds, pair_exp2phi, bins = [], [], []
-            for i in range(self.n_patches):
+            for i in trange(self.n_patches):
                 result = self.__get_pairs_helper__(i)
 
                 pair_inds.append(result[0])
@@ -492,6 +506,7 @@ class Correlation:
             temp_bins_tot.astype(np.int64, copy=False)
         )
         self.ntotpairs = size
+        self._prepare_version += 1
 
     def load_maps(
         self, g11, g21, g12, g22, w1, w2, sumofweights=None, flip_g1=True, flip_g2=False
@@ -582,18 +597,93 @@ class Correlation:
 
         return (xip1 + xip2) / 2, (xim1 + xim2) / 2
 
-    def get_full_tomo(self, shear_maps, w, sumofweights, flip_g1=False, flip_g2=False):
+    def _fingerprint_weights(self, w_np):
+        w_contiguous = np.ascontiguousarray(w_np)
+        digest = hashlib.blake2b(w_contiguous.tobytes()).hexdigest()
+        return (w_contiguous.shape, w_contiguous.dtype.str, digest)
+
+    def _compute_tomo_sumofweights(self, w_dev, nzbins, nzbin_combs):
+        if self.inds_dev is None:
+            self.prepare()
+
+        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
+        sumofweights_dev = self.backend.zeros(
+            (2, nzbin_combs, self.n_patches * self.nbins),
+            dtype=map_backend_dtype,
+        )
+
+        k = 0
+        for i in range(nzbins):
+            for j in range(i, nzbins):
+                sum_ij = self.backend.add.reduceat(
+                    w_dev[i][self.inds_dev[0]] * w_dev[j][self.inds_dev[1]],
+                    self.tot_bins_reduceat_dev[:-1],
+                )
+                sumofweights_dev[0, k] = sum_ij
+                if i == j:
+                    sumofweights_dev[1, k] = sum_ij
+                else:
+                    sumofweights_dev[1, k] = self.backend.add.reduceat(
+                        w_dev[j][self.inds_dev[0]] * w_dev[i][self.inds_dev[1]],
+                        self.tot_bins_reduceat_dev[:-1],
+                    )
+                k += 1
+
+        return sumofweights_dev
+
+    def get_full_tomo(
+        self, shear_maps, w, sumofweights=None, flip_g1=False, flip_g2=False
+    ):
+        if self.inds_dev is None:
+            self.prepare()
+
         nzbins = shear_maps.shape[0]
         nzbin_combs = int(binom(nzbins + 1, 2))
 
+        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        w_fingerprint = self._fingerprint_weights(w_np)
+
         # Move inputs to device
-        shear_maps_dev = self.backend.to_device(
-            np.asarray(shear_maps, dtype=self.map_dtype)
-        )
-        w_dev = self.backend.to_device(np.asarray(w, dtype=self.map_dtype))
-        sumofweights_dev = self.backend.to_device(
-            np.asarray(sumofweights, dtype=self.map_dtype)
-        )
+        shear_maps_dev = self.backend.to_device(shear_maps_np)
+        w_dev = self.backend.to_device(w_np)
+
+        if sumofweights is None:
+            cache = self._tomo_sumofweights_cache
+            cache_is_valid = (
+                cache is not None
+                and self._tomo_sumofweights_cache_w_fingerprint == w_fingerprint
+                and self._tomo_sumofweights_cache_prepare_version
+                == self._prepare_version
+                and len(cache.shape) >= 2
+                and cache.shape[0] == 2
+                and cache.shape[1] == nzbin_combs
+            )
+            if cache_is_valid:
+                sumofweights_dev = cache
+            else:
+                sumofweights_dev = self._compute_tomo_sumofweights(
+                    w_dev, nzbins, nzbin_combs
+                )
+                self._tomo_sumofweights_cache = sumofweights_dev
+                self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
+                self._tomo_sumofweights_cache_prepare_version = self._prepare_version
+        else:
+            sumofweights_np = np.asarray(sumofweights, dtype=self.map_dtype)
+            if sumofweights_np.ndim < 2:
+                raise ValueError(
+                    "sumofweights must have at least two dimensions with "
+                    "shape (2, nzbin_combs, ...)"
+                )
+            if sumofweights_np.shape[0] != 2 or sumofweights_np.shape[1] != nzbin_combs:
+                raise ValueError(
+                    f"sumofweights must have first dimensions (2, {nzbin_combs}); "
+                    f"got {sumofweights_np.shape}"
+                )
+            sumofweights_dev = self.backend.to_device(sumofweights_np)
+            self._tomo_sumofweights_cache = sumofweights_dev
+            self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
+            self._tomo_sumofweights_cache_prepare_version = self._prepare_version
 
         g1, g2 = 1, 1
         if flip_g1:
@@ -630,7 +720,9 @@ class Correlation:
             # Note: shear_maps passed to this function is likely numpy array.
             # shear_maps_dev is the device copy.
 
-            M_ap[i] = self.get_M_a(g1 * shear_maps[i, 0], g2 * shear_maps[i, 1], w[i])
+            M_ap[i] = self.get_M_a(
+                g1 * shear_maps_np[i, 0], g2 * shear_maps_np[i, 1], w_np[i]
+            )
             for j in range(i, nzbins):
                 if i == j:
                     xip1[k], xim1[k] = self.xipm(
@@ -688,4 +780,3 @@ class Correlation:
         self.xip = self.backend.to_numpy(xip)
         self.xim = self.backend.to_numpy(xim)
         return self.xip, self.xim
-

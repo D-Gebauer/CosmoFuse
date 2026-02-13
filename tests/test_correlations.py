@@ -419,6 +419,19 @@ class TestCorrelationCoverage(unittest.TestCase):
             nbins=self.nbins,
         )
 
+    def _setup_mock_pairs(self):
+        self.corr.pair_inds = [np.array([[10, 20], [30, 40]], dtype=np.uint32)]
+        self.corr.pair_exp2phi = [
+            np.array([[1 + 1j, 1 - 1j], [1 + 1j, 1 - 1j]], dtype=np.complex128)
+        ]
+        self.corr.bins = [np.array([1, 1], dtype=np.uint32)]
+        self.corr.Q_inds = [np.array([10, 20, 30], dtype=np.uint32)]
+        self.corr.Q_cos = [np.array([0.5, 0.6, 0.7], dtype=np.float64)]
+        self.corr.Q_sin = [np.array([0.8, 0.7, 0.6], dtype=np.float64)]
+        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        self.corr.Q_patch_area = [3.0]
+        self.corr.prepare()
+
     def test_pickleable(self):
         """Test if the Correlation object can be pickled and unpickled."""
         corr = Correlation(
@@ -449,33 +462,67 @@ class TestCorrelationCoverage(unittest.TestCase):
         
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.random.rand(nzbins, self.npix)
-        sumofweights = np.ones((2, nzbin_combs))
-
-        # Mock calculated pairs
-        self.corr.pair_inds = [np.array([[10, 20], [30, 40]], dtype=np.uint32)]
-        self.corr.pair_exp2phi = [np.array([[1+1j, 1-1j], [1+1j, 1-1j]], dtype=np.complex128)]
-        self.corr.bins = [np.array([1, 1], dtype=np.uint32)]
-        self.corr.Q_inds = [np.array([10, 20, 30], dtype=np.uint32)]
-        self.corr.Q_cos = [np.array([0.5, 0.6, 0.7], dtype=np.float64)]
-        self.corr.Q_sin = [np.array([0.8, 0.7, 0.6], dtype=np.float64)]
-        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
-        self.corr.Q_patch_area = [3.0]
-
-        # This will prepare the device arrays
-        self.corr.prepare()
+        self._setup_mock_pairs()
         
-        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w, sumofweights)
+        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w)
 
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
         # Test with flips
-        M_ap_f, xip_f, xim_f = self.corr.get_full_tomo(shear_maps, w, sumofweights, flip_g1=True, flip_g2=True)
+        M_ap_f, xip_f, xim_f = self.corr.get_full_tomo(
+            shear_maps, w, flip_g1=True, flip_g2=True
+        )
         self.assertTrue(np.allclose(M_ap, -M_ap_f))
         self.assertTrue(np.allclose(xip, xip_f))
         # xim should be different with flips
         # self.assertTrue(np.allclose(xim, xim_f))
+
+    def test_get_full_tomo_same_w_reuses_cache(self):
+        nzbins = 2
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        self._setup_mock_pairs()
+
+        with patch.object(
+            self.corr,
+            "_compute_tomo_sumofweights",
+            wraps=self.corr._compute_tomo_sumofweights,
+        ) as spy_compute:
+            self.corr.get_full_tomo(shear_maps, w)
+            self.corr.get_full_tomo(shear_maps, w)
+            self.assertEqual(spy_compute.call_count, 1)
+
+    def test_get_full_tomo_changed_w_recomputes(self):
+        nzbins = 2
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        w_changed = w.copy()
+        w_changed[0, 0] += 1e-3
+        self._setup_mock_pairs()
+
+        with patch.object(
+            self.corr,
+            "_compute_tomo_sumofweights",
+            wraps=self.corr._compute_tomo_sumofweights,
+        ) as spy_compute:
+            self.corr.get_full_tomo(shear_maps, w)
+            self.corr.get_full_tomo(shear_maps, w_changed)
+            self.assertEqual(spy_compute.call_count, 2)
+
+    def test_get_full_tomo_explicit_sumofweights_still_accepted(self):
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        sumofweights = np.ones((2, nzbin_combs))
+        self._setup_mock_pairs()
+
+        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
+        self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
+        self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
+        self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
     @patch('CosmoFuse.correlations.get_context')
     def test_calculate_pairs_2PCF_multithread_default(self, mock_get_context):

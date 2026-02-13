@@ -80,7 +80,7 @@ To then measure the i3PCF using GPU:
 Or directly for all bin combinations:
 
     correlation.prepare()
-    M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w, sumofweights)
+    M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w)
 
 These (in the tomographic case) can be converted to $\zeta_+$ & $\zeta_-$:
 
