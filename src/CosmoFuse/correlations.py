@@ -564,20 +564,20 @@ class Correlation:
             * self.exp2phi_dev[1]
         )
 
-        xip = (
-            (
-                self.backend.add.reduceat(
-                    g1 * self.backend.conjugate(g2), self.tot_bins_reduceat_dev[:-1]
-                )
-            )
-            / sumofweights_dev
-        ).reshape((self.n_patches, self.nbins))
-        xim = (
-            (
-                self.backend.add.reduceat(g1 * g2, self.tot_bins_reduceat_dev[:-1])
-            )
-            / sumofweights_dev
-        ).reshape((self.n_patches, self.nbins))
+        xip_num = self._reduce_pairs(g1 * self.backend.conjugate(g2))
+        xim_num = self._reduce_pairs(g1 * g2)
+        xip = self.backend.zeros(xip_num.shape, dtype=xip_num.dtype)
+        xim = self.backend.zeros(xim_num.shape, dtype=xim_num.dtype)
+        if np.ndim(self.backend.to_numpy(sumofweights_dev)) == 0:
+            if self.backend.to_numpy(sumofweights_dev) != 0:
+                xip = xip_num / sumofweights_dev
+                xim = xim_num / sumofweights_dev
+        else:
+            nonzero = sumofweights_dev != 0
+            xip[nonzero] = xip_num[nonzero] / sumofweights_dev[nonzero]
+            xim[nonzero] = xim_num[nonzero] / sumofweights_dev[nonzero]
+        xip = xip.reshape((self.n_patches, self.nbins))
+        xim = xim.reshape((self.n_patches, self.nbins))
 
         # Real parts
         return xip.real, xim.real
@@ -602,14 +602,20 @@ class Correlation:
             )
         return self.backend.to_device(sumofweights_np.reshape(expected_size))
 
+    def _reduce_pairs(self, values):
+        """Reduce pair-valued arrays into flattened per-patch/per-bin sums."""
+        starts = self.tot_bins_reduceat_dev[:-1]
+        zero = self.backend.zeros(1, dtype=values.dtype)
+        padded = self.backend.module.concatenate((values, zero))
+        reduced = self.backend.add.reduceat(padded, starts)
+        reduced[self.bins_dev == 0] = 0
+        return reduced
+
     def _compute_xipm_sumofweights(self, w1_dev, w2_dev):
         if self.inds_dev is None:
             self.prepare()
 
-        return self.backend.add.reduceat(
-            w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]],
-            self.tot_bins_reduceat_dev[:-1],
-        )
+        return self._reduce_pairs(w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]])
 
     def _get_xipm_sumofweights(self, w1_dev, w2_dev):
         w1_np = self.backend.to_numpy(w1_dev)
@@ -647,17 +653,15 @@ class Correlation:
         k = 0
         for i in range(nzbins):
             for j in range(i, nzbins):
-                sum_ij = self.backend.add.reduceat(
-                    w_dev[i][self.inds_dev[0]] * w_dev[j][self.inds_dev[1]],
-                    self.tot_bins_reduceat_dev[:-1],
+                sum_ij = self._reduce_pairs(
+                    w_dev[i][self.inds_dev[0]] * w_dev[j][self.inds_dev[1]]
                 )
                 sumofweights_dev[0, k] = sum_ij
                 if i == j:
                     sumofweights_dev[1, k] = sum_ij
                 else:
-                    sumofweights_dev[1, k] = self.backend.add.reduceat(
-                        w_dev[j][self.inds_dev[0]] * w_dev[i][self.inds_dev[1]],
-                        self.tot_bins_reduceat_dev[:-1],
+                    sumofweights_dev[1, k] = self._reduce_pairs(
+                        w_dev[j][self.inds_dev[0]] * w_dev[i][self.inds_dev[1]]
                     )
                 k += 1
 
