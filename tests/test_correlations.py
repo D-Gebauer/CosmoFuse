@@ -333,6 +333,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 theta_center=self.theta_center,
             )
             new_corr.load_pairs(tmp.name)
+            self.assertIsNotNone(new_corr.inds_dev)
 
             self.assertEqual(self.corr.n_patches, new_corr.n_patches)
             self.assertEqual(self.corr.nbins, new_corr.nbins)
@@ -455,11 +456,15 @@ class TestCorrelationCoverage(unittest.TestCase):
 
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
-    def test_preprocess(self, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a):
+    @patch('CosmoFuse.correlations.Correlation.prepare')
+    def test_preprocess(
+        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
+    ):
         """Test the preprocess method."""
         self.corr.preprocess(threads=1)
         mock_calculate_pairs_M_a.assert_called_once_with()
         mock_calculate_pairs_2PCF.assert_called_once_with(1)
+        mock_prepare.assert_called_once_with()
 
     def test_get_full_tomo(self):
         """Test the get_full_tomo method."""
@@ -484,6 +489,57 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertTrue(np.allclose(xip, xip_f))
         # xim should be different with flips
         # self.assertTrue(np.allclose(xim, xim_f))
+
+    def test_xipm_auto_sumofweights_matches_explicit(self):
+        self._setup_mock_pairs()
+        g11 = np.random.rand(self.npix)
+        g21 = np.random.rand(self.npix)
+        g12 = np.random.rand(self.npix)
+        g22 = np.random.rand(self.npix)
+        w1 = np.random.rand(self.npix)
+        w2 = np.random.rand(self.npix)
+
+        w1_dev = self.corr.backend.to_device(w1)
+        w2_dev = self.corr.backend.to_device(w2)
+        sumofweights = self.corr._compute_xipm_sumofweights(
+            w1_dev,
+            w2_dev,
+        )
+        xip_auto, xim_auto = self.corr.xipm(g11, g21, g12, g22, w1, w2)
+        xip_explicit, xim_explicit = self.corr.xipm(
+            g11, g21, g12, g22, w1, w2, sumofweights=sumofweights
+        )
+
+        np.testing.assert_allclose(
+            self.corr.backend.to_numpy(xip_auto),
+            self.corr.backend.to_numpy(xip_explicit),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            self.corr.backend.to_numpy(xim_auto),
+            self.corr.backend.to_numpy(xim_explicit),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+    def test_xipm_auto_sumofweights_reuses_cache(self):
+        self._setup_mock_pairs()
+        g11 = np.random.rand(self.npix)
+        g21 = np.random.rand(self.npix)
+        g12 = np.random.rand(self.npix)
+        g22 = np.random.rand(self.npix)
+        w1 = np.random.rand(self.npix)
+        w2 = np.random.rand(self.npix)
+
+        with patch.object(
+            self.corr,
+            "_compute_xipm_sumofweights",
+            wraps=self.corr._compute_xipm_sumofweights,
+        ) as spy_compute:
+            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.assertEqual(spy_compute.call_count, 1)
 
     def test_get_full_tomo_same_w_reuses_cache(self):
         nzbins = 2

@@ -70,9 +70,13 @@ These can be saved & loaded using:
     correlation.save_pairs("/path/to/pairs.h5")
     correlation.load_pairs("/path/to/pairs.h5")
 
-To measure the i3PCF for all tomographic bin combinations:
+To measure patch-level 2PCFs directly for one map pair:
+    
+    M_ap = correlation.get_M_a(g1, g2, w)
+    xip, xim = correlation.xipm(g11, g21, g12, g22, w1, w2)
 
-    correlation.prepare()
+Or directly for all tomographic bin combinations:
+
     # shear_maps shape: [nzbins, 2, npix]
     # w shape:          [nzbins, npix]
     M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w)

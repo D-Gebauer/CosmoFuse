@@ -199,6 +199,9 @@ class Correlation:
         self._tomo_sumofweights_cache = None
         self._tomo_sumofweights_cache_w_fingerprint = None
         self._tomo_sumofweights_cache_prepare_version = None
+        self._xipm_sumofweights_cache = None
+        self._xipm_sumofweights_cache_w_fingerprint = None
+        self._xipm_sumofweights_cache_prepare_version = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -218,6 +221,27 @@ class Correlation:
             self._tomo_sumofweights_cache_w_fingerprint = None
         if "_tomo_sumofweights_cache_prepare_version" not in self.__dict__:
             self._tomo_sumofweights_cache_prepare_version = None
+        if "_xipm_sumofweights_cache" not in self.__dict__:
+            self._xipm_sumofweights_cache = None
+        if "_xipm_sumofweights_cache_w_fingerprint" not in self.__dict__:
+            self._xipm_sumofweights_cache_w_fingerprint = None
+        if "_xipm_sumofweights_cache_prepare_version" not in self.__dict__:
+            self._xipm_sumofweights_cache_prepare_version = None
+
+    def _invalidate_prepared_state(self) -> None:
+        """Clears prepared backend buffers and cached tomographic weights."""
+        self.inds_dev = None
+        self.exp2phi_dev = None
+        self.bins_dev = None
+        self.tot_bins_dev = None
+        self.tot_bins_reduceat_dev = None
+        self.ntotpairs = 0
+        self._tomo_sumofweights_cache = None
+        self._tomo_sumofweights_cache_w_fingerprint = None
+        self._tomo_sumofweights_cache_prepare_version = None
+        self._xipm_sumofweights_cache = None
+        self._xipm_sumofweights_cache_w_fingerprint = None
+        self._xipm_sumofweights_cache_prepare_version = None
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -305,6 +329,7 @@ class Correlation:
         self.pair_inds = pair_inds
         self.pair_exp2phi = pair_exp2phi
         self.bins = bins
+        self._invalidate_prepared_state()
 
     def get_pairs_patch_M_a(
         self,
@@ -379,6 +404,8 @@ class Correlation:
         self.calculate_pairs_M_a()
         logger.info("Calculating pairs for 2PCF")
         self.calculate_pairs_2PCF(threads)
+        logger.info("Preparing flattened pair arrays on backend device")
+        self.prepare()
 
     def save_pairs(self, filepath):
         with h5py.File(filepath, "w") as fp:
@@ -407,6 +434,7 @@ class Correlation:
                 gp.create_dataset(f"Q_patch_area", data=self.Q_patch_area[i])
 
     def load_pairs(self, filepath, start_ind=0, stop_ind=None):
+        self._invalidate_prepared_state()
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
@@ -448,6 +476,7 @@ class Correlation:
                 self.Q_sin.append(gp["Q_sin"][:].astype(self.rotation_dtype, copy=False))
                 self.Q_val.append(gp["Q_val"][:].astype(self.rotation_dtype, copy=False))
                 self.Q_patch_area.append(self.rotation_dtype.type(gp["Q_patch_area"][()]))
+        self.prepare()
 
     def get_M_a(self, g1, g2, w):
         M_a = np.zeros(self.n_patches, dtype=self.map_dtype)
@@ -465,7 +494,7 @@ class Correlation:
         return M_a
 
     def prepare(self):
-        """Prepares arrays for correlation calculation (flattens and moves to device)."""
+        """Prepares pair arrays for correlation calculations on the backend device."""
         size = 0
         ninds = []
         for i in range(self.n_patches):
@@ -506,22 +535,32 @@ class Correlation:
         self.ntotpairs = size
         self._prepare_version += 1
 
-    def xipm(self, g11, g21, g12, g22, w1, w2, sumofweights):
-        # Arrays should already be on device if passed correctly, or we assume they are.
-        # But xipm is called with slices often, which are views.
-        # The arguments passed to xipm here are expected to be on the device.
+    def xipm(self, g11, g21, g12, g22, w1, w2, sumofweights=None):
+        # Accept numpy/cupy inputs and normalize to backend arrays.
 
         if self.inds_dev is None:
             self.prepare()
 
+        g11_dev = self.backend.to_device(g11).astype(self.map_dtype, copy=False)
+        g21_dev = self.backend.to_device(g21).astype(self.map_dtype, copy=False)
+        g12_dev = self.backend.to_device(g12).astype(self.map_dtype, copy=False)
+        g22_dev = self.backend.to_device(g22).astype(self.map_dtype, copy=False)
+        w1_dev = self.backend.to_device(w1).astype(self.map_dtype, copy=False)
+        w2_dev = self.backend.to_device(w2).astype(self.map_dtype, copy=False)
+
+        if sumofweights is None:
+            sumofweights_dev = self._get_xipm_sumofweights(w1_dev, w2_dev)
+        else:
+            sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
+
         g2 = (
-            w1[self.inds_dev[0]]
-            * ((g11[self.inds_dev[0]]) + 1j * g21[self.inds_dev[0]])
+            w1_dev[self.inds_dev[0]]
+            * ((g11_dev[self.inds_dev[0]]) + 1j * g21_dev[self.inds_dev[0]])
             * self.exp2phi_dev[0]
         )
         g1 = (
-            w2[self.inds_dev[1]]
-            * ((g12[self.inds_dev[1]]) + 1j * g22[self.inds_dev[1]])
+            w2_dev[self.inds_dev[1]]
+            * ((g12_dev[self.inds_dev[1]]) + 1j * g22_dev[self.inds_dev[1]])
             * self.exp2phi_dev[1]
         )
 
@@ -531,13 +570,13 @@ class Correlation:
                     g1 * self.backend.conjugate(g2), self.tot_bins_reduceat_dev[:-1]
                 )
             )
-            / sumofweights
+            / sumofweights_dev
         ).reshape((self.n_patches, self.nbins))
         xim = (
             (
                 self.backend.add.reduceat(g1 * g2, self.tot_bins_reduceat_dev[:-1])
             )
-            / sumofweights
+            / sumofweights_dev
         ).reshape((self.n_patches, self.nbins))
 
         # Real parts
@@ -547,6 +586,53 @@ class Correlation:
         w_contiguous = np.ascontiguousarray(w_np)
         digest = hashlib.blake2b(w_contiguous.tobytes()).hexdigest()
         return (w_contiguous.shape, w_contiguous.dtype.str, digest)
+
+    def _normalize_xipm_sumofweights(self, sumofweights):
+        sumofweights_np = np.asarray(
+            self.backend.to_numpy(sumofweights), dtype=self.map_dtype
+        )
+        if sumofweights_np.ndim == 0:
+            return self.backend.to_device(sumofweights_np)
+        expected_size = self.n_patches * self.nbins
+        if sumofweights_np.size != expected_size:
+            raise ValueError(
+                "sumofweights must have shape "
+                f"({self.n_patches}, {self.nbins}) or {expected_size} elements; "
+                f"got {sumofweights_np.shape}"
+            )
+        return self.backend.to_device(sumofweights_np.reshape(expected_size))
+
+    def _compute_xipm_sumofweights(self, w1_dev, w2_dev):
+        if self.inds_dev is None:
+            self.prepare()
+
+        return self.backend.add.reduceat(
+            w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]],
+            self.tot_bins_reduceat_dev[:-1],
+        )
+
+    def _get_xipm_sumofweights(self, w1_dev, w2_dev):
+        w1_np = self.backend.to_numpy(w1_dev)
+        w2_np = self.backend.to_numpy(w2_dev)
+        w_fingerprint = (
+            self._fingerprint_weights(w1_np),
+            self._fingerprint_weights(w2_np),
+        )
+
+        cache = self._xipm_sumofweights_cache
+        cache_is_valid = (
+            cache is not None
+            and self._xipm_sumofweights_cache_w_fingerprint == w_fingerprint
+            and self._xipm_sumofweights_cache_prepare_version == self._prepare_version
+        )
+        if cache_is_valid:
+            return cache
+
+        sumofweights_dev = self._compute_xipm_sumofweights(w1_dev, w2_dev)
+        self._xipm_sumofweights_cache = sumofweights_dev
+        self._xipm_sumofweights_cache_w_fingerprint = w_fingerprint
+        self._xipm_sumofweights_cache_prepare_version = self._prepare_version
+        return sumofweights_dev
 
     def _compute_tomo_sumofweights(self, w_dev, nzbins, nzbin_combs):
         if self.inds_dev is None:

@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `calculate_pairs_M_a` no longer accepts a `threads` argument and now reports progress with `tqdm`.
 - Precision options now support `float32`/`float64` for map and rotation arrays.
 - Default `rotation_precision` changed from `float64` to `float32`.
+- `preprocess()` and `load_pairs()` now call `prepare()` automatically, so manual `prepare()` is no longer required in the standard workflow.
+- `xipm` now computes and caches `sumofweights` automatically when not provided, while still accepting an explicit override.
 
 ### Removed
 - `Correlation.load_maps`.
