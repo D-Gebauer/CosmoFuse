@@ -296,7 +296,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         
         mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
 
-        self.corr.calculate_pairs_M_a(threads=1)
+        self.corr.calculate_pairs_M_a()
 
         self.assertEqual(len(self.corr.Q_cos), 1)
         self.assertEqual(len(self.corr.Q_sin), 1)
@@ -322,7 +322,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
         Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
         mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
-        self.corr.calculate_pairs_M_a(threads=1)
+        self.corr.calculate_pairs_M_a()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self.corr.save_pairs(tmp.name)
@@ -349,8 +349,8 @@ class TestCorrelationCalculations(unittest.TestCase):
                 np.testing.assert_allclose(self.corr.Q_val[i], new_corr.Q_val[i])
                 np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
                 
-    def test_prepare_and_calculate_2PCF(self):
-        """Test prepare and calculate_2PCF methods."""
+    def test_prepare_and_get_full_tomo(self):
+        """Test prepare and get_full_tomo methods."""
         # Calculate pairs first
         with patch('healpy.query_disc') as mock_query_disc, \
              patch('CosmoFuse.correlations.pixel2RaDec') as mock_pixel2RaDec:
@@ -369,16 +369,22 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.assertIsNotNone(self.corr.tot_bins_reduceat_dev)
         self.assertGreater(self.corr.ntotpairs, 0)
         
-        # Now test calculate_2PCF
-        g1 = np.random.rand(self.npix)
-        g2 = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-        
-        self.corr.load_maps(g1, g2, g1, g2, w, w)
-        xip, xim = self.corr.calculate_2PCF()
+        self.corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint32)]
+        self.corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        self.corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float64)]
+        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        self.corr.Q_patch_area = [3.0]
 
-        self.assertEqual(xip.shape, (self.corr.n_patches, self.corr.nbins))
-        self.assertEqual(xim.shape, (self.corr.n_patches, self.corr.nbins))
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.ones((nzbins, self.npix))
+
+        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w)
+
+        self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
+        self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
+        self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
     @patch('CosmoFuse.correlations.get_context')
     def test_calculate_pairs_2PCF_multithread(self, mock_get_context):
@@ -452,7 +458,7 @@ class TestCorrelationCoverage(unittest.TestCase):
     def test_preprocess(self, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a):
         """Test the preprocess method."""
         self.corr.preprocess(threads=1)
-        mock_calculate_pairs_M_a.assert_called_once_with(1)
+        mock_calculate_pairs_M_a.assert_called_once_with()
         mock_calculate_pairs_2PCF.assert_called_once_with(1)
 
     def test_get_full_tomo(self):
@@ -533,14 +539,21 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.corr.calculate_pairs_2PCF(threads=2)
         mock_get_context.assert_called_once_with()
 
-    def test_calculate_2PCF_prepares(self):
-        """Test that calculate_2PCF calls prepare if needed."""
-        self.corr.bins = [np.array([1], dtype=np.uint32)]
+    def test_get_full_tomo_prepares(self):
+        """Test that get_full_tomo calls prepare if needed."""
+        self.corr.bins = [np.array([1, 0], dtype=np.uint32)]
         self.corr.pair_inds = [np.zeros((2, 1), dtype=np.uint32)]
         self.corr.pair_exp2phi = [np.zeros((2, 1), dtype=np.complex128)]
-        with patch.object(self.corr, 'prepare', wraps=self.corr.prepare) as spy_prepare:
-            with self.assertRaises(AttributeError): # It will fail because maps are not loaded.
-                 self.corr.calculate_2PCF()
+        self.corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint32)]
+        self.corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        self.corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float64)]
+        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        self.corr.Q_patch_area = [3.0]
+
+        shear_maps = np.random.rand(1, 2, self.npix)
+        w = np.ones((1, self.npix))
+        with patch.object(self.corr, "prepare", wraps=self.corr.prepare) as spy_prepare:
+            self.corr.get_full_tomo(shear_maps, w)
             spy_prepare.assert_called_once()
 
 

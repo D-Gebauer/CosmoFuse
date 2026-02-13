@@ -56,8 +56,8 @@ First create a Correlation object:
         mask=mask,                          # mask
         fastmath=False,                     # numba fastmath toggle
         device="auto",                      # "cpu", "gpu", "auto", or GPU id
-        map_precision="float32",            # float16 / float32 / float64
-        rotation_precision="float32",       # float16 / float32 / float64
+        map_precision="float32",            # float32 / float64
+        rotation_precision="float32",       # float32 / float64
         index_precision="uint32",           # uint32 / uint64
     )
 
@@ -70,16 +70,11 @@ These can be saved & loaded using:
     correlation.save_pairs("/path/to/pairs.h5")
     correlation.load_pairs("/path/to/pairs.h5")
 
-To then measure the i3PCF using GPU:
+To measure the i3PCF for all tomographic bin combinations:
 
     correlation.prepare()
-    correlation.load_maps(g11, g21, g12, g22, w1, w2)
-    M_ap = correlation.get_M_a(g11, g21, w1)
-    xip, xim = correlation.get_all_xipm()
-
-Or directly for all bin combinations:
-
-    correlation.prepare()
+    # shear_maps shape: [nzbins, 2, npix]
+    # w shape:          [nzbins, npix]
     M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w)
 
 These (in the tomographic case) can be converted to $\zeta_+$ & $\zeta_-$:

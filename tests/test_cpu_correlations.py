@@ -145,17 +145,28 @@ class TestCPUCorrelation(unittest.TestCase):
             ).all()
         )
 
+    def _ensure_mock_maperture_pairs(self):
+        if hasattr(self.corr, "Q_inds"):
+            return
+
+        npatches = len(self.theta_center)
+        self.corr.Q_inds = [np.array([0], dtype=np.uint32) for _ in range(npatches)]
+        self.corr.Q_cos = [np.array([1.0], dtype=np.float64) for _ in range(npatches)]
+        self.corr.Q_sin = [np.array([0.0], dtype=np.float64) for _ in range(npatches)]
+        self.corr.Q_val = [np.array([1.0], dtype=np.float64) for _ in range(npatches)]
+        self.corr.Q_patch_area = [1.0 for _ in range(npatches)]
+
     def get_auto_correlation_single(self):
-        self.corr.load_maps(
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        self._ensure_mock_maperture_pairs()
+        shear_maps = self.shear_maps[1:2]
+        w = np.stack((self.w1,), axis=0)
+        _, xip_full, xim_full = self.corr.get_full_tomo(
+            shear_maps,
+            w,
             flip_g1=True,
         )
-        xip, xim = self.corr.calculate_2PCF(threads=1)
+        xip = xip_full[0]
+        xim = xim_full[0]
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_auto)).max(), 0.0, delta=1e-6
@@ -171,16 +182,16 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
     def get_auto_correlation_mult(self):
-        self.corr.load_maps(
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        self._ensure_mock_maperture_pairs()
+        shear_maps = self.shear_maps[1:2]
+        w = np.stack((self.w1,), axis=0)
+        _, xip_full, xim_full = self.corr.get_full_tomo(
+            shear_maps,
+            w,
             flip_g1=True,
         )
-        xip, xim = self.corr.calculate_2PCF(threads=5)
+        xip = xip_full[0]
+        xim = xim_full[0]
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_auto)).max(), 0.0, delta=1e-6
@@ -196,16 +207,15 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
     def get_cross_correlation_single(self):
-        self.corr.load_maps(
-            self.shear_maps[0, 0],
-            self.shear_maps[0, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        self._ensure_mock_maperture_pairs()
+        w = np.stack((self.w1, self.w2), axis=0)
+        _, xip_full, xim_full = self.corr.get_full_tomo(
+            self.shear_maps,
+            w,
             flip_g1=True,
         )
-        xip, xim = self.corr.calculate_2PCF(threads=1)
+        xip = xip_full[1]
+        xim = xim_full[1]
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -221,16 +231,15 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
     def get_cross_correlation_mult(self):
-        self.corr.load_maps(
-            self.shear_maps[0, 0],
-            self.shear_maps[0, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        self._ensure_mock_maperture_pairs()
+        w = np.stack((self.w1, self.w2), axis=0)
+        _, xip_full, xim_full = self.corr.get_full_tomo(
+            self.shear_maps,
+            w,
             flip_g1=True,
         )
-        xip, xim = self.corr.calculate_2PCF(threads=5)
+        xip = xip_full[1]
+        xim = xim_full[1]
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -258,18 +267,18 @@ class TestCPUCorrelation(unittest.TestCase):
     def test_patch_xip_xim_cosmofuse_vs_treecorr(self):
         """End-to-end validation of patch-wise xip/xim against TreeCorr."""
         self.corr.calculate_pairs_2PCF(threads=1)
+        self._ensure_mock_maperture_pairs()
 
         # Auto-correlation comparison
-        self.corr.load_maps(
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        shear_maps_auto = self.shear_maps[1:2]
+        w_auto = np.stack((self.w1,), axis=0)
+        _, xip_auto_full, xim_auto_full = self.corr.get_full_tomo(
+            shear_maps_auto,
+            w_auto,
             flip_g1=True,
         )
-        xip_auto, xim_auto = self.corr.calculate_2PCF(threads=1)
+        xip_auto = xip_auto_full[0]
+        xim_auto = xim_auto_full[0]
 
         np.testing.assert_allclose(
             xip_auto, self.xip_treecorr_auto, rtol=1e-6, atol=1e-10
@@ -279,16 +288,14 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
         # Cross-correlation comparison
-        self.corr.load_maps(
-            self.shear_maps[0, 0],
-            self.shear_maps[0, 1],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        w_cross = np.stack((self.w1, self.w2), axis=0)
+        _, xip_cross_full, xim_cross_full = self.corr.get_full_tomo(
+            self.shear_maps,
+            w_cross,
             flip_g1=True,
         )
-        xip_cross, xim_cross = self.corr.calculate_2PCF(threads=1)
+        xip_cross = xip_cross_full[1]
+        xim_cross = xim_cross_full[1]
 
         np.testing.assert_allclose(
             xip_cross, self.xip_treecorr_cross, rtol=1e-6, atol=1e-10

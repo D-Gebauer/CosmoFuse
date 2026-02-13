@@ -60,7 +60,7 @@ class TestUnifiedCorrelation(unittest.TestCase):
                     device='gpu'
                 )
 
-    def test_prepare_and_xipm_cpu(self):
+    def test_prepare_and_get_full_tomo_cpu(self):
         corr = Correlation(
             nside=self.nside,
             phi_center=self.phi_center,
@@ -85,26 +85,21 @@ class TestUnifiedCorrelation(unittest.TestCase):
         self.assertEqual(corr.inds_dev.shape, (2, 10))
         self.assertTrue(isinstance(corr.inds_dev, np.ndarray))
 
-        # Create dummy maps
+        corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint32)]
+        corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float64)]
+        corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
+        corr.Q_patch_area = [3.0]
+
+        # Create dummy tomographic maps (one redshift bin)
         npix = 12 * self.nside**2
-        g1 = np.ones(npix)
-        g2 = np.ones(npix)
-        w = np.ones(npix)
+        shear_maps = np.ones((1, 2, npix), dtype=np.float64)
+        w = np.ones((1, npix), dtype=np.float64)
 
-        # Load maps
-        corr.load_maps(g1, g2, g1, g2, w, w)
+        _, xip, xim = corr.get_full_tomo(shear_maps, w)
 
-        # Calculate xipm
-        # We need to pass arguments to xipm as backend arrays (which load_maps handles for stored ones)
-        # But public xipm method takes arguments.
-        # Wait, public xipm takes arguments g11, g21...
-        # But usually we call calculate_2PCF() or get_full_tomo().
-
-        # Let's test get_all_xipm which uses stored maps
-        xip, xim = corr.get_all_xipm()
-
-        self.assertEqual(xip.shape, (1, 2)) # 1 patch, 2 bins
-        self.assertEqual(xim.shape, (1, 2))
+        self.assertEqual(xip.shape, (1, 1, 2))
+        self.assertEqual(xim.shape, (1, 1, 2))
 
     def test_precision_applied_to_internal_arrays(self):
         corr = Correlation(
@@ -129,18 +124,22 @@ class TestUnifiedCorrelation(unittest.TestCase):
         self.assertEqual(corr.bins_dev.dtype, np.uint64)
         self.assertEqual(corr.tot_bins_dev.dtype, np.uint64)
 
-        npix = 12 * self.nside**2
-        g1 = np.ones(npix, dtype=np.float64)
-        g2 = np.ones(npix, dtype=np.float64)
-        w = np.ones(npix, dtype=np.float64)
-        corr.load_maps(g1, g2, g1, g2, w, w)
+        corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint64)]
+        corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]
+        corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
+        corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]
+        corr.Q_patch_area = [3.0]
 
-        self.assertEqual(corr.g11.dtype, np.float32)
-        self.assertEqual(corr.g21.dtype, np.float32)
-        self.assertEqual(corr.g12.dtype, np.float32)
-        self.assertEqual(corr.g22.dtype, np.float32)
-        self.assertEqual(corr.w1.dtype, np.float32)
-        self.assertEqual(corr.w2.dtype, np.float32)
+        npix = 12 * self.nside**2
+        shear_maps = np.ones((2, 2, npix), dtype=np.float64)
+        w = np.ones((2, npix), dtype=np.float64)
+
+        M_ap, xip, xim = corr.get_full_tomo(shear_maps, w)
+
+        self.assertEqual(M_ap.dtype, np.float32)
+        self.assertEqual(xip.dtype, np.float32)
+        self.assertEqual(xim.dtype, np.float32)
+        self.assertEqual(corr._tomo_sumofweights_cache.dtype, np.float32)
 
 if __name__ == '__main__':
     unittest.main()

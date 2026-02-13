@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0]
+
+### Changed
+- Full-tomography (`get_full_tomo`) is now the supported high-level path for correlation measurements in tests and README examples.
+- `calculate_pairs_M_a` no longer accepts a `threads` argument and now reports progress with `tqdm`.
+- Precision options now support `float32`/`float64` for map and rotation arrays.
+- Default `rotation_precision` changed from `float64` to `float32`.
+
+### Removed
+- `Correlation.load_maps`.
+- `Correlation.get_all_xipm`.
+- `Correlation.calculate_2PCF`.
+
 ## [3.0.1]
 
 ### Changed
