@@ -721,8 +721,8 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         corr.backend.fused_cross_corr_kernel = None
 
-        shear_maps = np.ones((1, 2, 12), dtype=np.float64)
-        w = np.ones((1, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        w = np.ones((2, 12), dtype=np.float64)
 
         with self.assertRaises(RuntimeError):
             corr.get_full_tomo(shear_maps, w)
@@ -750,13 +750,48 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         g11 = np.ones(12, dtype=np.float64)
         g21 = np.ones(12, dtype=np.float64)
+        g12 = g11
+        g22 = g21
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = w1
+
+        with self.assertRaises(RuntimeError):
+            corr.xipm(g11, g21, g12, g22, w1, w2)
+
+    def test_rotation_precision_affects_kernel_dtype(self):
+        """Rotation precision should drive complex kernel dtype choices."""
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+            rotation_precision="float32",
+        )
+
+        corr.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        corr.pair_exp2phi = [
+            np.ones((2, 2), dtype=corr.rotation_complex_dtype)
+        ]
+        corr.bins = [np.array([2], dtype=np.uint32)]
+        corr.prepare()
+
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
         g12 = np.ones(12, dtype=np.float64)
         g22 = np.ones(12, dtype=np.float64)
         w1 = np.ones(12, dtype=np.float64)
         w2 = np.ones(12, dtype=np.float64)
 
-        with self.assertRaises(RuntimeError):
-            corr.xipm(g11, g21, g12, g22, w1, w2)
+        xip, xim = corr.xipm(g11, g21, g12, g22, w1, w2)
+
+        self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
+        self.assertEqual(xip.dtype, np.float32)
+        self.assertEqual(xim.dtype, np.float32)
 
     def test_prepare_aperture_flat_populates(self):
         """Ensure aperture inputs are flattened with correct offsets."""
@@ -789,10 +824,10 @@ class TestCorrelationCoverage(unittest.TestCase):
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
-        g12 = np.random.rand(self.npix)
-        g22 = np.random.rand(self.npix)
+        g12 = g11
+        g22 = g21
         w1 = np.random.rand(self.npix)
-        w2 = np.random.rand(self.npix)
+        w2 = w1
 
         w1_dev = self.corr.backend.to_device(w1)
         w2_dev = self.corr.backend.to_device(w2)
@@ -822,10 +857,10 @@ class TestCorrelationCoverage(unittest.TestCase):
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
-        g12 = np.random.rand(self.npix)
-        g22 = np.random.rand(self.npix)
+        g12 = g11
+        g22 = g21
         w1 = np.random.rand(self.npix)
-        w2 = np.random.rand(self.npix)
+        w2 = w1
 
         with patch.object(
             self.corr,

@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_full_tomo` uses fused cross-correlation kernels to avoid redundant pair traversal on GPU and CPU.
 - `xipm` uses a JIT-compiled CPU kernel for pairwise accumulation.
 
+## [3.2.1]
+
+### Changed
+- `xipm` now routes auto- vs cross-correlation paths internally and reuses fused kernels when needed.
+- `get_full_tomo` now delegates auto/cross handling to the refactored `xipm` helpers without external averaging.
+
 ## [3.1.0]
 
 ### Changed

@@ -46,6 +46,7 @@ class TestCPUCorrelation(unittest.TestCase):
             theta_max=self.theta_max,
             mask=self.des_map,
             fastmath=False,
+            rotation_precision="float64",
         )
 
         self.shear_maps = np.zeros((2, 2, hp.nside2npix(self.nside)))
