@@ -23,7 +23,7 @@ class TestCPUCorrelation(unittest.TestCase):
         self.nbins = 10
 
         data_dir = Path(__file__).parent / "data"
-        mask_path = data_dir / "DESY3_Mask.fits"
+        mask_path = data_dir / "Mask.fits"
         phi_path = data_dir / "patch_center_phi.dat"
         theta_path = data_dir / "patch_center_theta.dat"
         shear_path = data_dir / "shear_maps.npy"
