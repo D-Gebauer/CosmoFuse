@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import healpy as hp
@@ -387,6 +388,75 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
+    def test_backend_import_with_fake_cupy(self):
+        """Ensure the CuPy-backed kernel setup path is exercised."""
+        import importlib.util
+
+        module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
+        module_name = "CosmoFuse.backend_fake_cupy"
+        fake_cupy = ModuleType("cupy")
+
+        def elementwise_kernel(*_args, **_kwargs):
+            def _kernel(*_kargs, **_kkwargs):
+                return None
+
+            return _kernel
+
+        class _FakeRuntime:
+            @staticmethod
+            def getDeviceCount():
+                return 1
+
+        class _FakeCuda:
+            runtime = _FakeRuntime()
+
+            class Device:
+                def __init__(self, _device_id):
+                    self._device_id = _device_id
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+        fake_cupy.ElementwiseKernel = elementwise_kernel
+        def elementwise_kernel(*_args, **_kwargs):
+            def _kernel(*_kargs, **_kkwargs):
+                return None
+
+            return _kernel
+
+        fake_cupy.ElementwiseKernel = elementwise_kernel
+        fake_cupy.asarray = np.asarray
+        fake_cupy.asnumpy = np.asarray
+        fake_cupy.zeros = np.zeros
+        fake_cupy.ones = np.ones
+        fake_cupy.sum = np.sum
+        fake_cupy.mean = np.mean
+        fake_cupy.conjugate = np.conjugate
+        fake_cupy.add = np.add
+        fake_cupy.float32 = np.float32
+        fake_cupy.float64 = np.float64
+        fake_cupy.complex64 = np.complex64
+        fake_cupy.complex128 = np.complex128
+        fake_cupy.uint32 = np.uint32
+        fake_cupy.int32 = np.int32
+        fake_cupy.cuda = _FakeCuda()
+
+        sys.modules["cupy"] = fake_cupy
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                self.fail("Could not load backend module for fake CuPy import")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            backend = module.get_backend("gpu")
+            self.assertIsNotNone(backend.fused_cross_corr_kernel)
+        finally:
+            sys.modules.pop("cupy", None)
+            sys.modules.pop(module_name, None)
+
     @patch('CosmoFuse.correlations.get_context')
     def test_calculate_pairs_2PCF_multithread(self, mock_get_context):
         """Test calculate_pairs_2PCF with multiple threads."""
@@ -464,6 +534,13 @@ class TestCorrelationCoverage(unittest.TestCase):
         state = corr.__getstate__()
         for key in [
             "M_A_all_patches",
+            "_prepare_version",
+            "_tomo_sumofweights_cache",
+            "_tomo_sumofweights_cache_w_fingerprint",
+            "_tomo_sumofweights_cache_prepare_version",
+            "_xipm_sumofweights_cache",
+            "_xipm_sumofweights_cache_w_fingerprint",
+            "_xipm_sumofweights_cache_prepare_version",
             "Q_inds_flat",
             "Q_cos_flat",
             "Q_sin_flat",
@@ -473,12 +550,100 @@ class TestCorrelationCoverage(unittest.TestCase):
         ]:
             state.pop(key, None)
 
-        new_corr = Correlation.__new__(Correlation)
-        new_corr.__setstate__(state)
+        restored = Correlation.__new__(Correlation)
+        restored.__setstate__(state)
 
-        self.assertIsNotNone(new_corr.M_A_all_patches)
-        self.assertIsNone(new_corr.Q_inds_flat)
-        self.assertIsNone(new_corr.Q_offsets)
+        self.assertIsNotNone(restored.M_A_all_patches)
+        self.assertEqual(restored._prepare_version, 0)
+        self.assertIsNone(restored._tomo_sumofweights_cache)
+        self.assertIsNone(restored._xipm_sumofweights_cache)
+        self.assertIsNone(restored.Q_inds_flat)
+        self.assertIsNone(restored.Q_offsets)
+
+    def test_get_full_tomo_fused_cpu_assignments(self):
+        """Cover fused-kernel assignment lines for CPU backend."""
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+
+        corr.inds_dev = np.array([[0, 1], [1, 2]], dtype=np.uint32)
+        corr.exp2phi_dev = np.ones((2, 2), dtype=np.complex128)
+        corr.bins_dev = np.array([2], dtype=np.uint32)
+        corr.tot_bins_reduceat_dev = np.array([0, 2], dtype=np.int64)
+        corr.ntotpairs = 2
+
+        corr.Q_inds = [np.array([0], dtype=np.uint32)]
+        corr.Q_cos = [np.array([1.0], dtype=np.float64)]
+        corr.Q_sin = [np.array([0.0], dtype=np.float64)]
+        corr.Q_val = [np.array([1.0], dtype=np.float64)]
+        corr.Q_patch_area = [1.0]
+
+        shear_maps = np.zeros((2, 2, 3), dtype=np.float64)
+        shear_maps[0, 0] = np.array([1.0, 2.0, 3.0])
+        shear_maps[1, 0] = np.array([4.0, 5.0, 6.0])
+        w = np.ones((2, 3), dtype=np.float64)
+        sumofweights = np.full((2, 3, 1), 2.0, dtype=np.float64)
+
+        called = {"value": False}
+
+        def fused_kernel(
+            g1a,
+            g2a,
+            g1b,
+            g2b,
+            wa,
+            wb,
+            ind_i,
+            ind_j,
+            exp_i,
+            exp_j,
+            out_ab_p,
+            out_ab_m,
+            out_ba_p,
+            out_ba_m,
+        ):
+            called["value"] = True
+            for idx in range(ind_i.shape[0]):
+                i = ind_i[idx]
+                j = ind_j[idx]
+                ga_i = g1a[i] + 1j * g2a[i]
+                gb_i = g1b[i] + 1j * g2b[i]
+                ga_j = g1a[j] + 1j * g2a[j]
+                gb_j = g1b[j] + 1j * g2b[j]
+
+                ga_i_rot = wa[i] * ga_i * exp_i[idx]
+                gb_i_rot = wb[i] * gb_i * exp_i[idx]
+                ga_j_rot = wa[j] * ga_j * exp_j[idx]
+                gb_j_rot = wb[j] * gb_j * exp_j[idx]
+
+                out_ab_p[idx] = gb_j_rot * np.conjugate(ga_i_rot)
+                out_ab_m[idx] = gb_j_rot * ga_i_rot
+                out_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
+                out_ba_m[idx] = ga_j_rot * gb_i_rot
+
+        corr.backend.fused_cross_corr_kernel = fused_kernel
+
+        _, xip, xim = corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
+
+        self.assertTrue(called["value"])
+
+        pairs = [(0, 1), (1, 2)]
+        g_a = shear_maps[0, 0]
+        g_b = shear_maps[1, 0]
+        ab_vals = [g_b[j] * g_a[i] for i, j in pairs]
+        ba_vals = [g_a[j] * g_b[i] for i, j in pairs]
+        expected = ((np.sum(ab_vals) / 2.0) + (np.sum(ba_vals) / 2.0)) / 2.0
+
+        self.assertAlmostEqual(xip[1, 0, 0], expected)
+        self.assertAlmostEqual(xim[1, 0, 0], expected)
 
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
@@ -528,6 +693,70 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         self.assertIsNone(self.corr.Q_inds_flat)
         self.assertIsNone(self.corr.Q_offsets)
+
+    def test_get_full_tomo_missing_fused_kernel(self):
+        """get_full_tomo should raise if fused kernel is missing."""
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+
+        corr.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        corr.bins = [np.array([2], dtype=np.uint32)]
+        corr.prepare()
+
+        corr.Q_inds = [np.array([0], dtype=np.uint32)]
+        corr.Q_cos = [np.array([1.0], dtype=np.float64)]
+        corr.Q_sin = [np.array([0.0], dtype=np.float64)]
+        corr.Q_val = [np.array([1.0], dtype=np.float64)]
+        corr.Q_patch_area = [1.0]
+
+        corr.backend.fused_cross_corr_kernel = None
+
+        shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+        w = np.ones((1, 12), dtype=np.float64)
+
+        with self.assertRaises(RuntimeError):
+            corr.get_full_tomo(shear_maps, w)
+
+    def test_xipm_missing_kernel_raises(self):
+        """xipm should raise if kernel is missing."""
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+
+        corr.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        corr.bins = [np.array([2], dtype=np.uint32)]
+        corr.prepare()
+
+        corr.backend.xipm_kernel = None
+
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
+        g12 = np.ones(12, dtype=np.float64)
+        g22 = np.ones(12, dtype=np.float64)
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        with self.assertRaises(RuntimeError):
+            corr.xipm(g11, g21, g12, g22, w1, w2)
 
     def test_prepare_aperture_flat_populates(self):
         """Ensure aperture inputs are flattened with correct offsets."""
@@ -607,6 +836,89 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.corr.xipm(g11, g21, g12, g22, w1, w2)
             self.assertEqual(spy_compute.call_count, 1)
 
+        def test_xipm_gpu_fallback_path_with_fake_cupy(self):
+            """Cover the non-CPU xipm path with a fake CuPy backend."""
+            import importlib.util
+            import sys
+            from types import ModuleType
+            from pathlib import Path
+
+            module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
+            module_name = "CosmoFuse.backend_fake_cupy_xipm"
+            fake_cupy = ModuleType("cupy")
+
+            class _FakeRuntime:
+                @staticmethod
+                def getDeviceCount():
+                    return 1
+
+            class _FakeCuda:
+                runtime = _FakeRuntime()
+
+                class Device:
+                    def __init__(self, _device_id):
+                        self._device_id = _device_id
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, tb):
+                        return False
+
+            fake_cupy.asarray = np.asarray
+            fake_cupy.asnumpy = np.asarray
+            fake_cupy.zeros = np.zeros
+            fake_cupy.ones = np.ones
+            fake_cupy.sum = np.sum
+            fake_cupy.mean = np.mean
+            fake_cupy.conjugate = np.conjugate
+            fake_cupy.add = np.add
+            fake_cupy.float32 = np.float32
+            fake_cupy.float64 = np.float64
+            fake_cupy.complex64 = np.complex64
+            fake_cupy.complex128 = np.complex128
+            fake_cupy.uint32 = np.uint32
+            fake_cupy.int32 = np.int32
+            fake_cupy.cuda = _FakeCuda()
+
+            sys.modules["cupy"] = fake_cupy
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                if spec is None or spec.loader is None:
+                    self.fail("Could not load backend module for fake CuPy import")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                corr = Correlation(
+                    nside=self.nside,
+                    phi_center=self.phi_center,
+                    theta_center=self.theta_center,
+                    nbins=self.nbins,
+                    device="gpu",
+                )
+                corr.backend = module.get_backend("gpu")
+
+                n_pairs = 4
+                corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint32)]
+                corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex128)]
+                corr.bins = [np.array([2, 2], dtype=np.uint32)]
+                corr.prepare()
+
+                npix = 12 * self.nside**2
+                g11 = np.ones(npix, dtype=np.float64)
+                g21 = np.ones(npix, dtype=np.float64)
+                g12 = np.ones(npix, dtype=np.float64)
+                g22 = np.ones(npix, dtype=np.float64)
+                w1 = np.ones(npix, dtype=np.float64)
+                w2 = np.ones(npix, dtype=np.float64)
+
+                xip, xim = corr.xipm(g11, g21, g12, g22, w1, w2)
+
+                self.assertEqual(xip.shape, (self.n_patches, self.nbins))
+                self.assertEqual(xim.shape, (self.n_patches, self.nbins))
+            finally:
+                sys.modules.pop("cupy", None)
+                sys.modules.pop(module_name, None)
     def test_get_full_tomo_same_w_reuses_cache(self):
         nzbins = 2
         shear_maps = np.random.rand(nzbins, 2, self.npix)

@@ -646,19 +646,32 @@ class Correlation:
         else:
             sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
 
-        g2 = (
-            w1_dev[self.inds_dev[0]]
-            * ((g11_dev[self.inds_dev[0]]) + 1j * g21_dev[self.inds_dev[0]])
-            * self.exp2phi_dev[0]
-        )
-        g1 = (
-            w2_dev[self.inds_dev[1]]
-            * ((g12_dev[self.inds_dev[1]]) + 1j * g22_dev[self.inds_dev[1]])
-            * self.exp2phi_dev[1]
+        xipm_kernel = getattr(self.backend, "xipm_kernel", None)
+        if xipm_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide an xipm kernel; use a supported backend."
+            )
+
+        out_p = self.backend.zeros(self.ntotpairs, dtype=self.backend.module.complex128)
+        out_m = self.backend.zeros(self.ntotpairs, dtype=self.backend.module.complex128)
+
+        xipm_kernel(
+            g11_dev,
+            g21_dev,
+            g12_dev,
+            g22_dev,
+            w1_dev,
+            w2_dev,
+            self.inds_dev[0],
+            self.inds_dev[1],
+            self.exp2phi_dev[0],
+            self.exp2phi_dev[1],
+            out_p,
+            out_m,
         )
 
-        xip_num = self._reduce_pairs(g1 * self.backend.conjugate(g2))
-        xim_num = self._reduce_pairs(g1 * g2)
+        xip_num = self.backend.module.real(self._reduce_pairs(out_p))
+        xim_num = self.backend.module.real(self._reduce_pairs(out_m))
         xip = self.backend.zeros(xip_num.shape, dtype=xip_num.dtype)
         xim = self.backend.zeros(xim_num.shape, dtype=xim_num.dtype)
         if np.ndim(self.backend.to_numpy(sumofweights_dev)) == 0:
@@ -848,6 +861,13 @@ class Correlation:
             [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
         )
 
+        fused_kernel = getattr(self.backend, "fused_cross_corr_kernel", None)
+        if fused_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide a fused cross-correlation kernel; "
+                "use a supported backend."
+            )
+
         k = 0
         for i in range(nzbins):
             M_ap[i] = self.get_M_a(
@@ -866,24 +886,56 @@ class Correlation:
                     )
                     xip2[k], xim2[k] = xip1[k], xim1[k]
                 else:
-                    xip1[k], xim1[k] = self.xipm(
+                    out_ab_p = self.backend.zeros(
+                        self.ntotpairs, dtype=self.backend.module.complex128
+                    )
+                    out_ab_m = self.backend.zeros(
+                        self.ntotpairs, dtype=self.backend.module.complex128
+                    )
+                    out_ba_p = self.backend.zeros(
+                        self.ntotpairs, dtype=self.backend.module.complex128
+                    )
+                    out_ba_m = self.backend.zeros(
+                        self.ntotpairs, dtype=self.backend.module.complex128
+                    )
+
+                    fused_kernel(
                         g1_fac * shear_maps_dev[i, 0],
                         g2_fac * shear_maps_dev[i, 1],
                         g1_fac * shear_maps_dev[j, 0],
                         g2_fac * shear_maps_dev[j, 1],
                         w_dev[i],
                         w_dev[j],
-                        sumofweights_dev[0, k],
+                        self.inds_dev[0],
+                        self.inds_dev[1],
+                        self.exp2phi_dev[0],
+                        self.exp2phi_dev[1],
+                        out_ab_p,
+                        out_ab_m,
+                        out_ba_p,
+                        out_ba_m,
                     )
-                    xip2[k], xim2[k] = self.xipm(
-                        g1_fac * shear_maps_dev[j, 0],
-                        g2_fac * shear_maps_dev[j, 1],
-                        g1_fac * shear_maps_dev[i, 0],
-                        g2_fac * shear_maps_dev[i, 1],
-                        w_dev[j],
-                        w_dev[i],
-                        sumofweights_dev[1, k],
-                    )
+
+                    xip1_num = self.backend.module.real(self._reduce_pairs(out_ab_p))
+                    xim1_num = self.backend.module.real(self._reduce_pairs(out_ab_m))
+                    xip2_num = self.backend.module.real(self._reduce_pairs(out_ba_p))
+                    xim2_num = self.backend.module.real(self._reduce_pairs(out_ba_m))
+
+                    sum_ab = sumofweights_dev[0, k]
+                    sum_ba = sumofweights_dev[1, k]
+
+                    nonzero_ab = sum_ab != 0
+                    nonzero_ba = sum_ba != 0
+
+                    xip1_flat = xip1[k].reshape(-1)
+                    xim1_flat = xim1[k].reshape(-1)
+                    xip2_flat = xip2[k].reshape(-1)
+                    xim2_flat = xim2[k].reshape(-1)
+
+                    xip1_flat[nonzero_ab] = xip1_num[nonzero_ab] / sum_ab[nonzero_ab]
+                    xim1_flat[nonzero_ab] = xim1_num[nonzero_ab] / sum_ab[nonzero_ab]
+                    xip2_flat[nonzero_ba] = xip2_num[nonzero_ba] / sum_ba[nonzero_ba]
+                    xim2_flat[nonzero_ba] = xim2_num[nonzero_ba] / sum_ba[nonzero_ba]
                 k += 1
         
         xip = (xip1 + xip2) / 2

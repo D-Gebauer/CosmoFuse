@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Aperture-mass computation now flattens per-patch inputs and runs in a single JIT kernel to reduce Python dispatch overhead.
+- `get_full_tomo` uses fused cross-correlation kernels to avoid redundant pair traversal on GPU and CPU.
+- `xipm` uses a JIT-compiled CPU kernel for pairwise accumulation.
 
 ## [3.1.0]
 
