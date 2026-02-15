@@ -30,6 +30,34 @@ _ROTATION_COMPLEX_PRECISION = {
 }
 
 
+def _compute_M_a_all_patches(
+    Q_inds: np.ndarray,
+    Q_cos: np.ndarray,
+    Q_sin: np.ndarray,
+    Q_val: np.ndarray,
+    Q_offsets: np.ndarray,
+    g1: np.ndarray,
+    g2: np.ndarray,
+    Q_w: np.ndarray,
+    Q_patch_area: np.ndarray,
+) -> np.ndarray:
+    n_patches = Q_offsets.size - 1
+    M_a = np.zeros(n_patches, dtype=g1.dtype)
+    for patch_idx in range(n_patches):
+        start = Q_offsets[patch_idx]
+        end = Q_offsets[patch_idx + 1]
+        sum_w = g1[0] * 0.0
+        sum_gtw = g1[0] * 0.0
+        for i in range(start, end):
+            idx = Q_inds[i]
+            gt = -g1[idx] * Q_cos[i] - g2[idx] * Q_sin[i]
+            weight = Q_w[idx]
+            sum_w += weight
+            sum_gtw += weight * gt * Q_val[i]
+        M_a[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
+    return M_a
+
+
 def _normalize_precision(
     precision: Union[str, np.dtype, type],
     allowed: Dict[str, Any],
@@ -167,6 +195,7 @@ class Correlation:
         self.n_patches = len(phi_center)
         self.fastmath = fastmath
         self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
+        self.M_A_all_patches = njit(fastmath=fastmath)(_compute_M_a_all_patches)
         self.radius_filter = 5 * self.theta_Q
 
         if mask is not None:
@@ -199,6 +228,12 @@ class Correlation:
         self._xipm_sumofweights_cache = None
         self._xipm_sumofweights_cache_w_fingerprint = None
         self._xipm_sumofweights_cache_prepare_version = None
+        self.Q_inds_flat = None
+        self.Q_cos_flat = None
+        self.Q_sin_flat = None
+        self.Q_val_flat = None
+        self.Q_offsets = None
+        self.Q_patch_area_flat = None
 
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
@@ -209,6 +244,8 @@ class Correlation:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
         self.backend = get_backend(self.device)
+        if "M_A_all_patches" not in self.__dict__:
+            self.M_A_all_patches = njit(fastmath=self.fastmath)(_compute_M_a_all_patches)
         if "_prepare_version" not in self.__dict__:
             self._prepare_version = 0
         if "_tomo_sumofweights_cache" not in self.__dict__:
@@ -223,6 +260,18 @@ class Correlation:
             self._xipm_sumofweights_cache_w_fingerprint = None
         if "_xipm_sumofweights_cache_prepare_version" not in self.__dict__:
             self._xipm_sumofweights_cache_prepare_version = None
+        if "Q_inds_flat" not in self.__dict__:
+            self.Q_inds_flat = None
+        if "Q_cos_flat" not in self.__dict__:
+            self.Q_cos_flat = None
+        if "Q_sin_flat" not in self.__dict__:
+            self.Q_sin_flat = None
+        if "Q_val_flat" not in self.__dict__:
+            self.Q_val_flat = None
+        if "Q_offsets" not in self.__dict__:
+            self.Q_offsets = None
+        if "Q_patch_area_flat" not in self.__dict__:
+            self.Q_patch_area_flat = None
 
     def _invalidate_prepared_state(self) -> None:
         """Clears prepared backend buffers and cached tomographic weights."""
@@ -238,6 +287,12 @@ class Correlation:
         self._xipm_sumofweights_cache = None
         self._xipm_sumofweights_cache_w_fingerprint = None
         self._xipm_sumofweights_cache_prepare_version = None
+        self.Q_inds_flat = None
+        self.Q_cos_flat = None
+        self.Q_sin_flat = None
+        self.Q_val_flat = None
+        self.Q_offsets = None
+        self.Q_patch_area_flat = None
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -391,6 +446,41 @@ class Correlation:
                 self.rotation_dtype.type(Qpix_inds.size * hp.nside2pixarea(self.nside))
             )
 
+        self._prepare_aperture_flat()
+
+    def _prepare_aperture_flat(self) -> None:
+        if not self.Q_inds:
+            self.Q_inds_flat = None
+            self.Q_cos_flat = None
+            self.Q_sin_flat = None
+            self.Q_val_flat = None
+            self.Q_offsets = None
+            self.Q_patch_area_flat = None
+            return
+
+        sizes = np.array([arr.size for arr in self.Q_inds], dtype=np.int64)
+        offsets = np.zeros(len(sizes) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum(sizes)
+        total = int(offsets[-1])
+
+        Q_inds_flat = np.zeros(total, dtype=self.index_dtype)
+        Q_cos_flat = np.zeros(total, dtype=self.rotation_dtype)
+        Q_sin_flat = np.zeros(total, dtype=self.rotation_dtype)
+        Q_val_flat = np.zeros(total, dtype=self.rotation_dtype)
+
+        for i, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+            Q_inds_flat[start:end] = self.Q_inds[i]
+            Q_cos_flat[start:end] = self.Q_cos[i]
+            Q_sin_flat[start:end] = self.Q_sin[i]
+            Q_val_flat[start:end] = self.Q_val[i]
+
+        self.Q_inds_flat = Q_inds_flat
+        self.Q_cos_flat = Q_cos_flat
+        self.Q_sin_flat = Q_sin_flat
+        self.Q_val_flat = Q_val_flat
+        self.Q_offsets = offsets
+        self.Q_patch_area_flat = np.asarray(self.Q_patch_area, dtype=self.rotation_dtype)
+
     def preprocess(self, threads: int = 1) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
@@ -473,22 +563,23 @@ class Correlation:
                 self.Q_sin.append(gp["Q_sin"][:].astype(self.rotation_dtype, copy=False))
                 self.Q_val.append(gp["Q_val"][:].astype(self.rotation_dtype, copy=False))
                 self.Q_patch_area.append(self.rotation_dtype.type(gp["Q_patch_area"][()]))
+            self._prepare_aperture_flat()
         self.prepare()
 
     def get_M_a(self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray) -> np.ndarray:
-        M_a = np.zeros(self.n_patches, dtype=self.map_dtype)
-        for i in range(self.n_patches):
-            M_a[i] = self.M_A_patch(
-                self.Q_inds[i],
-                self.Q_cos[i],
-                self.Q_sin[i],
-                self.Q_val[i],
-                g1,
-                g2,
-                w,
-                self.Q_patch_area[i],
-            )
-        return M_a
+        if self.Q_inds_flat is None:
+            self._prepare_aperture_flat()
+        return self.M_A_all_patches(
+            self.Q_inds_flat,
+            self.Q_cos_flat,
+            self.Q_sin_flat,
+            self.Q_val_flat,
+            self.Q_offsets,
+            g1,
+            g2,
+            w,
+            self.Q_patch_area_flat,
+        )
 
     def prepare(self) -> None:
         """Prepares pair arrays for correlation calculations on the backend device."""

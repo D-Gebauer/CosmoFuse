@@ -454,6 +454,32 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_array_equal(corr.phi_center, unpickled_corr.phi_center)
         np.testing.assert_array_equal(corr.theta_center, unpickled_corr.theta_center)
 
+    def test_setstate_rebuilds_missing_fields(self):
+        """Ensure __setstate__ restores optional cached attributes."""
+        corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+        )
+        state = corr.__getstate__()
+        for key in [
+            "M_A_all_patches",
+            "Q_inds_flat",
+            "Q_cos_flat",
+            "Q_sin_flat",
+            "Q_val_flat",
+            "Q_offsets",
+            "Q_patch_area_flat",
+        ]:
+            state.pop(key, None)
+
+        new_corr = Correlation.__new__(Correlation)
+        new_corr.__setstate__(state)
+
+        self.assertIsNotNone(new_corr.M_A_all_patches)
+        self.assertIsNone(new_corr.Q_inds_flat)
+        self.assertIsNone(new_corr.Q_offsets)
+
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
     @patch('CosmoFuse.correlations.Correlation.prepare')
@@ -489,6 +515,46 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertTrue(np.allclose(xip, xip_f))
         # xim should be different with flips
         # self.assertTrue(np.allclose(xim, xim_f))
+
+    def test_prepare_aperture_flat_empty(self):
+        """Ensure empty aperture inputs clear flat buffers."""
+        self.corr.Q_inds = []
+        self.corr.Q_cos = []
+        self.corr.Q_sin = []
+        self.corr.Q_val = []
+        self.corr.Q_patch_area = []
+
+        self.corr._prepare_aperture_flat()
+
+        self.assertIsNone(self.corr.Q_inds_flat)
+        self.assertIsNone(self.corr.Q_offsets)
+
+    def test_prepare_aperture_flat_populates(self):
+        """Ensure aperture inputs are flattened with correct offsets."""
+        self.corr.Q_inds = [
+            np.array([1, 2], dtype=np.uint32),
+            np.array([3, 4, 5], dtype=np.uint32),
+        ]
+        self.corr.Q_cos = [
+            np.array([0.1, 0.2], dtype=np.float64),
+            np.array([0.3, 0.4, 0.5], dtype=np.float64),
+        ]
+        self.corr.Q_sin = [
+            np.array([0.2, 0.1], dtype=np.float64),
+            np.array([0.6, 0.7, 0.8], dtype=np.float64),
+        ]
+        self.corr.Q_val = [
+            np.array([1.0, 1.0], dtype=np.float64),
+            np.array([2.0, 2.0, 2.0], dtype=np.float64),
+        ]
+        self.corr.Q_patch_area = [2.0, 3.0]
+
+        self.corr._prepare_aperture_flat()
+
+        np.testing.assert_array_equal(self.corr.Q_offsets, np.array([0, 2, 5]))
+        np.testing.assert_array_equal(
+            self.corr.Q_inds_flat, np.array([1, 2, 3, 4, 5], dtype=np.uint32)
+        )
 
     def test_xipm_auto_sumofweights_matches_explicit(self):
         self._setup_mock_pairs()
