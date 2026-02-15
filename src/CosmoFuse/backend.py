@@ -1,17 +1,17 @@
 import logging
 import warnings
+from typing import Any, Optional, Union
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 class Backend:
-    def __init__(self, name, module, device_id=None):
+    def __init__(self, name: str, module: Any, device_id: Optional[int] = None) -> None:
         self.name = name
         self.module = module
         self.device_id = device_id
 
-        # Common functions
         self.asarray = module.asarray
         self.zeros = module.zeros
         self.ones = module.ones
@@ -26,7 +26,7 @@ class Backend:
         self.uint32 = module.uint32
         self.int32 = module.int32
 
-    def to_device(self, array):
+    def to_device(self, array: Any) -> Any:
         """Move a numpy array to the backend device."""
         if self.name == 'numpy':
             return np.asarray(array)
@@ -35,7 +35,7 @@ class Backend:
                 return self.module.asarray(array)
         return array
 
-    def to_numpy(self, array):
+    def to_numpy(self, array: Any) -> np.ndarray:
         """Move an array from the backend device to numpy."""
         if self.name == 'numpy':
             return np.asarray(array)
@@ -43,12 +43,12 @@ class Backend:
             return self.module.asnumpy(array)
         return np.asarray(array)
 
-    def get_memory_pool(self):
+    def get_memory_pool(self) -> Optional[Any]:
         if self.name == 'cupy':
             return self.module.get_default_memory_pool()
         return None
 
-def get_backend(device='auto'):
+def get_backend(device: Union[str, int] = 'auto') -> "Backend":
     """
     Get the appropriate backend (numpy or cupy).
 

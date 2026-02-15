@@ -42,6 +42,7 @@ gpu = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-env>=0.8.0",
     "black>=22.0.0",
     "isort>=5.0.0",
     "flake8>=5.0.0",
@@ -111,6 +112,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+env = [
+    "NUMBA_DISABLE_JIT=1",
+]
 addopts = [
     "--strict-markers",
     "--strict-config",

@@ -30,6 +30,18 @@ class TestBackend(unittest.TestCase):
     def test_get_memory_pool_numpy(self):
         self.assertIsNone(self.numpy_backend.get_memory_pool())
 
+    def test_to_device_unknown_backend(self):
+        backend = Backend("other", np)
+        arr = np.array([1, 2, 3])
+        dev_arr = backend.to_device(arr)
+        self.assertIs(dev_arr, arr)
+
+    def test_to_numpy_unknown_backend(self):
+        backend = Backend("other", np)
+        arr = np.array([1, 2, 3])
+        np_arr = backend.to_numpy(arr)
+        self.assertIsInstance(np_arr, np.ndarray)
+
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_cupy_backend_creation(self):
         import cupy
@@ -102,6 +114,26 @@ class TestBackend(unittest.TestCase):
                 backend = CosmoFuse.backend.get_backend('auto')
                 self.assertEqual(backend.name, 'numpy')
                 mock_warn.assert_called_once_with("Cupy not installed, falling back to CPU (numpy).")
+
+    def test_get_backend_auto_import_error_in_gpu_block(self):
+        real_import = __import__
+        call_count = {"cupy": 0}
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "cupy":
+                if call_count["cupy"] == 0:
+                    call_count["cupy"] += 1
+                    return MagicMock()
+                raise ImportError("mocked cupy import failure")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+                backend = get_backend("auto")
+                self.assertEqual(backend.name, "numpy")
+                mock_warn.assert_called_once_with(
+                    "Cupy not installed, falling back to CPU (numpy)."
+                )
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_get_backend_auto_with_cupy(self):

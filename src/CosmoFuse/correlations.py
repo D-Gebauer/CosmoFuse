@@ -1,7 +1,7 @@
 import hashlib
 import logging
 from multiprocessing import get_all_start_methods, get_context
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
 import healpy as hp
@@ -32,7 +32,7 @@ _ROTATION_COMPLEX_PRECISION = {
 
 def _normalize_precision(
     precision: Union[str, np.dtype, type],
-    allowed: dict,
+    allowed: Dict[str, Any],
     name: str,
 ) -> np.dtype:
     try:
@@ -120,7 +120,6 @@ class Correlation:
         Raises:
             ValueError: If input parameters are invalid
         """
-        # Validate inputs
         if nside <= 0:
             raise ValueError("nside must be positive")
         if nbins <= 0:
@@ -183,12 +182,10 @@ class Correlation:
         self.device = device
         self.multiprocessing_start_method = multiprocessing_start_method
 
-        # CPU-side storage for pairs (lists of arrays)
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
 
-        # Attributes for prepared data (flattened and moved to device)
         self.inds_dev = None
         self.exp2phi_dev = None
         self.bins_dev = None
@@ -203,15 +200,14 @@ class Correlation:
         self._xipm_sumofweights_cache_w_fingerprint = None
         self._xipm_sumofweights_cache_prepare_version = None
 
-    def __getstate__(self):
+    def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
         if 'backend' in state:
             del state['backend']
         return state
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
-        # Re-initialize backend
         self.backend = get_backend(self.device)
         if "_prepare_version" not in self.__dict__:
             self._prepare_version = 0
@@ -317,7 +313,6 @@ class Correlation:
                 bins.append(result[2])
 
         else:
-            # "spawn" is safest in multi-threaded contexts, but callers can override.
             if self.multiprocessing_start_method == "default":
                 context = get_context()
             else:
@@ -333,11 +328,11 @@ class Correlation:
 
     def get_pairs_patch_M_a(
         self,
-        pixels_RA_Q_patch,
-        pixels_dec_Q_patch,
-        Q_patch_center_RA,
-        Q_patch_center_dec,
-    ):
+        pixels_RA_Q_patch: np.ndarray,
+        pixels_dec_Q_patch: np.ndarray,
+        Q_patch_center_RA: float,
+        Q_patch_center_dec: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         cos_vartheta = np.cos(pixels_RA_Q_patch - Q_patch_center_RA) * np.cos(
             Q_patch_center_dec
         ) * np.cos(pixels_dec_Q_patch) + np.sin(Q_patch_center_dec) * np.sin(
@@ -363,7 +358,7 @@ class Correlation:
 
         return cos_2phi, sin_2phi, Q
 
-    def calculate_pairs_M_a(self):
+    def calculate_pairs_M_a(self) -> None:
         self.Q_cos, self.Q_sin, self.Q_val, self.Q_inds, self.Q_patch_area = (
             [],
             [],
@@ -396,7 +391,7 @@ class Correlation:
                 self.rotation_dtype.type(Qpix_inds.size * hp.nside2pixarea(self.nside))
             )
 
-    def preprocess(self, threads=1):
+    def preprocess(self, threads: int = 1) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
         """
@@ -407,7 +402,7 @@ class Correlation:
         logger.info("Preparing flattened pair arrays on backend device")
         self.prepare()
 
-    def save_pairs(self, filepath):
+    def save_pairs(self, filepath: str) -> None:
         with h5py.File(filepath, "w") as fp:
             fp.attrs["nside"] = self.nside
             fp.attrs["nbins"] = self.nbins
@@ -433,7 +428,9 @@ class Correlation:
                 gp.create_dataset(f"Q_val", data=self.Q_val[i])
                 gp.create_dataset(f"Q_patch_area", data=self.Q_patch_area[i])
 
-    def load_pairs(self, filepath, start_ind=0, stop_ind=None):
+    def load_pairs(
+        self, filepath: str, start_ind: int = 0, stop_ind: Optional[int] = None
+    ) -> None:
         self._invalidate_prepared_state()
         self.pair_inds = []
         self.pair_exp2phi = []
@@ -478,7 +475,7 @@ class Correlation:
                 self.Q_patch_area.append(self.rotation_dtype.type(gp["Q_patch_area"][()]))
         self.prepare()
 
-    def get_M_a(self, g1, g2, w):
+    def get_M_a(self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray) -> np.ndarray:
         M_a = np.zeros(self.n_patches, dtype=self.map_dtype)
         for i in range(self.n_patches):
             M_a[i] = self.M_A_patch(
@@ -493,7 +490,7 @@ class Correlation:
             )
         return M_a
 
-    def prepare(self):
+    def prepare(self) -> None:
         """Prepares pair arrays for correlation calculations on the backend device."""
         size = 0
         ninds = []
@@ -523,21 +520,26 @@ class Correlation:
             (np.array([0], dtype=self.index_dtype), temp_bins_tot)
         )
 
-        # Move to backend device
         self.inds_dev = self.backend.to_device(temp_inds)
         self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
         self.bins_dev = self.backend.to_device(temp_bins)
         self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
-        # reduceat requires signed integer indices on numpy/cupy
         self.tot_bins_reduceat_dev = self.backend.to_device(
             temp_bins_tot.astype(np.int64, copy=False)
         )
         self.ntotpairs = size
         self._prepare_version += 1
 
-    def xipm(self, g11, g21, g12, g22, w1, w2, sumofweights=None):
-        # Accept numpy/cupy inputs and normalize to backend arrays.
-
+    def xipm(
+        self,
+        g11: np.ndarray,
+        g21: np.ndarray,
+        g12: np.ndarray,
+        g22: np.ndarray,
+        w1: np.ndarray,
+        w2: np.ndarray,
+        sumofweights: Optional[Union[np.ndarray, float]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         if self.inds_dev is None:
             self.prepare()
 
@@ -579,15 +581,21 @@ class Correlation:
         xip = xip.reshape((self.n_patches, self.nbins))
         xim = xim.reshape((self.n_patches, self.nbins))
 
-        # Real parts
-        return xip.real, xim.real
+        xip_np = self.backend.to_numpy(xip)
+        xim_np = self.backend.to_numpy(xim)
 
-    def _fingerprint_weights(self, w_np):
+        return np.real(xip_np), np.real(xim_np)
+
+    def _fingerprint_weights(
+        self, w_np: np.ndarray
+    ) -> Tuple[Tuple[int, ...], str, str]:
         w_contiguous = np.ascontiguousarray(w_np)
         digest = hashlib.blake2b(w_contiguous.tobytes()).hexdigest()
         return (w_contiguous.shape, w_contiguous.dtype.str, digest)
 
-    def _normalize_xipm_sumofweights(self, sumofweights):
+    def _normalize_xipm_sumofweights(
+        self, sumofweights: Union[np.ndarray, float]
+    ) -> Any:
         sumofweights_np = np.asarray(
             self.backend.to_numpy(sumofweights), dtype=self.map_dtype
         )
@@ -602,7 +610,7 @@ class Correlation:
             )
         return self.backend.to_device(sumofweights_np.reshape(expected_size))
 
-    def _reduce_pairs(self, values):
+    def _reduce_pairs(self, values: Any) -> Any:
         """Reduce pair-valued arrays into flattened per-patch/per-bin sums."""
         starts = self.tot_bins_reduceat_dev[:-1]
         zero = self.backend.zeros(1, dtype=values.dtype)
@@ -611,13 +619,13 @@ class Correlation:
         reduced[self.bins_dev == 0] = 0
         return reduced
 
-    def _compute_xipm_sumofweights(self, w1_dev, w2_dev):
+    def _compute_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
         if self.inds_dev is None:
             self.prepare()
 
         return self._reduce_pairs(w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]])
 
-    def _get_xipm_sumofweights(self, w1_dev, w2_dev):
+    def _get_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
         w1_np = self.backend.to_numpy(w1_dev)
         w2_np = self.backend.to_numpy(w2_dev)
         w_fingerprint = (
@@ -640,7 +648,9 @@ class Correlation:
         self._xipm_sumofweights_cache_prepare_version = self._prepare_version
         return sumofweights_dev
 
-    def _compute_tomo_sumofweights(self, w_dev, nzbins, nzbin_combs):
+    def _compute_tomo_sumofweights(
+        self, w_dev: Any, nzbins: int, nzbin_combs: int
+    ) -> Any:
         if self.inds_dev is None:
             self.prepare()
 
@@ -668,8 +678,13 @@ class Correlation:
         return sumofweights_dev
 
     def get_full_tomo(
-        self, shear_maps, w, sumofweights=None, flip_g1=False, flip_g2=False
-    ):
+        self,
+        shear_maps: np.ndarray,
+        w: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if self.inds_dev is None:
             self.prepare()
 
@@ -680,7 +695,6 @@ class Correlation:
         w_np = np.asarray(w, dtype=self.map_dtype)
         w_fingerprint = self._fingerprint_weights(w_np)
 
-        # Move inputs to device
         shear_maps_dev = self.backend.to_device(shear_maps_np)
         w_dev = self.backend.to_device(w_np)
 
@@ -730,7 +744,6 @@ class Correlation:
         M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
         map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
 
-        # Results on device
         xim1 = self.backend.zeros(
             [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
         )
@@ -746,11 +759,6 @@ class Correlation:
 
         k = 0
         for i in range(nzbins):
-            # M_a calculation remains on CPU as it uses numba njit on CPU arrays
-            # get_M_a uses self.M_A_patch which is a njit function.
-            # shear_maps and w passed to it must be CPU arrays.
-            # shear_maps_dev is the device copy.
-
             M_ap[i] = self.get_M_a(
                 g1_fac * shear_maps_np[i, 0], g2_fac * shear_maps_np[i, 1], w_np[i]
             )
@@ -787,9 +795,7 @@ class Correlation:
                     )
                 k += 1
         
-        # pairs are just upper triangle, so average over both combinations
         xip = (xip1 + xip2) / 2
         xim = (xim1 + xim2) / 2
 
-        # Return as numpy arrays
         return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
