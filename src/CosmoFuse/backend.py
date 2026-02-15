@@ -249,18 +249,17 @@ def _build_cupy_fused_cross_corr_kernel(module: Any) -> Any:
         C exp_i_val = exp_i[i];
         C exp_j_val = exp_j[i];
 
-        C ga_i_rot = wa[idx_i] * ga_i * exp_i_val;
-        C gb_i_rot = wb[idx_i] * gb_i * exp_i_val;
-        C ga_j_rot = wa[idx_j] * ga_j * exp_j_val;
-        C gb_j_rot = wb[idx_j] * gb_j * exp_j_val;
+        C ga_i_rot = C(g1a[idx_i] * wa[idx_i], g2a[idx_i] * wa[idx_i]) * exp_i_val;
+        C gb_i_rot = C(g1b[idx_i] * wb[idx_i], g2b[idx_i] * wb[idx_i]) * exp_i_val;
+        C ga_j_rot = C(g1a[idx_j] * wa[idx_j], g2a[idx_j] * wa[idx_j]) * exp_j_val;
+        C gb_j_rot = C(g1b[idx_j] * wb[idx_j], g2b[idx_j] * wb[idx_j]) * exp_j_val;
 
-        out_ab_p = gb_j_rot * thrust::conj(ga_i_rot);
+        out_ab_p = gb_j_rot * conj(ga_i_rot);
         out_ab_m = gb_j_rot * ga_i_rot;
-        out_ba_p = ga_j_rot * thrust::conj(gb_i_rot);
+        out_ba_p = ga_j_rot * conj(gb_i_rot);
         out_ba_m = ga_j_rot * gb_i_rot;
         """,
         "fused_cross_corr",
-        preamble="#include <thrust/complex.h>",
     )
 
 
@@ -273,18 +272,13 @@ def _build_cupy_xipm_kernel(module: Any) -> Any:
         const I idx_i = ind_i[i];
         const I idx_j = ind_j[i];
 
-        C g2 = w1[idx_i]
-            * C(g11[idx_i], g21[idx_i])
-            * exp_i[i];
-        C g1 = w2[idx_j]
-            * C(g12[idx_j], g22[idx_j])
-            * exp_j[i];
+        C g2 = C(g11[idx_i] * w1[idx_i], g21[idx_i] * w1[idx_i]) * exp_i[i];
+        C g1 = C(g12[idx_j] * w2[idx_j], g22[idx_j] * w2[idx_j]) * exp_j[i];
 
-        out_p = g1 * thrust::conj(g2);
+        out_p = g1 * conj(g2);
         out_m = g1 * g2;
         """,
         "xipm_kernel",
-        preamble="#include <thrust/complex.h>",
     )
 
 class Backend:
