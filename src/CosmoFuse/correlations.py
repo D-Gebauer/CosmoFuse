@@ -1,11 +1,9 @@
 import hashlib
 import logging
-from multiprocessing import get_all_start_methods, get_context
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
 import healpy as hp
-import numba
 import numpy as np
 from numba import njit, prange
 from scipy.special import binom
@@ -16,10 +14,6 @@ from .correlation_helpers import Q_T, M_a_patch
 from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
-
-
-def _init_worker() -> None:
-    numba.set_num_threads(1)
 
 _ALLOWED_FLOAT_PRECISIONS = {
     "float32": np.float32,
@@ -63,8 +57,7 @@ def _compute_M_a_all_patches(
     return M_a
 
 
-@njit(fastmath=True, parallel=True)
-def _compute_pairs_numba(
+def _compute_pairs_impl(
     patch_inds: np.ndarray,
     ra: np.ndarray,
     dec: np.ndarray,
@@ -208,6 +201,12 @@ def _compute_pairs_numba(
     )
 
 
+_compute_pairs_numba = njit(fastmath=True, parallel=True)(_compute_pairs_impl)
+_compute_pairs_numba_precise = njit(fastmath=False, parallel=True)(
+    _compute_pairs_impl
+)
+
+
 def _normalize_precision(
     precision: Union[str, np.dtype, type],
     allowed: Dict[str, Any],
@@ -250,7 +249,6 @@ class Correlation:
         fastmath: Whether to use fastmath in JIT compiled functions
         map_inds: Indices of valid pixels in the mask
         device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
-        multiprocessing_start_method: multiprocessing context used when threads > 1.
         map_precision: Float precision for map/shear/weight arrays.
         rotation_precision: Float precision for rotation/filter values.
         index_precision: Integer precision for index/binned arrays.
@@ -269,7 +267,6 @@ class Correlation:
         mask: Optional[np.ndarray] = None,
         fastmath: bool = True,
         device: Union[str, int] = "auto",
-        multiprocessing_start_method: str = "spawn",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
         index_precision: Union[str, np.dtype, type] = "uint32",
@@ -288,9 +285,6 @@ class Correlation:
             mask: Optional mask array
             fastmath: Whether to use fastmath in JIT compiled functions
             device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
-            multiprocessing_start_method: Start method used by multiprocessing when
-                pair calculations are parallelized. Use one of available Python start
-                methods or "default".
             map_precision: One of float32/float64 for map-like arrays.
             rotation_precision: One of float32/float64 for rotation/filter arrays.
             index_precision: One of uint32/uint64 for index-like arrays.
@@ -310,13 +304,6 @@ class Correlation:
             raise ValueError("theta_Q must be positive")
         if len(phi_center) != len(theta_center):
             raise ValueError("phi_center and theta_center must have the same length")
-        if multiprocessing_start_method != "default":
-            available_start_methods = get_all_start_methods()
-            if multiprocessing_start_method not in available_start_methods:
-                raise ValueError(
-                    "multiprocessing_start_method must be one of "
-                    f"{available_start_methods} or 'default'"
-                )
         self.map_dtype = _normalize_precision(
             map_precision, _ALLOWED_FLOAT_PRECISIONS, "map_precision"
         )
@@ -359,7 +346,6 @@ class Correlation:
 
         self.backend = get_backend(device)
         self.device = device
-        self.multiprocessing_start_method = multiprocessing_start_method
 
         self.pair_inds = []
         self.pair_exp2phi = []
@@ -464,7 +450,9 @@ class Correlation:
             exp2phi1_imag,
             exp2phi2_real,
             exp2phi2_imag,
-        ) = _compute_pairs_numba(
+        ) = (
+            _compute_pairs_numba if self.fastmath else _compute_pairs_numba_precise
+        )(
             patch_inds_local,
             ra_local,
             dec_local,
@@ -530,24 +518,14 @@ class Correlation:
 
         return all_inds, exp2theta.astype(self.rotation_complex_dtype, copy=False), ninds
 
-    def calculate_pairs_2PCF(self, threads: int = 1) -> None:
-        if threads == 1:
-            pair_inds, pair_exp2phi, bins = [], [], []
-            for i in trange(self.n_patches):
-                result = self.__get_pairs_helper__(i)
+    def calculate_pairs_2PCF(self) -> None:
+        pair_inds, pair_exp2phi, bins = [], [], []
+        for i in trange(self.n_patches, desc="2PCF pairs", unit="patch"):
+            result = self.__get_pairs_helper__(i)
 
-                pair_inds.append(result[0])
-                pair_exp2phi.append(result[1])
-                bins.append(result[2])
-
-        else:
-            if self.multiprocessing_start_method == "default":
-                context = get_context()
-            else:
-                context = get_context(self.multiprocessing_start_method)
-            with context.Pool(threads, initializer=_init_worker) as p:
-                results = p.map(self.__get_pairs_helper__, range(self.n_patches))
-                pair_inds, pair_exp2phi, bins = list(map(list, zip(*results)))
+            pair_inds.append(result[0])
+            pair_exp2phi.append(result[1])
+            bins.append(result[2])
 
         self.pair_inds = pair_inds
         self.pair_exp2phi = pair_exp2phi
@@ -586,6 +564,34 @@ class Correlation:
 
         return cos_2phi, sin_2phi, Q
 
+    def __get_pairs_M_a_helper__(
+        self, i: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
+        pix_center = hp.ang2pix(self.nside, self.theta_center[i], self.phi_center[i])
+        patch_inds = hp.query_disc(
+            self.nside, vec=vec, radius=np.radians(5 * self.theta_Q / 60)
+        )
+        Qpix_inds = np.intersect1d(patch_inds, self.map_inds)
+        Qpix_inds = Qpix_inds[Qpix_inds != pix_center]
+
+        ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
+        Q_ra, Q_dec = pixel2RaDec(Qpix_inds, self.nside)
+        Q_cos, Q_sin, Q_val = self.get_pairs_patch_M_a(
+            Q_ra, Q_dec, ra_center, dec_center
+        )
+
+        Q_patch_area = self.rotation_dtype.type(
+            Qpix_inds.size * hp.nside2pixarea(self.nside)
+        )
+        return (
+            Q_cos.astype(self.rotation_dtype, copy=False),
+            Q_sin.astype(self.rotation_dtype, copy=False),
+            Q_val.astype(self.rotation_dtype, copy=False),
+            Qpix_inds.astype(self.index_dtype, copy=False),
+            Q_patch_area,
+        )
+
     def calculate_pairs_M_a(self) -> None:
         self.Q_cos, self.Q_sin, self.Q_val, self.Q_inds, self.Q_patch_area = (
             [],
@@ -595,29 +601,15 @@ class Correlation:
             [],
         )
 
-        for i in trange(self.n_patches):
-            vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
-            pix_center = hp.ang2pix(
-                self.nside, self.theta_center[i], self.phi_center[i]
+        for i in trange(self.n_patches, desc="M_ap pairs", unit="patch"):
+            Q_cos, Q_sin, Q_val, Q_inds, Q_patch_area = self.__get_pairs_M_a_helper__(
+                i
             )
-            patch_inds = hp.query_disc(
-                self.nside, vec=vec, radius=np.radians(5 * self.theta_Q / 60)
-            )
-            Qpix_inds = np.intersect1d(patch_inds, self.map_inds)
-            ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
-            Qpix_inds = Qpix_inds[~np.isin(Qpix_inds, pix_center)]
-            Q_ra, Q_dec = pixel2RaDec(Qpix_inds, self.nside)
-            Q_cos, Q_sin, Q_val = self.get_pairs_patch_M_a(
-                Q_ra, Q_dec, ra_center, dec_center
-            )
-
-            self.Q_cos.append(Q_cos.astype(self.rotation_dtype, copy=False))
-            self.Q_sin.append(Q_sin.astype(self.rotation_dtype, copy=False))
-            self.Q_val.append(Q_val.astype(self.rotation_dtype, copy=False))
-            self.Q_inds.append(Qpix_inds.astype(self.index_dtype, copy=False))
-            self.Q_patch_area.append(
-                self.rotation_dtype.type(Qpix_inds.size * hp.nside2pixarea(self.nside))
-            )
+            self.Q_cos.append(Q_cos)
+            self.Q_sin.append(Q_sin)
+            self.Q_val.append(Q_val)
+            self.Q_inds.append(Q_inds)
+            self.Q_patch_area.append(Q_patch_area)
 
         self._prepare_aperture_flat()
 
@@ -654,14 +646,14 @@ class Correlation:
         self.Q_offsets = offsets
         self.Q_patch_area_flat = np.asarray(self.Q_patch_area, dtype=self.rotation_dtype)
 
-    def preprocess(self, threads: int = 1) -> None:
+    def preprocess(self) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
         """
         logger.info("Calculating pairs for aperture mass")
         self.calculate_pairs_M_a()
         logger.info("Calculating pairs for 2PCF")
-        self.calculate_pairs_2PCF(threads)
+        self.calculate_pairs_2PCF()
         logger.info("Preparing flattened pair arrays on backend device")
         self.prepare()
 

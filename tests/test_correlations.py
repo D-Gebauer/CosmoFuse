@@ -133,16 +133,6 @@ class TestCorrelation(unittest.TestCase):
                 mask=mask,
             )
 
-    def test_init_invalid_multiprocessing_start_method(self):
-        """Test initialization with invalid multiprocessing start method."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                multiprocessing_start_method="definitely_invalid",
-            )
-
     def test_init_precision_configuration(self):
         """Test initialization with custom precision configuration."""
         corr = Correlation(
@@ -227,11 +217,35 @@ class TestCorrelation(unittest.TestCase):
             self.assertEqual(inds.shape, (2, 0))
         self.assertEqual(exp2phi.shape, (2, 0))
 
-    def test_init_worker_sets_numba_threads(self):
-        """Test that worker initializer limits Numba to one thread."""
-        with patch.object(correlations_module.numba, "set_num_threads") as mock_set:
-            correlations_module._init_worker()
-            mock_set.assert_called_once_with(1)
+    def test_get_pairs_patch_respects_fastmath_flag(self):
+        """fastmath=False should use the precise pair kernel."""
+        corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+            nbins=self.nbins,
+            fastmath=False,
+        )
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.0, 0.1], dtype=np.float64)
+        dec = np.array([0.0, 0.1], dtype=np.float64)
+
+        empty_out = (
+            np.array([], dtype=np.uint32),
+            np.array([], dtype=np.uint32),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.float64),
+        )
+
+        with patch.object(correlations_module, "_compute_pairs_numba", return_value=empty_out) as fast_mock, \
+             patch.object(correlations_module, "_compute_pairs_numba_precise", return_value=empty_out) as precise_mock:
+            corr.get_pairs_patch(patch_inds, ra, dec)
+
+        fast_mock.assert_not_called()
+        precise_mock.assert_called_once()
 
     def test_compute_pairs_numba_pyfunc_bin_gap_skips_pairs(self):
         """Test py_func path where bin edges do not admit any pair assignment."""
@@ -435,7 +449,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         # Mocking for calculate_pairs_2PCF
         mock_query_disc.return_value = np.arange(100)
         mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
-        self.corr.calculate_pairs_2PCF(threads=1)
+        self.corr.calculate_pairs_2PCF()
 
         # Mocking for calculate_pairs_M_a
         mock_ang2pix.return_value = 99
@@ -480,7 +494,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             mock_query_disc.return_value = np.arange(100)
             mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
 
-            self.corr.calculate_pairs_2PCF(threads=1)
+            self.corr.calculate_pairs_2PCF()
         
         self.corr.prepare()
 
@@ -577,25 +591,20 @@ class TestCorrelationCalculations(unittest.TestCase):
             sys.modules.pop("cupy", None)
             sys.modules.pop(module_name, None)
 
-    @patch('CosmoFuse.correlations.get_context')
-    def test_calculate_pairs_2PCF_multithread(self, mock_get_context):
-        """Test calculate_pairs_2PCF with multiple threads."""
-        # Mock the pool to avoid actual multiprocessing
-        mock_pool = mock_get_context.return_value.Pool.return_value.__enter__.return_value
-        mock_pool.map.return_value = [
-            (np.array([[1], [2]]), np.array([1+1j]), np.array([1])),
-            (np.array([[3], [4]]), np.array([1-1j]), np.array([1])),
-        ]
-
-        # Use 2 patches for this test
+    def test_calculate_pairs_2PCF(self):
+        """Test calculate_pairs_2PCF sequential aggregation."""
         self.corr.n_patches = 2
-        self.corr.phi_center = np.array([0.0, 1.0])
-        self.corr.theta_center = np.array([0.0, 1.0])
+        with patch.object(
+            self.corr,
+            "__get_pairs_helper__",
+            side_effect=[
+                (np.array([[1], [2]]), np.array([1 + 1j]), np.array([1])),
+                (np.array([[3], [4]]), np.array([1 - 1j]), np.array([1])),
+            ],
+        ) as mock_helper:
+            self.corr.calculate_pairs_2PCF()
 
-        self.corr.calculate_pairs_2PCF(threads=2)
-
-        mock_get_context.assert_called_once_with('spawn')
-        mock_pool.map.assert_called_once()
+        self.assertEqual(mock_helper.call_count, 2)
         self.assertEqual(len(self.corr.pair_inds), 2)
 
 
@@ -772,9 +781,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
     ):
         """Test the preprocess method."""
-        self.corr.preprocess(threads=1)
+        self.corr.preprocess()
         mock_calculate_pairs_M_a.assert_called_once_with()
-        mock_calculate_pairs_2PCF.assert_called_once_with(1)
+        mock_calculate_pairs_2PCF.assert_called_once_with()
         mock_prepare.assert_called_once_with()
 
     def test_get_full_tomo(self):
@@ -912,6 +921,70 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
         self.assertEqual(xip.dtype, np.float32)
         self.assertEqual(xim.dtype, np.float32)
+
+    def test_load_pairs_downcasts_to_instance_precisions(self):
+        """Loading high-precision pairs into low-precision instance should cast dtypes."""
+        high = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+            map_precision="float64",
+            rotation_precision="float64",
+            index_precision="uint64",
+        )
+        high.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint64)]
+        high.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        high.bins = [np.array([2], dtype=np.uint64)]
+        high.Q_inds = [np.array([0, 1], dtype=np.uint64)]
+        high.Q_cos = [np.array([1.0, 1.0], dtype=np.float64)]
+        high.Q_sin = [np.array([0.0, 0.0], dtype=np.float64)]
+        high.Q_val = [np.array([1.0, 1.0], dtype=np.float64)]
+        high.Q_patch_area = [np.float64(2.0)]
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            high.save_pairs(tmp.name)
+
+            low = Correlation(
+                nside=1,
+                phi_center=np.array([0.0]),
+                theta_center=np.array([0.0]),
+                nbins=1,
+                theta_min=1.0,
+                theta_max=2.0,
+                patch_size=1.0,
+                theta_Q=1.0,
+                device="cpu",
+                map_precision="float32",
+                rotation_precision="float32",
+                index_precision="uint32",
+            )
+            low.load_pairs(tmp.name)
+
+            self.assertEqual(low.pair_inds[0].dtype, np.uint32)
+            self.assertEqual(low.bins[0].dtype, np.uint32)
+            self.assertEqual(low.pair_exp2phi[0].dtype, np.complex64)
+            self.assertEqual(low.Q_inds[0].dtype, np.uint32)
+            self.assertEqual(low.Q_cos[0].dtype, np.float32)
+            self.assertEqual(low.Q_sin[0].dtype, np.float32)
+            self.assertEqual(low.Q_val[0].dtype, np.float32)
+            self.assertEqual(np.asarray(low.Q_patch_area).dtype, np.float32)
+            self.assertEqual(low.exp2phi_dev.dtype, np.complex64)
+
+            g11 = np.ones(12, dtype=np.float64)
+            g21 = np.ones(12, dtype=np.float64)
+            g12 = np.ones(12, dtype=np.float64)
+            g22 = np.ones(12, dtype=np.float64)
+            w1 = np.ones(12, dtype=np.float64)
+            w2 = np.ones(12, dtype=np.float64)
+            xip, xim = low.xipm(g11, g21, g12, g22, w1, w2)
+            self.assertEqual(xip.dtype, np.float32)
+            self.assertEqual(xim.dtype, np.float32)
 
     def test_prepare_aperture_flat_populates(self):
         """Ensure aperture inputs are flattened with correct offsets."""
@@ -1118,15 +1191,6 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
-
-    @patch('CosmoFuse.correlations.get_context')
-    def test_calculate_pairs_2PCF_multithread_default(self, mock_get_context):
-        """Test calculate_pairs_2PCF with multiple threads and default context."""
-        self.corr.multiprocessing_start_method = "default"
-        mock_pool = mock_get_context.return_value.Pool.return_value.__enter__.return_value
-        mock_pool.map.return_value = [(np.array([[]]), np.array([]), np.array([]))]
-        self.corr.calculate_pairs_2PCF(threads=2)
-        mock_get_context.assert_called_once_with()
 
     def test_get_full_tomo_prepares(self):
         """Test that get_full_tomo calls prepare if needed."""

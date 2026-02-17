@@ -63,7 +63,7 @@ First create a Correlation object:
 
 Then Calculate pairs:
 
-    correlation.preprocess(threads=100) # Calculation of 2PCF pairs can be multithreaded
+    correlation.preprocess()
 
 These can be saved & loaded using:
 

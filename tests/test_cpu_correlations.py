@@ -116,8 +116,8 @@ class TestCPUCorrelation(unittest.TestCase):
         self.rnom = correlation.rnom
         # Setup complete
 
-    def find_pairs(self, threads):
-        self.corr.calculate_pairs_2PCF(threads=threads)
+    def find_pairs(self):
+        self.corr.calculate_pairs_2PCF()
         self.assertTrue(
             (
                 np.array(self.npairs_treecorr_auto).astype("int")
@@ -192,10 +192,9 @@ class TestCPUCorrelation(unittest.TestCase):
         )
 
     def test_cpu_correlation(self):
-        for threads in [1, 5]:
-            self.find_pairs(threads=threads)
-            self.get_auto_correlation()
-            self.get_cross_correlation()
+        self.find_pairs()
+        self.get_auto_correlation()
+        self.get_cross_correlation()
 
 
 if __name__ == "__main__":

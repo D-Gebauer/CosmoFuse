@@ -16,7 +16,17 @@ def pixel2RaDec(
     Returns:
         Tuple of (ra, dec) in radians
     """
-    theta, phi = hp.pixelfunc.pix2ang(NSIDE, pixel_indices, nest=False)
+    if np.isscalar(pixel_indices):
+        pix_for_healpy = int(pixel_indices)
+    else:
+        pix_arr = np.asarray(pixel_indices)
+        if np.issubdtype(pix_arr.dtype, np.unsignedinteger):
+            max_int64 = np.iinfo(np.int64).max
+            if pix_arr.size > 0 and np.max(pix_arr) > max_int64:
+                raise ValueError("pixel indices exceed int64 range")
+        pix_for_healpy = pix_arr.astype(np.int64, copy=False)
+
+    theta, phi = hp.pixelfunc.pix2ang(NSIDE, pix_for_healpy, nest=False)
     ra = phi
     dec = np.pi / 2.0 - theta
     return ra, dec

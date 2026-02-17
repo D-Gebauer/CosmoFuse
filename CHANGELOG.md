@@ -10,11 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Replaced dense O(N²) pair-distance matrix construction in `Correlation.get_pairs_patch` with an on-the-fly Numba kernel (`_compute_pairs_numba`) that computes angular distances and phase rotations per candidate pair.
 - Inlined spherical-trigonometry rotation math directly in the pair kernel to avoid helper-call overhead and keep the hot loop fully JIT-optimized.
-- Added hybrid parallelism for pair preprocessing: when `calculate_pairs_2PCF(threads > 1)` uses multiprocessing, each worker now forces Numba to single-threaded execution via `_init_worker` to prevent CPU oversubscription.
+- Pair precomputation now respects the `Correlation.fastmath` setting by dispatching to a precise (`fastmath=False`) or fast (`fastmath=True`) Numba kernel variant.
+- `Correlation.preprocess` no longer accepts a `threads` argument and now uses internal default pair-precompute execution paths.
+
+### Fixed
+- `pixel2RaDec` now normalizes unsigned index arrays (including `uint64`) to a Healpy-compatible integer dtype before calling `pix2ang`, fixing preprocessing failures when `index_precision='uint64'`.
 
 ### Removed
 - Removed obsolete helper functions `getAngle` and `radec_to_xyz` from `correlation_helpers.py`.
 - Removed unused `_compute_pairs_numba` argument `complex_dtype`.
+- Removed multiprocessing configuration from `Correlation` (`multiprocessing_start_method`).
+- Removed `threads` arguments from `calculate_pairs_2PCF` and `calculate_pairs_M_a`.
 
 ### Tests
 - Added targeted tests for worker initialization, early-return edge paths in pair finding, and kernel edge branches.
