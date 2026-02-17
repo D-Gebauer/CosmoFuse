@@ -638,6 +638,29 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.corr.Q_patch_area = [3.0]
         self.corr.prepare()
 
+    def _make_small_cpu_corr(self) -> Correlation:
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        corr.bins = [np.array([2], dtype=np.uint32)]
+        corr.Q_inds = [np.array([0], dtype=np.uint32)]
+        corr.Q_cos = [np.array([1.0], dtype=np.float64)]
+        corr.Q_sin = [np.array([0.0], dtype=np.float64)]
+        corr.Q_val = [np.array([1.0], dtype=np.float64)]
+        corr.Q_patch_area = [1.0]
+        corr.prepare()
+        return corr
+
     def test_pickleable(self):
         """Test if the Correlation object can be pickled and unpickled."""
         corr = Correlation(
@@ -777,8 +800,193 @@ class TestCorrelationCoverage(unittest.TestCase):
                 corr.save_pairs(str(outpath))
             self.assertFalse(outpath.exists())
 
+    def test_reduce_pairs_supports_2d_pair_arrays(self):
+        self._setup_mock_pairs()
+
+        values = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+        reduced = self.corr.backend.to_numpy(self.corr._reduce_pairs(values))
+
+        expected = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+        np.testing.assert_allclose(reduced, expected)
+
+    def test_get_full_tomo_prefers_vectorized_path_when_available(self):
+        self._setup_mock_pairs()
+
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        xip_mock = np.ones((nzbin_combs, self.corr.n_patches, self.corr.nbins))
+        xim_mock = np.full((nzbin_combs, self.corr.n_patches, self.corr.nbins), 2.0)
+
+        with patch.object(
+            self.corr,
+            "_xipm_tomo_vectorized",
+            return_value=(
+                self.corr.backend.to_device(xip_mock),
+                self.corr.backend.to_device(xim_mock),
+            ),
+        ) as spy_vectorized, patch.object(
+            self.corr,
+            "_xipm_auto",
+            side_effect=AssertionError("_xipm_auto should not be called"),
+        ), patch.object(
+            self.corr,
+            "_xipm_cross",
+            side_effect=AssertionError("_xipm_cross should not be called"),
+        ):
+            _, xip, xim = self.corr.get_full_tomo(shear_maps, w)
+
+        spy_vectorized.assert_called_once()
+        np.testing.assert_allclose(xip, xip_mock)
+        np.testing.assert_allclose(xim, xim_mock)
+
+    def test_xipm_auto_return_numpy_false(self):
+        corr = self._make_small_cpu_corr()
+        g1 = np.ones(12, dtype=np.float64)
+        g2 = np.ones(12, dtype=np.float64)
+        w = np.ones(12, dtype=np.float64)
+
+        xip_dev, xim_dev = corr._xipm_auto(
+            g1,
+            g2,
+            w,
+            sumofweights=1.0,
+            return_numpy=False,
+        )
+
+        self.assertEqual(xip_dev.shape, (corr.n_patches, corr.nbins))
+        self.assertEqual(xim_dev.shape, (corr.n_patches, corr.nbins))
+
+    def test_xipm_cross_return_numpy_false(self):
+        corr = self._make_small_cpu_corr()
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
+        g12 = np.full(12, 2.0, dtype=np.float64)
+        g22 = np.full(12, 3.0, dtype=np.float64)
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        xip_dev, xim_dev = corr._xipm_cross(
+            g11,
+            g21,
+            g12,
+            g22,
+            w1,
+            w2,
+            sumofweights_ab=1.0,
+            sumofweights_ba=1.0,
+            return_numpy=False,
+        )
+
+        self.assertEqual(xip_dev.shape, (corr.n_patches, corr.nbins))
+        self.assertEqual(xim_dev.shape, (corr.n_patches, corr.nbins))
+
+    def test_xipm_cross_missing_kernel_raises(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.xipm_cross_corr_kernel = None
+
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
+        g12 = np.ones(12, dtype=np.float64)
+        g22 = np.ones(12, dtype=np.float64)
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        with self.assertRaises(RuntimeError):
+            corr._xipm_cross(g11, g21, g12, g22, w1, w2)
+
+    def test_reduce_pairs_2d_axis_typeerror_fallback(self):
+        corr = self._make_small_cpu_corr()
+        original_add = corr.backend.add
+
+        class _AddProxy:
+            def __init__(self, add_ufunc):
+                self._add = add_ufunc
+
+            def reduceat(self, arr, starts, axis=None):
+                if axis is not None:
+                    raise TypeError("axis argument unsupported")
+                return self._add.reduceat(arr, starts)
+
+        corr.backend.add = _AddProxy(original_add)
+        try:
+            values = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+            reduced = corr._reduce_pairs(values)
+        finally:
+            corr.backend.add = original_add
+
+        expected = np.array([[3.0], [7.0]], dtype=np.float64)
+        np.testing.assert_allclose(reduced, expected)
+
+    def test_get_vectorized_tomo_kernel_non_cupy_returns_none(self):
+        corr = self._make_small_cpu_corr()
+        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
+
+    def test_get_vectorized_tomo_kernel_missing_rawkernel_returns_none(self):
+        corr = self._make_small_cpu_corr()
+        fake_module = ModuleType("fake_cupy_no_rawkernel")
+        corr.backend.name = "cupy"
+        corr.backend.module = fake_module
+        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
+
+    def test_get_vectorized_tomo_kernel_too_many_bins_returns_none(self):
+        corr = self._make_small_cpu_corr()
+        fake_module = ModuleType("fake_cupy_with_rawkernel")
+        fake_module.RawKernel = lambda *args, **kwargs: object()
+        corr.backend.name = "cupy"
+        corr.backend.module = fake_module
+        self.assertIsNone(
+            corr._get_vectorized_tomo_kernel(correlations_module._MAX_VECTOR_TOMO_BINS + 1)
+        )
+
+    def test_get_vectorized_tomo_kernel_compile_failure_returns_none(self):
+        corr = self._make_small_cpu_corr()
+        fake_module = ModuleType("fake_cupy_compile_fail")
+
+        def _raise_kernel(*_args, **_kwargs):
+            raise RuntimeError("compile failed")
+
+        fake_module.RawKernel = _raise_kernel
+        corr.backend.name = "cupy"
+        corr.backend.module = fake_module
+        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
+
+    def test_xipm_tomo_vectorized_returns_none_when_kernel_unavailable(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.name = "cupy"
+        corr.backend.module = ModuleType("fake_cupy")
+
+        with patch.object(corr, "_get_vectorized_tomo_kernel", return_value=None):
+            result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
+        self.assertIsNone(result)
+
+    def test_get_full_tomo_legacy_fallback_executes(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        w = np.ones((2, 12), dtype=np.float64)
+        auto_1 = corr.backend.to_device(np.array([[1.0]], dtype=np.float64))
+        auto_3 = corr.backend.to_device(np.array([[3.0]], dtype=np.float64))
+        cross_2 = corr.backend.to_device(np.array([[2.0]], dtype=np.float64))
+
+        with patch.object(corr, "_xipm_tomo_vectorized", return_value=None), patch.object(
+            corr,
+            "_xipm_auto",
+            side_effect=[(auto_1, auto_1), (auto_3, auto_3)],
+        ) as spy_auto, patch.object(
+            corr,
+            "_xipm_cross",
+            return_value=(cross_2, cross_2),
+        ) as spy_cross:
+            _, xip, xim = corr.get_full_tomo(shear_maps, w)
+
+        self.assertEqual(spy_auto.call_count, 2)
+        self.assertEqual(spy_cross.call_count, 1)
+        np.testing.assert_allclose(xip[:, 0, 0], np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_allclose(xim[:, 0, 0], np.array([1.0, 2.0, 3.0]))
+
     def test_get_full_tomo_fused_cpu_assignments(self):
-        """Cover fused-kernel assignment lines for CPU backend."""
+        """CPU get_full_tomo should use vectorized tomography, not legacy cross kernel."""
         corr = Correlation(
             nside=1,
             phi_center=np.array([0.0]),
@@ -850,7 +1058,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         _, xip, xim = corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
 
-        self.assertTrue(called["value"])
+        self.assertFalse(called["value"])
 
         pairs = [(0, 1), (1, 2)]
         g_a = shear_maps[0, 0]
@@ -912,7 +1120,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIsNone(self.corr.Q_offsets)
 
     def test_get_full_tomo_missing_fused_kernel(self):
-        """get_full_tomo should raise if fused kernel is missing."""
+        """get_full_tomo should not depend on legacy fused cross kernel."""
         corr = Correlation(
             nside=1,
             phi_center=np.array([0.0]),
@@ -941,8 +1149,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
 
-        with self.assertRaises(RuntimeError):
-            corr.get_full_tomo(shear_maps, w)
+        _, xip, xim = corr.get_full_tomo(shear_maps, w)
+        self.assertEqual(xip.shape, (3, corr.n_patches, corr.nbins))
+        self.assertEqual(xim.shape, (3, corr.n_patches, corr.nbins))
 
     def test_xipm_missing_kernel_raises(self):
         """xipm should raise if kernel is missing."""

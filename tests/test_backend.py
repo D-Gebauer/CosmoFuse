@@ -8,7 +8,12 @@ import importlib
 import numpy as np
 
 import CosmoFuse.backend
-from CosmoFuse.backend import Backend, _cpu_xipm_cross_corr_kernel, get_backend
+from CosmoFuse.backend import (
+    Backend,
+    _cpu_xipm_auto_corr_kernel,
+    _cpu_xipm_cross_corr_kernel,
+    get_backend,
+)
 
 
 class TestBackend(unittest.TestCase):
@@ -218,6 +223,94 @@ class TestBackend(unittest.TestCase):
         np.testing.assert_allclose(out_ab_m, exp_ab_m)
         np.testing.assert_allclose(out_ba_p, exp_ba_p)
         np.testing.assert_allclose(out_ba_m, exp_ba_m)
+
+    def test_cpu_xipm_auto_corr_kernel_complex64_dispatch(self):
+        g11 = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        g21 = np.array([0.4, 0.5, 0.6], dtype=np.float32)
+        g12 = np.array([0.7, 0.8, 0.9], dtype=np.float32)
+        g22 = np.array([1.0, 1.1, 1.2], dtype=np.float32)
+        w1 = np.array([1.0, 0.5, 2.0], dtype=np.float32)
+        w2 = np.array([1.5, 1.0, 0.25], dtype=np.float32)
+
+        ind_i = np.array([0, 1], dtype=np.int64)
+        ind_j = np.array([1, 2], dtype=np.int64)
+        exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex64)
+        exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex64)
+
+        out_p = np.zeros(ind_i.shape[0], dtype=np.complex64)
+        out_m = np.zeros(ind_i.shape[0], dtype=np.complex64)
+
+        _cpu_xipm_auto_corr_kernel(
+            g11,
+            g21,
+            g12,
+            g22,
+            w1,
+            w2,
+            ind_i,
+            ind_j,
+            exp_i,
+            exp_j,
+            out_p,
+            out_m,
+        )
+
+        exp_p = np.zeros_like(out_p)
+        exp_m = np.zeros_like(out_m)
+        for idx in range(ind_i.shape[0]):
+            i = ind_i[idx]
+            j = ind_j[idx]
+            g2 = w1[i] * np.complex64(g11[i] + 1j * g21[i]) * exp_i[idx]
+            g1 = w2[j] * np.complex64(g12[j] + 1j * g22[j]) * exp_j[idx]
+            exp_p[idx] = g1 * np.conjugate(g2)
+            exp_m[idx] = g1 * g2
+
+        np.testing.assert_allclose(out_p, exp_p, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(out_m, exp_m, rtol=1e-6, atol=1e-7)
+
+    def test_cpu_xipm_auto_corr_kernel_complex128_dispatch(self):
+        g11 = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+        g21 = np.array([0.4, 0.5, 0.6], dtype=np.float64)
+        g12 = np.array([0.7, 0.8, 0.9], dtype=np.float64)
+        g22 = np.array([1.0, 1.1, 1.2], dtype=np.float64)
+        w1 = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        w2 = np.array([1.5, 1.0, 0.25], dtype=np.float64)
+
+        ind_i = np.array([0, 1], dtype=np.int64)
+        ind_j = np.array([1, 2], dtype=np.int64)
+        exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex128)
+        exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
+
+        out_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
+
+        _cpu_xipm_auto_corr_kernel(
+            g11,
+            g21,
+            g12,
+            g22,
+            w1,
+            w2,
+            ind_i,
+            ind_j,
+            exp_i,
+            exp_j,
+            out_p,
+            out_m,
+        )
+
+        exp_p = np.zeros_like(out_p)
+        exp_m = np.zeros_like(out_m)
+        for idx in range(ind_i.shape[0]):
+            i = ind_i[idx]
+            j = ind_j[idx]
+            g2 = w1[i] * np.complex128(g11[i] + 1j * g21[i]) * exp_i[idx]
+            g1 = w2[j] * np.complex128(g12[j] + 1j * g22[j]) * exp_j[idx]
+            exp_p[idx] = g1 * np.conjugate(g2)
+            exp_m[idx] = g1 * g2
+
+        np.testing.assert_allclose(out_p, exp_p)
+        np.testing.assert_allclose(out_m, exp_m)
 
 if __name__ == "__main__":
     unittest.main()
