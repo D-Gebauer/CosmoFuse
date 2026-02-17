@@ -14,6 +14,7 @@ from scipy.special import binom
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
+import CosmoFuse.correlations as correlations_module
 from CosmoFuse.correlations import Correlation
 from CosmoFuse.utils import pixel2RaDec
 
@@ -205,6 +206,125 @@ class TestCorrelation(unittest.TestCase):
 
         self.assertIsInstance(all_inds, list)
         self.assertIsInstance(exp2phi, np.ndarray)
+
+    def test_get_pairs_patch_single_pixel_returns_empty(self):
+        """Test get_pairs_patch early return when fewer than 2 pixels are provided."""
+        corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+            nbins=self.nbins,
+        )
+
+        patch_inds = np.array([5], dtype=np.uint32)
+        ra = np.array([0.0])
+        dec = np.array([0.0])
+
+        all_inds, exp2phi = corr.get_pairs_patch(patch_inds, ra, dec)
+
+        self.assertEqual(len(all_inds), corr.nbins)
+        for inds in all_inds:
+            self.assertEqual(inds.shape, (2, 0))
+        self.assertEqual(exp2phi.shape, (2, 0))
+
+    def test_init_worker_sets_numba_threads(self):
+        """Test that worker initializer limits Numba to one thread."""
+        with patch.object(correlations_module.numba, "set_num_threads") as mock_set:
+            correlations_module._init_worker()
+            mock_set.assert_called_once_with(1)
+
+    def test_compute_pairs_numba_pyfunc_bin_gap_skips_pairs(self):
+        """Test py_func path where bin edges do not admit any pair assignment."""
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.0, 0.3], dtype=np.float64)
+        dec = np.array([0.0, 0.0], dtype=np.float64)
+        binedges = np.array([0.0, np.nan, 2.0], dtype=np.float64)
+        kernel_fn = getattr(
+            correlations_module._compute_pairs_numba,
+            "py_func",
+            correlations_module._compute_pairs_numba,
+        )
+
+        (
+            inds_a,
+            inds_b,
+            bin_indices,
+            exp2phi1_real,
+            exp2phi1_imag,
+            exp2phi2_real,
+            exp2phi2_imag,
+        ) = kernel_fn(
+            patch_inds,
+            ra,
+            dec,
+            binedges,
+        )
+
+        self.assertEqual(inds_a.size, 0)
+        self.assertEqual(inds_b.size, 0)
+        self.assertEqual(bin_indices.size, 0)
+        self.assertEqual(exp2phi1_real.size, 0)
+        self.assertEqual(exp2phi1_imag.size, 0)
+        self.assertEqual(exp2phi2_real.size, 0)
+        self.assertEqual(exp2phi2_imag.size, 0)
+
+    def test_compute_pairs_numba_pyfunc_clamps_upper(self):
+        """Test py_func upper clamp branch for cos(theta) > 1."""
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.1, 0.2], dtype=np.float64)
+        dec = np.array([0.1, 0.2], dtype=np.float64)
+        binedges = np.array([-1.0, 1.0, 4.0], dtype=np.float64)
+        kernel_fn = getattr(
+            correlations_module._compute_pairs_numba,
+            "py_func",
+            correlations_module._compute_pairs_numba,
+        )
+
+        original_cos = correlations_module.np.cos
+
+        def fake_cos(x):
+            if np.isscalar(x):
+                return 2.0
+            return original_cos(x)
+
+        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
+            outputs = kernel_fn(
+                patch_inds,
+                ra,
+                dec,
+                binedges,
+            )
+
+        self.assertEqual(len(outputs), 7)
+
+    def test_compute_pairs_numba_pyfunc_clamps_lower(self):
+        """Test py_func lower clamp branch for cos(theta) < -1."""
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.1, 0.2], dtype=np.float64)
+        dec = np.array([0.1, 0.2], dtype=np.float64)
+        binedges = np.array([-1.0, 1.0, 4.0], dtype=np.float64)
+        kernel_fn = getattr(
+            correlations_module._compute_pairs_numba,
+            "py_func",
+            correlations_module._compute_pairs_numba,
+        )
+
+        original_cos = correlations_module.np.cos
+
+        def fake_cos(x):
+            if np.isscalar(x):
+                return -2.0
+            return original_cos(x)
+
+        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
+            outputs = kernel_fn(
+                patch_inds,
+                ra,
+                dec,
+                binedges,
+            )
+
+        self.assertEqual(len(outputs), 7)
 
 
 class TestCorrelationCalculations(unittest.TestCase):

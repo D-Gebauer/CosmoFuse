@@ -5,16 +5,21 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
 import healpy as hp
+import numba
 import numpy as np
-from numba import njit
+from numba import njit, prange
 from scipy.special import binom
 from tqdm import trange
 
 from .backend import get_backend
-from .correlation_helpers import Q_T, M_a_patch, getAngle
+from .correlation_helpers import Q_T, M_a_patch
 from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
+
+
+def _init_worker() -> None:
+    numba.set_num_threads(1)
 
 _ALLOWED_FLOAT_PRECISIONS = {
     "float32": np.float32,
@@ -56,6 +61,151 @@ def _compute_M_a_all_patches(
             sum_gtw += weight * gt * Q_val[i]
         M_a[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
     return M_a
+
+
+@njit(fastmath=True, parallel=True)
+def _compute_pairs_numba(
+    patch_inds: np.ndarray,
+    ra: np.ndarray,
+    dec: np.ndarray,
+    binedges: np.ndarray,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    npts = patch_inds.size
+    counts = np.zeros(npts, dtype=np.int64)
+
+    sin_dec = np.sin(dec)
+    cos_dec = np.cos(dec)
+
+    bin_min = binedges[0]
+    bin_max = binedges[binedges.size - 1]
+
+    for i in prange(npts - 1):
+        rai = ra[i]
+        sdi = sin_dec[i]
+        cdi = cos_dec[i]
+        count_i = 0
+        for j in range(i + 1, npts):
+            cos_theta = sdi * sin_dec[j] + cdi * cos_dec[j] * np.cos(rai - ra[j])
+            if cos_theta > 1.0:
+                cos_theta = 1.0
+            elif cos_theta < -1.0:
+                cos_theta = -1.0
+            theta = np.arccos(cos_theta)
+
+            if theta <= bin_min or theta >= bin_max:
+                continue
+
+            valid = False
+            for b in range(binedges.size - 1):
+                if theta > binedges[b] and theta < binedges[b + 1]:
+                    valid = True
+                    break
+            if not valid:
+                continue
+            count_i += 1
+        counts[i] = count_i
+
+    offsets = np.empty(npts + 1, dtype=np.int64)
+    offsets[0] = 0
+    for i in range(npts):
+        offsets[i + 1] = offsets[i] + counts[i]
+
+    ntotal = offsets[npts]
+
+    inds_a = np.empty(ntotal, dtype=patch_inds.dtype)
+    inds_b = np.empty(ntotal, dtype=patch_inds.dtype)
+    bin_indices = np.empty(ntotal, dtype=np.int64)
+    exp2phi1_real = np.empty(ntotal, dtype=ra.dtype)
+    exp2phi1_imag = np.empty(ntotal, dtype=ra.dtype)
+    exp2phi2_real = np.empty(ntotal, dtype=ra.dtype)
+    exp2phi2_imag = np.empty(ntotal, dtype=ra.dtype)
+
+    for i in prange(npts - 1):
+        rai = ra[i]
+        sdi = sin_dec[i]
+        cdi = cos_dec[i]
+        x1 = cdi * np.cos(rai)
+        y1 = cdi * np.sin(rai)
+        z1 = sdi
+        out_idx = offsets[i]
+
+        for j in range(i + 1, npts):
+            raj = ra[j]
+            sdj = sin_dec[j]
+            cdj = cos_dec[j]
+            x2 = cdj * np.cos(raj)
+            y2 = cdj * np.sin(raj)
+            z2 = sdj
+
+            dra = raj - rai
+            cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
+            if cos_theta > 1.0:
+                cos_theta = 1.0
+            elif cos_theta < -1.0:
+                cos_theta = -1.0
+            theta = np.arccos(cos_theta)
+
+            if theta <= bin_min or theta >= bin_max:
+                continue
+
+            bin_idx = -1
+            for b in range(binedges.size - 1):
+                if theta > binedges[b] and theta < binedges[b + 1]:
+                    bin_idx = b
+                    break
+            if bin_idx < 0:
+                continue
+
+            sinC1 = x1 * y2 - x2 * y1
+            dsq_AC1 = x1 * x1 + y1 * y1 + (z1 - 1.0) * (z1 - 1.0)
+            dx12 = x1 - x2
+            dy12 = y1 - y2
+            dz12 = z1 - z2
+            dsq_BC1 = dx12 * dx12 + dy12 * dy12 + dz12 * dz12
+            dsq_AB1 = x2 * x2 + y2 * y2 + (z2 - 1.0) * (z2 - 1.0)
+            cosC1 = 0.5 * (dsq_AC1 + dsq_BC1 - dsq_AB1 - 0.5 * dsq_AC1 * dsq_BC1)
+            C1 = np.arctan2(sinC1, cosC1)
+            theta1 = 0.5 * np.pi - C1
+
+            sinC2 = x2 * y1 - x1 * y2
+            dsq_AC2 = dsq_AB1
+            dsq_BC2 = dsq_BC1
+            dsq_AB2 = dsq_AC1
+            cosC2 = 0.5 * (dsq_AC2 + dsq_BC2 - dsq_AB2 - 0.5 * dsq_AC2 * dsq_BC2)
+            C2 = np.arctan2(sinC2, cosC2)
+            theta2 = 0.5 * np.pi - C2
+
+            c1 = np.cos(2.0 * theta1)
+            s1 = np.sin(2.0 * theta1)
+            c2 = np.cos(2.0 * theta2)
+            s2 = np.sin(2.0 * theta2)
+
+            inds_a[out_idx] = patch_inds[i]
+            inds_b[out_idx] = patch_inds[j]
+            bin_indices[out_idx] = bin_idx
+            exp2phi1_real[out_idx] = c1
+            exp2phi1_imag[out_idx] = s1
+            exp2phi2_real[out_idx] = c2
+            exp2phi2_imag[out_idx] = s2
+            out_idx += 1
+
+    return (
+        inds_a,
+        inds_b,
+        bin_indices,
+        exp2phi1_real,
+        exp2phi1_imag,
+        exp2phi2_real,
+        exp2phi2_imag,
+    )
 
 
 def _normalize_precision(
@@ -297,43 +447,66 @@ class Correlation:
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
     ) -> Tuple[List[np.ndarray], np.ndarray]:
-        all_inds, exp2phi1_temp, exp2phi2_temp = [], [], []
-        cos_vartheta = np.cos(np.subtract.outer(ra, ra)) * np.multiply.outer(
-            np.cos(dec), np.cos(dec)
-        ) + np.multiply.outer(np.sin(dec), np.sin(dec))
-        dist = np.arccos(np.triu(cos_vartheta, k=1))
+        ra_local = np.asarray(ra, dtype=self.rotation_dtype)
+        dec_local = np.asarray(dec, dtype=self.rotation_dtype)
+        binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
+        patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
 
+        if patch_inds_local.size < 2:
+            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
+            return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
+
+        (
+            inds_a,
+            inds_b,
+            bin_indices,
+            exp2phi1_real,
+            exp2phi1_imag,
+            exp2phi2_real,
+            exp2phi2_imag,
+        ) = _compute_pairs_numba(
+            patch_inds_local,
+            ra_local,
+            dec_local,
+            binedges_local,
+        )
+
+        npairs = bin_indices.size
+        if npairs == 0:
+            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
+            return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
+
+        order = np.argsort(bin_indices, kind="stable")
+        inds_a = inds_a[order]
+        inds_b = inds_b[order]
+        bin_indices = bin_indices[order]
+        exp2phi1_real = exp2phi1_real[order]
+        exp2phi1_imag = exp2phi1_imag[order]
+        exp2phi2_real = exp2phi2_real[order]
+        exp2phi2_imag = exp2phi2_imag[order]
+
+        exp2phi1 = (
+            exp2phi1_real.astype(self.rotation_dtype, copy=False)
+            + 1j * exp2phi1_imag.astype(self.rotation_dtype, copy=False)
+        ).astype(self.rotation_complex_dtype, copy=False)
+        exp2phi2 = (
+            exp2phi2_real.astype(self.rotation_dtype, copy=False)
+            + 1j * exp2phi2_imag.astype(self.rotation_dtype, copy=False)
+        ).astype(self.rotation_complex_dtype, copy=False)
+        exp2phi = np.vstack((exp2phi1, exp2phi2)).astype(
+            self.rotation_complex_dtype, copy=False
+        )
+
+        all_inds = []
         for bin_idx in range(self.nbins):
-            inds = np.where(
-                (dist > self.binedges[bin_idx]) & (dist < self.binedges[bin_idx + 1])
-            )
-            ra_pairs1 = ra[inds[0]]
-            dec_pairs1 = dec[inds[0]]
-            ra_pairs2 = ra[inds[1]]
-            dec_pairs2 = dec[inds[1]]
-
+            in_bin = np.where(bin_indices == bin_idx)[0]
             all_inds.append(
                 np.array(
-                    [patch_inds[inds[0]], patch_inds[inds[1]]], dtype=self.index_dtype
+                    [inds_a[in_bin], inds_b[in_bin]],
+                    dtype=self.index_dtype,
                 )
             )
 
-            for j, _ in enumerate(ra_pairs1):
-                theta1 = np.pi / 2 - getAngle(
-                    ra_pairs1[j], dec_pairs1[j], ra_pairs2[j], dec_pairs2[j]
-                )
-                theta2 = np.pi / 2 - getAngle(
-                    ra_pairs2[j], dec_pairs2[j], ra_pairs1[j], dec_pairs1[j]
-                )
-                exp2phi1 = np.cos(2 * theta1) + 1j * np.sin(2 * theta1)
-                exp2phi2 = np.cos(2 * theta2) + 1j * np.sin(2 * theta2)
-
-                exp2phi1_temp.append(self.rotation_complex_dtype.type(exp2phi1))
-                exp2phi2_temp.append(self.rotation_complex_dtype.type(exp2phi2))
-
-        exp2phi = np.array(
-            [exp2phi1_temp, exp2phi2_temp], dtype=self.rotation_complex_dtype
-        )
         return all_inds, exp2phi
 
     def __get_pairs_helper__(self, i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -372,7 +545,7 @@ class Correlation:
                 context = get_context()
             else:
                 context = get_context(self.multiprocessing_start_method)
-            with context.Pool(threads) as p:
+            with context.Pool(threads, initializer=_init_worker) as p:
                 results = p.map(self.__get_pairs_helper__, range(self.n_patches))
                 pair_inds, pair_exp2phi, bins = list(map(list, zip(*results)))
 

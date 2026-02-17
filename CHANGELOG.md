@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0]
+
+### Changed
+- Replaced dense O(N²) pair-distance matrix construction in `Correlation.get_pairs_patch` with an on-the-fly Numba kernel (`_compute_pairs_numba`) that computes angular distances and phase rotations per candidate pair.
+- Inlined spherical-trigonometry rotation math directly in the pair kernel to avoid helper-call overhead and keep the hot loop fully JIT-optimized.
+- Added hybrid parallelism for pair preprocessing: when `calculate_pairs_2PCF(threads > 1)` uses multiprocessing, each worker now forces Numba to single-threaded execution via `_init_worker` to prevent CPU oversubscription.
+
+### Removed
+- Removed obsolete helper functions `getAngle` and `radec_to_xyz` from `correlation_helpers.py`.
+- Removed unused `_compute_pairs_numba` argument `complex_dtype`.
+
+### Tests
+- Added targeted tests for worker initialization, early-return edge paths in pair finding, and kernel edge branches.
+
 ## [3.2.0]
 
 ### Changed
