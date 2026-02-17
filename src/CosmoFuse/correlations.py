@@ -521,7 +521,7 @@ class Correlation:
 
     def calculate_pairs_2PCF(self) -> None:
         pair_inds, pair_exp2phi, bins = [], [], []
-        for i in trange(self.n_patches, desc="2PCF pairs", unit="patch"):
+        for i in trange(self.n_patches, desc="2PCF pairs", unit=" patches"):
             result = self.__get_pairs_helper__(i)
 
             pair_inds.append(result[0])
@@ -602,7 +602,7 @@ class Correlation:
             [],
         )
 
-        for i in trange(self.n_patches, desc="M_ap pairs", unit="patch"):
+        for i in trange(self.n_patches, desc="M_ap data", unit=" patches"):
             Q_cos, Q_sin, Q_val, Q_inds, Q_patch_area = self.__get_pairs_M_a_helper__(
                 i
             )
