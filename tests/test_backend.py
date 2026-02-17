@@ -8,7 +8,7 @@ import importlib
 import numpy as np
 
 import CosmoFuse.backend
-from CosmoFuse.backend import Backend, get_backend
+from CosmoFuse.backend import Backend, _cpu_fused_cross_corr_kernel, get_backend
 
 
 class TestBackend(unittest.TestCase):
@@ -141,6 +141,70 @@ class TestBackend(unittest.TestCase):
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         backend = get_backend("auto")
         self.assertEqual(backend.name, "cupy")
+
+    def test_cpu_fused_cross_corr_kernel_complex128_dispatch(self):
+        g1a = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+        g2a = np.array([0.4, 0.5, 0.6], dtype=np.float64)
+        g1b = np.array([0.7, 0.8, 0.9], dtype=np.float64)
+        g2b = np.array([1.0, 1.1, 1.2], dtype=np.float64)
+        wa = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        wb = np.array([1.5, 1.0, 0.25], dtype=np.float64)
+
+        ind_i = np.array([0, 1], dtype=np.int64)
+        ind_j = np.array([1, 2], dtype=np.int64)
+        exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex128)
+        exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
+
+        out_ab_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_ab_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_ba_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_ba_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
+
+        _cpu_fused_cross_corr_kernel(
+            g1a,
+            g2a,
+            g1b,
+            g2b,
+            wa,
+            wb,
+            ind_i,
+            ind_j,
+            exp_i,
+            exp_j,
+            out_ab_p,
+            out_ab_m,
+            out_ba_p,
+            out_ba_m,
+        )
+
+        exp_ab_p = np.zeros_like(out_ab_p)
+        exp_ab_m = np.zeros_like(out_ab_m)
+        exp_ba_p = np.zeros_like(out_ba_p)
+        exp_ba_m = np.zeros_like(out_ba_m)
+
+        for idx in range(ind_i.shape[0]):
+            i = ind_i[idx]
+            j = ind_j[idx]
+
+            ga_i = np.complex128(g1a[i] + 1j * g2a[i])
+            gb_i = np.complex128(g1b[i] + 1j * g2b[i])
+            ga_j = np.complex128(g1a[j] + 1j * g2a[j])
+            gb_j = np.complex128(g1b[j] + 1j * g2b[j])
+
+            ga_i_rot = wa[i] * ga_i * exp_i[idx]
+            gb_i_rot = wb[i] * gb_i * exp_i[idx]
+            ga_j_rot = wa[j] * ga_j * exp_j[idx]
+            gb_j_rot = wb[j] * gb_j * exp_j[idx]
+
+            exp_ab_p[idx] = gb_j_rot * np.conjugate(ga_i_rot)
+            exp_ab_m[idx] = gb_j_rot * ga_i_rot
+            exp_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
+            exp_ba_m[idx] = ga_j_rot * gb_i_rot
+
+        np.testing.assert_allclose(out_ab_p, exp_ab_p)
+        np.testing.assert_allclose(out_ab_m, exp_ab_m)
+        np.testing.assert_allclose(out_ba_p, exp_ba_p)
+        np.testing.assert_allclose(out_ba_m, exp_ba_m)
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,51 +37,6 @@ def M_a_patch(
     return M_a_Re
 
 
-def xipm_patch(
-    inds: np.ndarray,
-    exp2theta: np.ndarray,
-    bin_inds: np.ndarray,
-    g11: np.ndarray,
-    g21: np.ndarray,
-    g12: np.ndarray,
-    g22: np.ndarray,
-    nbins: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Calculate xi+ and xi- correlation functions for a patch.
-
-    Args:
-        inds: Pair indices
-        exp2theta: Exponential phase factors
-        bin_inds: Number of pairs per bin
-        g11: First shear component of first map
-        g21: Second shear component of first map
-        g12: First shear component of second map
-        g22: Second shear component of second map
-        nbins: Number of angular bins
-
-    Returns:
-        Tuple of (xi+, xi-) correlation functions
-    """
-    xip, xim = np.zeros(nbins, dtype="c8"), np.zeros(nbins, dtype="c8")
-
-    g1 = ((g11[inds[0]]) + 1j * g21[inds[0]]) * exp2theta[0]
-    g2 = ((g12[inds[1]]) + 1j * g22[inds[1]]) * exp2theta[1]
-
-    bin_edges = np.append([0], np.cumsum(bin_inds))
-
-    for bin_idx in range(nbins):
-        xip[bin_idx] = np.sum(
-            g1[bin_edges[bin_idx] : bin_edges[bin_idx + 1]]
-            * np.conjugate(g2[bin_edges[bin_idx] : bin_edges[bin_idx + 1]])
-        ) / (bin_inds[bin_idx])
-        xim[bin_idx] = np.sum(
-            g1[bin_edges[bin_idx] : bin_edges[bin_idx + 1]]
-            * g2[bin_edges[bin_idx] : bin_edges[bin_idx + 1]]
-        ) / (bin_inds[bin_idx])
-
-    return np.real(xip), np.real(xim)
-
-
 @njit(fastmath=False)
 def radec_to_xyz(ra: float, dec: float) -> Tuple[float, float, float]:
     """Convert ra, dec (in radians) to 3D x,y,z coordinates on the unit sphere.

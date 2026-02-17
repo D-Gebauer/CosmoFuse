@@ -14,7 +14,6 @@ from CosmoFuse.correlation_helpers import (
     M_a_patch,
     getAngle,
     radec_to_xyz,
-    xipm_patch,
     zeta,
 )
 
@@ -37,25 +36,6 @@ class TestCorrelationHelpers(unittest.TestCase):
         result = M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area)
 
         self.assertIsInstance(result, float)
-
-    def test_xipm_patch(self):
-        """Test xipm_patch function."""
-        # Create test data
-        inds = np.array([[0, 1], [2, 3]])
-        exp2theta = np.array([1.0 + 0.0j, 1.0 + 0.0j])
-        bin_inds = np.array([2])
-        g11 = np.array([0.01, 0.02, 0.03, 0.04])
-        g21 = np.array([0.005, 0.015, 0.025, 0.035])
-        g12 = np.array([0.02, 0.03, 0.04, 0.05])
-        g22 = np.array([0.01, 0.02, 0.03, 0.04])
-        nbins = 1
-
-        xip, xim = xipm_patch(inds, exp2theta, bin_inds, g11, g21, g12, g22, nbins)
-
-        self.assertIsInstance(xip, np.ndarray)
-        self.assertIsInstance(xim, np.ndarray)
-        self.assertEqual(len(xip), nbins)
-        self.assertEqual(len(xim), nbins)
 
     def test_radec_to_xyz(self):
         """Test radec_to_xyz function."""
