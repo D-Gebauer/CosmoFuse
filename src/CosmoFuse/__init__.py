@@ -9,7 +9,7 @@ from .correlation_helpers import zeta
 from .correlations import Correlation
 from .utils import pixel2RaDec
 
-__version__ = "3.3.1"
+__version__ = "3.3.2"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 

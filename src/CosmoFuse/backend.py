@@ -11,7 +11,7 @@ _CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
 _MAX_VECTOR_TOMO_BINS = 64
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, parallel=True)
 def _cpu_xipm_cross_corr_kernel_c64(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -23,32 +23,47 @@ def _cpu_xipm_cross_corr_kernel_c64(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_ab_p: np.ndarray,
     out_ab_m: np.ndarray,
     out_ba_p: np.ndarray,
     out_ba_m: np.ndarray,
 ) -> None:
-    for idx in range(ind_i.shape[0]):
-        i = ind_i[idx]
-        j = ind_j[idx]
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        ab_p_acc = np.complex64(0.0 + 0.0j)
+        ab_m_acc = np.complex64(0.0 + 0.0j)
+        ba_p_acc = np.complex64(0.0 + 0.0j)
+        ba_m_acc = np.complex64(0.0 + 0.0j)
+        start = offsets[b]
+        stop = offsets[b + 1]
 
-        ga_i = np.complex64(g1a[i] + 1j * g2a[i])
-        gb_i = np.complex64(g1b[i] + 1j * g2b[i])
-        ga_j = np.complex64(g1a[j] + 1j * g2a[j])
-        gb_j = np.complex64(g1b[j] + 1j * g2b[j])
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
 
-        ga_i_rot = wa[i] * ga_i * exp_i[idx]
-        gb_i_rot = wb[i] * gb_i * exp_i[idx]
-        ga_j_rot = wa[j] * ga_j * exp_j[idx]
-        gb_j_rot = wb[j] * gb_j * exp_j[idx]
+            ga_i = np.complex64(g1a[i] + 1j * g2a[i])
+            gb_i = np.complex64(g1b[i] + 1j * g2b[i])
+            ga_j = np.complex64(g1a[j] + 1j * g2a[j])
+            gb_j = np.complex64(g1b[j] + 1j * g2b[j])
 
-        out_ab_p[idx] = gb_j_rot * np.conjugate(ga_i_rot)
-        out_ab_m[idx] = gb_j_rot * ga_i_rot
-        out_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
-        out_ba_m[idx] = ga_j_rot * gb_i_rot
+            ga_i_rot = wa[i] * ga_i * exp_i[idx]
+            gb_i_rot = wb[i] * gb_i * exp_i[idx]
+            ga_j_rot = wa[j] * ga_j * exp_j[idx]
+            gb_j_rot = wb[j] * gb_j * exp_j[idx]
+
+            ab_p_acc += gb_j_rot * np.conjugate(ga_i_rot)
+            ab_m_acc += gb_j_rot * ga_i_rot
+            ba_p_acc += ga_j_rot * np.conjugate(gb_i_rot)
+            ba_m_acc += ga_j_rot * gb_i_rot
+
+        out_ab_p[b] = ab_p_acc
+        out_ab_m[b] = ab_m_acc
+        out_ba_p[b] = ba_p_acc
+        out_ba_m[b] = ba_m_acc
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, parallel=True)
 def _cpu_xipm_cross_corr_kernel_c128(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -60,29 +75,44 @@ def _cpu_xipm_cross_corr_kernel_c128(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_ab_p: np.ndarray,
     out_ab_m: np.ndarray,
     out_ba_p: np.ndarray,
     out_ba_m: np.ndarray,
 ) -> None:
-    for idx in range(ind_i.shape[0]):
-        i = ind_i[idx]
-        j = ind_j[idx]
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        ab_p_acc = np.complex128(0.0 + 0.0j)
+        ab_m_acc = np.complex128(0.0 + 0.0j)
+        ba_p_acc = np.complex128(0.0 + 0.0j)
+        ba_m_acc = np.complex128(0.0 + 0.0j)
+        start = offsets[b]
+        stop = offsets[b + 1]
 
-        ga_i = np.complex128(g1a[i] + 1j * g2a[i])
-        gb_i = np.complex128(g1b[i] + 1j * g2b[i])
-        ga_j = np.complex128(g1a[j] + 1j * g2a[j])
-        gb_j = np.complex128(g1b[j] + 1j * g2b[j])
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
 
-        ga_i_rot = wa[i] * ga_i * exp_i[idx]
-        gb_i_rot = wb[i] * gb_i * exp_i[idx]
-        ga_j_rot = wa[j] * ga_j * exp_j[idx]
-        gb_j_rot = wb[j] * gb_j * exp_j[idx]
+            ga_i = np.complex128(g1a[i] + 1j * g2a[i])
+            gb_i = np.complex128(g1b[i] + 1j * g2b[i])
+            ga_j = np.complex128(g1a[j] + 1j * g2a[j])
+            gb_j = np.complex128(g1b[j] + 1j * g2b[j])
 
-        out_ab_p[idx] = gb_j_rot * np.conjugate(ga_i_rot)
-        out_ab_m[idx] = gb_j_rot * ga_i_rot
-        out_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
-        out_ba_m[idx] = ga_j_rot * gb_i_rot
+            ga_i_rot = wa[i] * ga_i * exp_i[idx]
+            gb_i_rot = wb[i] * gb_i * exp_i[idx]
+            ga_j_rot = wa[j] * ga_j * exp_j[idx]
+            gb_j_rot = wb[j] * gb_j * exp_j[idx]
+
+            ab_p_acc += gb_j_rot * np.conjugate(ga_i_rot)
+            ab_m_acc += gb_j_rot * ga_i_rot
+            ba_p_acc += ga_j_rot * np.conjugate(gb_i_rot)
+            ba_m_acc += ga_j_rot * gb_i_rot
+
+        out_ab_p[b] = ab_p_acc
+        out_ab_m[b] = ab_m_acc
+        out_ba_p[b] = ba_p_acc
+        out_ba_m[b] = ba_m_acc
 
 
 def _cpu_xipm_cross_corr_kernel(
@@ -96,6 +126,7 @@ def _cpu_xipm_cross_corr_kernel(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_ab_p: np.ndarray,
     out_ab_m: np.ndarray,
     out_ba_p: np.ndarray,
@@ -113,6 +144,7 @@ def _cpu_xipm_cross_corr_kernel(
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_ab_p,
             out_ab_m,
             out_ba_p,
@@ -130,6 +162,7 @@ def _cpu_xipm_cross_corr_kernel(
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_ab_p,
             out_ab_m,
             out_ba_p,
@@ -137,7 +170,7 @@ def _cpu_xipm_cross_corr_kernel(
         )
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, parallel=True)
 def _cpu_xipm_auto_corr_kernel_c64(
     g11: np.ndarray,
     g21: np.ndarray,
@@ -149,21 +182,32 @@ def _cpu_xipm_auto_corr_kernel_c64(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
-    for idx in range(ind_i.shape[0]):
-        i = ind_i[idx]
-        j = ind_j[idx]
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        p_acc = np.complex64(0.0 + 0.0j)
+        m_acc = np.complex64(0.0 + 0.0j)
+        start = offsets[b]
+        stop = offsets[b + 1]
 
-        g2 = w1[i] * np.complex64(g11[i] + 1j * g21[i]) * exp_i[idx]
-        g1 = w2[j] * np.complex64(g12[j] + 1j * g22[j]) * exp_j[idx]
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
 
-        out_p[idx] = g1 * np.conjugate(g2)
-        out_m[idx] = g1 * g2
+            g2 = w1[i] * np.complex64(g11[i] + 1j * g21[i]) * exp_i[idx]
+            g1 = w2[j] * np.complex64(g12[j] + 1j * g22[j]) * exp_j[idx]
+
+            p_acc += g1 * np.conjugate(g2)
+            m_acc += g1 * g2
+
+        out_p[b] = p_acc
+        out_m[b] = m_acc
 
 
-@njit(fastmath=True)
+@njit(fastmath=True, parallel=True)
 def _cpu_xipm_auto_corr_kernel_c128(
     g11: np.ndarray,
     g21: np.ndarray,
@@ -175,18 +219,29 @@ def _cpu_xipm_auto_corr_kernel_c128(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
-    for idx in range(ind_i.shape[0]):
-        i = ind_i[idx]
-        j = ind_j[idx]
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        p_acc = np.complex128(0.0 + 0.0j)
+        m_acc = np.complex128(0.0 + 0.0j)
+        start = offsets[b]
+        stop = offsets[b + 1]
 
-        g2 = w1[i] * np.complex128(g11[i] + 1j * g21[i]) * exp_i[idx]
-        g1 = w2[j] * np.complex128(g12[j] + 1j * g22[j]) * exp_j[idx]
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
 
-        out_p[idx] = g1 * np.conjugate(g2)
-        out_m[idx] = g1 * g2
+            g2 = w1[i] * np.complex128(g11[i] + 1j * g21[i]) * exp_i[idx]
+            g1 = w2[j] * np.complex128(g12[j] + 1j * g22[j]) * exp_j[idx]
+
+            p_acc += g1 * np.conjugate(g2)
+            m_acc += g1 * g2
+
+        out_p[b] = p_acc
+        out_m[b] = m_acc
 
 
 def _cpu_xipm_auto_corr_kernel(
@@ -200,6 +255,7 @@ def _cpu_xipm_auto_corr_kernel(
     ind_j: np.ndarray,
     exp_i: np.ndarray,
     exp_j: np.ndarray,
+    offsets: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
@@ -215,6 +271,7 @@ def _cpu_xipm_auto_corr_kernel(
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_p,
             out_m,
         )
@@ -230,6 +287,7 @@ def _cpu_xipm_auto_corr_kernel(
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_p,
             out_m,
         )
@@ -243,50 +301,61 @@ def _cpu_vectorized_tomo_kernel(
     ind_j: np.ndarray,
     rot_i: np.ndarray,
     rot_j: np.ndarray,
+    offsets: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
-    n_pairs = ind_i.shape[0]
+    n_bins = offsets.shape[0] - 1
     nz = shear_map.shape[1]
     half = 0.5
 
-    for idx in prange(n_pairs):
-        pix_i = int(ind_i[idx])
-        pix_j = int(ind_j[idx])
-        exp_i = rot_i[idx]
-        exp_j = rot_j[idx]
+    for b in prange(n_bins):
+        start = offsets[b]
+        stop = offsets[b + 1]
 
         comb_idx = 0
         for i in range(nz):
-            ga_i = (
-                shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
-            ) * exp_i
             for j in range(i, nz):
-                gb_j = (
-                    shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
-                ) * exp_j
-                w_ij = weights[pix_i, i] * weights[pix_j, j]
+                sum_p = 0.0 + 0.0j
+                sum_m = 0.0 + 0.0j
 
-                ab_p = w_ij * gb_j * np.conjugate(ga_i)
-                ab_m = w_ij * gb_j * ga_i
+                for idx in range(start, stop):
+                    pix_i = int(ind_i[idx])
+                    pix_j = int(ind_j[idx])
+                    exp_i = rot_i[idx]
+                    exp_j = rot_j[idx]
 
-                if i == j:
-                    out_p[comb_idx, idx] = ab_p
-                    out_m[comb_idx, idx] = ab_m
-                else:
-                    ga_q = (
-                        shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
-                    ) * exp_j
-                    gb_p = (
-                        shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
+                    ga_i = (
+                        shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
                     ) * exp_i
-                    w_ji = weights[pix_i, j] * weights[pix_j, i]
+                    gb_j = (
+                        shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
+                    ) * exp_j
+                    w_ij = weights[pix_i, i] * weights[pix_j, j]
 
-                    ba_p = w_ji * ga_q * np.conjugate(gb_p)
-                    ba_m = w_ji * ga_q * gb_p
+                    ab_p = w_ij * gb_j * np.conjugate(ga_i)
+                    ab_m = w_ij * gb_j * ga_i
 
-                    out_p[comb_idx, idx] = half * (ab_p + ba_p)
-                    out_m[comb_idx, idx] = half * (ab_m + ba_m)
+                    if i == j:
+                        sum_p += ab_p
+                        sum_m += ab_m
+                    else:
+                        ga_q = (
+                            shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
+                        ) * exp_j
+                        gb_p = (
+                            shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
+                        ) * exp_i
+                        w_ji = weights[pix_i, j] * weights[pix_j, i]
+
+                        ba_p = w_ji * ga_q * np.conjugate(gb_p)
+                        ba_m = w_ji * ga_q * gb_p
+
+                        sum_p += half * (ab_p + ba_p)
+                        sum_m += half * (ab_m + ba_m)
+
+                out_p[comb_idx, b] = sum_p
+                out_m[comb_idx, b] = sum_m
                 comb_idx += 1
 
 

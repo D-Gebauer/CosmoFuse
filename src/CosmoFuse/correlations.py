@@ -882,26 +882,50 @@ class Correlation:
             if self.rotation_complex_dtype == np.dtype(np.complex64)
             else self.backend.module.complex128
         )
-        out_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
-        out_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
 
-        xipm_auto_corr_kernel(
-            g1_dev,
-            g2_dev,
-            g1_dev,
-            g2_dev,
-            w_dev,
-            w_dev,
-            self.inds_dev[0],
-            self.inds_dev[1],
-            self.exp2phi_dev[0],
-            self.exp2phi_dev[1],
-            out_p,
-            out_m,
-        )
+        if self.backend.name == "numpy":
+            nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
+            out_p = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            out_m = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
+            xipm_auto_corr_kernel(
+                g1_dev,
+                g2_dev,
+                g1_dev,
+                g2_dev,
+                w_dev,
+                w_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[0],
+                self.exp2phi_dev[1],
+                offsets,
+                out_p,
+                out_m,
+            )
+            xip_num = self.backend.module.real(out_p)
+            xim_num = self.backend.module.real(out_m)
+        else:
+            out_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
+            out_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
 
-        xip_num = self.backend.module.real(self._reduce_pairs(out_p))
-        xim_num = self.backend.module.real(self._reduce_pairs(out_m))
+            xipm_auto_corr_kernel(
+                g1_dev,
+                g2_dev,
+                g1_dev,
+                g2_dev,
+                w_dev,
+                w_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[0],
+                self.exp2phi_dev[1],
+                out_p,
+                out_m,
+            )
+
+            xip_num = self.backend.module.real(self._reduce_pairs(out_p))
+            xim_num = self.backend.module.real(self._reduce_pairs(out_m))
         xip_dev, xim_dev = self._normalize_xipm_pairs(xip_num, xim_num, sumofweights_dev)
 
         if return_numpy:
@@ -953,32 +977,63 @@ class Correlation:
             if self.rotation_complex_dtype == np.dtype(np.complex64)
             else self.backend.module.complex128
         )
-        out_ab_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
-        out_ab_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
-        out_ba_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
-        out_ba_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
 
-        xipm_cross_corr_kernel(
-            g11_dev,
-            g21_dev,
-            g12_dev,
-            g22_dev,
-            w1_dev,
-            w2_dev,
-            self.inds_dev[0],
-            self.inds_dev[1],
-            self.exp2phi_dev[0],
-            self.exp2phi_dev[1],
-            out_ab_p,
-            out_ab_m,
-            out_ba_p,
-            out_ba_m,
-        )
+        if self.backend.name == "numpy":
+            nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
+            out_ab_p = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            out_ab_m = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            out_ba_p = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            out_ba_m = self.backend.zeros(nbins_total, dtype=complex_dtype)
+            offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
+            xipm_cross_corr_kernel(
+                g11_dev,
+                g21_dev,
+                g12_dev,
+                g22_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[0],
+                self.exp2phi_dev[1],
+                offsets,
+                out_ab_p,
+                out_ab_m,
+                out_ba_p,
+                out_ba_m,
+            )
 
-        xip_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_p))
-        xim_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_m))
-        xip_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_p))
-        xim_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_m))
+            xip_ab_num = self.backend.module.real(out_ab_p)
+            xim_ab_num = self.backend.module.real(out_ab_m)
+            xip_ba_num = self.backend.module.real(out_ba_p)
+            xim_ba_num = self.backend.module.real(out_ba_m)
+        else:
+            out_ab_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
+            out_ab_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
+            out_ba_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
+            out_ba_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
+
+            xipm_cross_corr_kernel(
+                g11_dev,
+                g21_dev,
+                g12_dev,
+                g22_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[0],
+                self.exp2phi_dev[1],
+                out_ab_p,
+                out_ab_m,
+                out_ba_p,
+                out_ba_m,
+            )
+
+            xip_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_p))
+            xim_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_m))
+            xip_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_p))
+            xim_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_m))
 
         xip_ab_dev, xim_ab_dev = self._normalize_xipm_pairs(
             xip_ab_num, xim_ab_num, sum_ab
@@ -1288,9 +1343,11 @@ class Correlation:
             if self.rotation_complex_dtype == np.dtype(np.complex64)
             else np.complex128
         )
-        out_p = np.zeros((nzbin_combs, self.ntotpairs), dtype=complex_dtype)
-        out_m = np.zeros((nzbin_combs, self.ntotpairs), dtype=complex_dtype)
+        nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
+        out_p = np.zeros((nzbin_combs, nbins_total), dtype=complex_dtype)
+        out_m = np.zeros((nzbin_combs, nbins_total), dtype=complex_dtype)
         tomo_kernel = self.backend.xipm_tomo_vectorized_kernel
+        offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
         launched = tomo_kernel(
             shear_aos,
             weights_aos,
@@ -1298,6 +1355,7 @@ class Correlation:
             np.ascontiguousarray(self.inds_dev[1]),
             np.ascontiguousarray(self.exp2phi_dev[0]),
             np.ascontiguousarray(self.exp2phi_dev[1]),
+            offsets,
             out_p,
             out_m,
         )
@@ -1306,8 +1364,8 @@ class Correlation:
                 "Backend tomography vectorized kernel unavailable for CPU backend."
             )
 
-        xip_num = np.real(self._reduce_pairs(out_p))
-        xim_num = np.real(self._reduce_pairs(out_m))
+        xip_num = np.real(out_p)
+        xim_num = np.real(out_m)
         map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
         xip = self.backend.zeros(
             (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype

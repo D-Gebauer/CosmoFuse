@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.2]
+
+### Changed
+- Refactored CPU `xipm` kernels (`_cpu_xipm_auto_corr_kernel*`, `_cpu_xipm_cross_corr_kernel*`) to use fused map-reduce over precomputed bin offsets, removing large per-pair intermediate arrays.
+- Refactored CPU vectorized tomography kernel (`_cpu_vectorized_tomo_kernel`) to accumulate directly into per-bin/per-combination outputs.
+- Updated CPU call sites in `Correlation` to pass bin-offset segments into CPU kernels and consume reduced outputs directly (no extra `_reduce_pairs` pass for CPU paths).
+
+### Fixed
+- Reduced peak CPU memory usage for large pair catalogs by eliminating `(n_pairs, ...)` and `(n_combs, n_pairs)` temporary correlation buffers in CPU execution paths.
+
 ## [3.3.1]
 
 ### Changed

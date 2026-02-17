@@ -174,11 +174,12 @@ class TestBackend(unittest.TestCase):
         ind_j = np.array([1, 2], dtype=np.int64)
         exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex128)
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
+        offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_ab_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
-        out_ab_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
-        out_ba_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
-        out_ba_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_ab_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_ab_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_ba_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_ba_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
 
         _cpu_xipm_cross_corr_kernel(
             g1a,
@@ -191,6 +192,7 @@ class TestBackend(unittest.TestCase):
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_ab_p,
             out_ab_m,
             out_ba_p,
@@ -238,9 +240,10 @@ class TestBackend(unittest.TestCase):
         ind_j = np.array([1, 2], dtype=np.int64)
         exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex64)
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex64)
+        offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_p = np.zeros(ind_i.shape[0], dtype=np.complex64)
-        out_m = np.zeros(ind_i.shape[0], dtype=np.complex64)
+        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex64)
+        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex64)
 
         _cpu_xipm_auto_corr_kernel(
             g11,
@@ -253,6 +256,7 @@ class TestBackend(unittest.TestCase):
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_p,
             out_m,
         )
@@ -282,9 +286,10 @@ class TestBackend(unittest.TestCase):
         ind_j = np.array([1, 2], dtype=np.int64)
         exp_i = np.array([1.0 + 0.5j, -0.2 + 0.3j], dtype=np.complex128)
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
+        offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
-        out_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
+        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
 
         _cpu_xipm_auto_corr_kernel(
             g11,
@@ -297,6 +302,7 @@ class TestBackend(unittest.TestCase):
             ind_j,
             exp_i,
             exp_j,
+            offsets,
             out_p,
             out_m,
         )
@@ -330,7 +336,15 @@ class TestBackend(unittest.TestCase):
         out_m = np.zeros((3, 1), dtype=np.complex128)
 
         launched = backend.xipm_tomo_vectorized_kernel(
-            shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m
+            shear,
+            weights,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            np.array([0, 1], dtype=np.int64),
+            out_p,
+            out_m,
         )
         self.assertIsNone(launched)
         self.assertEqual(out_p.shape, (3, 1))

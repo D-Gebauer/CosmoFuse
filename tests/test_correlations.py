@@ -882,6 +882,55 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(xip_dev.shape, (corr.n_patches, corr.nbins))
         self.assertEqual(xim_dev.shape, (corr.n_patches, corr.nbins))
 
+    def test_xipm_cross_non_numpy_backend_path(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.name = "other"
+
+        def fake_kernel(
+            _g11,
+            _g21,
+            _g12,
+            _g22,
+            _w1,
+            _w2,
+            _ind_i,
+            _ind_j,
+            _exp_i,
+            _exp_j,
+            out_ab_p,
+            out_ab_m,
+            out_ba_p,
+            out_ba_m,
+        ):
+            out_ab_p[...] = 1.0 + 0.0j
+            out_ab_m[...] = 2.0 + 0.0j
+            out_ba_p[...] = 3.0 + 0.0j
+            out_ba_m[...] = 4.0 + 0.0j
+
+        corr.backend.xipm_cross_corr_kernel = fake_kernel
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
+        g12 = np.ones(12, dtype=np.float64)
+        g22 = np.ones(12, dtype=np.float64)
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        with patch.object(corr, "_reduce_pairs", wraps=corr._reduce_pairs) as spy_reduce:
+            xip, xim = corr._xipm_cross(
+                g11,
+                g21,
+                g12,
+                g22,
+                w1,
+                w2,
+                sumofweights_ab=1.0,
+                sumofweights_ba=1.0,
+            )
+
+        self.assertEqual(spy_reduce.call_count, 4)
+        np.testing.assert_allclose(xip, np.array([[4.0]], dtype=np.float64))
+        np.testing.assert_allclose(xim, np.array([[6.0]], dtype=np.float64))
+
     def test_xipm_cross_missing_kernel_raises(self):
         corr = self._make_small_cpu_corr()
         corr.backend.xipm_cross_corr_kernel = None
@@ -917,6 +966,43 @@ class TestCorrelationCoverage(unittest.TestCase):
             corr.backend.add = original_add
 
         expected = np.array([[3.0], [7.0]], dtype=np.float64)
+        np.testing.assert_allclose(reduced, expected)
+
+    def test_reduce_pairs_2d_partial_valid_axis_typeerror_fallback(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=2,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = [np.array([[0], [1]], dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, 1), dtype=np.complex128)]
+        corr.bins = [np.array([1, 0], dtype=np.uint32)]
+        corr.prepare()
+        original_add = corr.backend.add
+
+        class _AddProxy:
+            def __init__(self, add_ufunc):
+                self._add = add_ufunc
+
+            def reduceat(self, arr, starts, axis=None):
+                if axis is not None:
+                    raise TypeError("axis argument unsupported")
+                return self._add.reduceat(arr, starts)
+
+        corr.backend.add = _AddProxy(original_add)
+        try:
+            values = np.array([[5.0], [7.0]], dtype=np.float64)
+            reduced = corr.backend.to_numpy(corr._reduce_pairs(values))
+        finally:
+            corr.backend.add = original_add
+
+        expected = np.array([[5.0, 0.0], [7.0, 0.0]], dtype=np.float64)
         np.testing.assert_allclose(reduced, expected)
 
     def test_xipm_tomo_vectorized_returns_none_when_backend_kernel_missing(self):
