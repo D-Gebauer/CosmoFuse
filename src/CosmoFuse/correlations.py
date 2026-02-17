@@ -1044,17 +1044,61 @@ class Correlation:
         starts = self.tot_bins_reduceat_dev[:-1]
         values_dev = self.backend.to_device(values)
         values_ndim = int(getattr(values_dev, "ndim", np.ndim(values_dev)))
+        starts_np = np.asarray(self.backend.to_numpy(starts), dtype=np.int64)
+        nstarts = starts_np.size
         if values_ndim <= 1:
-            reduced = self.backend.add.reduceat(values_dev, starts)
+            nvals = int(getattr(values_dev, "size", np.size(values_dev)))
+            valid_idx_np = np.where(starts_np < nvals)[0]
+            if valid_idx_np.size == nstarts:
+                reduced = self.backend.add.reduceat(values_dev, starts)
+            else:
+                reduced = self.backend.zeros(nstarts, dtype=values_dev.dtype)
+                if valid_idx_np.size > 0:
+                    starts_valid = self.backend.to_device(
+                        starts_np[valid_idx_np].astype(np.int64, copy=False)
+                    )
+                    valid_idx = self.backend.to_device(
+                        valid_idx_np.astype(np.int64, copy=False)
+                    )
+                    reduced_valid = self.backend.add.reduceat(values_dev, starts_valid)
+                    reduced[valid_idx] = reduced_valid
             reduced[self.bins_dev == 0] = 0
             return reduced
 
-        try:
-            reduced = self.backend.add.reduceat(values_dev, starts, axis=-1)
-        except TypeError:
-            reduced = self.backend.module.stack(
-                [self.backend.add.reduceat(row, starts) for row in values_dev], axis=0
-            )
+        nvals = int(values_dev.shape[-1])
+        valid_idx_np = np.where(starts_np < nvals)[0]
+        output_shape = values_dev.shape[:-1] + (nstarts,)
+
+        if valid_idx_np.size == nstarts:
+            try:
+                reduced = self.backend.add.reduceat(values_dev, starts, axis=-1)
+            except TypeError:
+                reduced = self.backend.module.stack(
+                    [self.backend.add.reduceat(row, starts) for row in values_dev], axis=0
+                )
+        else:
+            reduced = self.backend.zeros(output_shape, dtype=values_dev.dtype)
+            if valid_idx_np.size > 0:
+                starts_valid = self.backend.to_device(
+                    starts_np[valid_idx_np].astype(np.int64, copy=False)
+                )
+                valid_idx = self.backend.to_device(
+                    valid_idx_np.astype(np.int64, copy=False)
+                )
+                try:
+                    reduced_valid = self.backend.add.reduceat(
+                        values_dev, starts_valid, axis=-1
+                    )
+                except TypeError:
+                    reduced_valid = self.backend.module.stack(
+                        [
+                            self.backend.add.reduceat(row, starts_valid)
+                            for row in values_dev
+                        ],
+                        axis=0,
+                    )
+                reduced[..., valid_idx] = reduced_valid
+
         reduced[..., self.bins_dev == 0] = 0
         return reduced
 
