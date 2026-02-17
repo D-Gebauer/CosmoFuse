@@ -28,7 +28,6 @@ _ROTATION_COMPLEX_PRECISION = {
     "float32": np.complex64,
     "float64": np.complex128,
 }
-_MAX_VECTOR_TOMO_BINS = 64
 
 
 def _compute_M_a_all_patches(
@@ -207,61 +206,6 @@ _compute_pairs_numba = njit(fastmath=True, parallel=True)(_compute_pairs_impl)
 _compute_pairs_numba_precise = njit(fastmath=False, parallel=True)(
     _compute_pairs_impl
 )
-
-
-@njit(fastmath=True, parallel=True)
-def _cpu_vectorized_tomo_kernel(
-    shear_map: np.ndarray,
-    weights: np.ndarray,
-    ind_i: np.ndarray,
-    ind_j: np.ndarray,
-    rot_i: np.ndarray,
-    rot_j: np.ndarray,
-    out_p: np.ndarray,
-    out_m: np.ndarray,
-) -> None:
-    n_pairs = ind_i.shape[0]
-    nz = shear_map.shape[1]
-    half = 0.5
-
-    for idx in prange(n_pairs):
-        pix_i = int(ind_i[idx])
-        pix_j = int(ind_j[idx])
-        exp_i = rot_i[idx]
-        exp_j = rot_j[idx]
-
-        comb_idx = 0
-        for i in range(nz):
-            ga_i = (
-                shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
-            ) * exp_i
-            for j in range(i, nz):
-                gb_j = (
-                    shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
-                ) * exp_j
-                w_ij = weights[pix_i, i] * weights[pix_j, j]
-
-                ab_p = w_ij * gb_j * np.conjugate(ga_i)
-                ab_m = w_ij * gb_j * ga_i
-
-                if i == j:
-                    out_p[comb_idx, idx] = ab_p
-                    out_m[comb_idx, idx] = ab_m
-                else:
-                    ga_q = (
-                        shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
-                    ) * exp_j
-                    gb_p = (
-                        shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
-                    ) * exp_i
-                    w_ji = weights[pix_i, j] * weights[pix_j, i]
-
-                    ba_p = w_ji * ga_q * np.conjugate(gb_p)
-                    ba_m = w_ji * ga_q * gb_p
-
-                    out_p[comb_idx, idx] = half * (ab_p + ba_p)
-                    out_m[comb_idx, idx] = half * (ab_m + ba_m)
-                comb_idx += 1
 
 
 def _normalize_precision(
@@ -1179,155 +1123,6 @@ class Correlation:
         weights_aos = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
         return shear_aos, weights_aos
 
-    def _get_vectorized_tomo_kernel(self, nzbins: int) -> Optional[Any]:
-        if self.backend.name != "cupy":
-            return None
-
-        module = self.backend.module
-        raw_kernel_ctor = getattr(module, "RawKernel", None)
-        if raw_kernel_ctor is None:
-            return None
-        if nzbins > _MAX_VECTOR_TOMO_BINS:
-            return None
-
-        if self.rotation_complex_dtype == np.dtype(np.complex64):
-            complex_c_type = "cuFloatComplex"
-            complex_real_type = "float"
-            make_complex = "make_cuFloatComplex"
-            cmul_fn = "cuCmulf"
-            conj_fn = "cuConjf"
-            suffix = "c64"
-        else:
-            complex_c_type = "cuDoubleComplex"
-            complex_real_type = "double"
-            make_complex = "make_cuDoubleComplex"
-            cmul_fn = "cuCmul"
-            conj_fn = "cuConj"
-            suffix = "c128"
-
-        map_c_type = "float" if self.map_dtype == np.dtype(np.float32) else "double"
-        kernel_name = f"gpu_vectorized_tomo_xipm_{map_c_type}_{suffix}"
-        cache_attr = f"_cosmofuse_{kernel_name}"
-        cached_kernel = getattr(module, cache_attr, None)
-        if cached_kernel is not None:
-            return cached_kernel
-
-        source = f"""
-        #include <cuComplex.h>
-        #define MAX_TOMO_BINS {_MAX_VECTOR_TOMO_BINS}
-
-        extern "C" __global__
-        void {kernel_name}(
-            const {map_c_type}* shear,
-            const {map_c_type}* weights,
-            const long long* ind_i,
-            const long long* ind_j,
-            const {complex_c_type}* rot_i,
-            const {complex_c_type}* rot_j,
-            {complex_c_type}* out_p,
-            {complex_c_type}* out_m,
-            const int nzbins,
-            const long long npairs)
-        {{
-            const long long tid =
-                (long long)blockDim.x * (long long)blockIdx.x + (long long)threadIdx.x;
-            if (tid >= npairs || nzbins > MAX_TOMO_BINS) {{
-                return;
-            }}
-
-            const long long idx_a = ind_i[tid];
-            const long long idx_b = ind_j[tid];
-            const {complex_c_type} exp_i = rot_i[tid];
-            const {complex_c_type} exp_j = rot_j[tid];
-
-            {complex_c_type} g_a[MAX_TOMO_BINS];
-            {complex_c_type} g_b[MAX_TOMO_BINS];
-            {map_c_type} w_a[MAX_TOMO_BINS];
-            {map_c_type} w_b[MAX_TOMO_BINS];
-
-            for (int z = 0; z < nzbins; ++z) {{
-                const long long base_a = (idx_a * (long long)nzbins + z) * 2;
-                const long long base_b = (idx_b * (long long)nzbins + z) * 2;
-                g_a[z] = {make_complex}(
-                    ({complex_real_type})shear[base_a],
-                    ({complex_real_type})shear[base_a + 1]
-                );
-                g_b[z] = {make_complex}(
-                    ({complex_real_type})shear[base_b],
-                    ({complex_real_type})shear[base_b + 1]
-                );
-                w_a[z] = weights[idx_a * (long long)nzbins + z];
-                w_b[z] = weights[idx_b * (long long)nzbins + z];
-            }}
-
-            int comb_idx = 0;
-            for (int i = 0; i < nzbins; ++i) {{
-                const {complex_c_type} ga_i = {cmul_fn}(g_a[i], exp_i);
-                for (int j = i; j < nzbins; ++j) {{
-                    const {complex_c_type} gb_j = {cmul_fn}(g_b[j], exp_j);
-                    const {map_c_type} w_ij = w_a[i] * w_b[j];
-
-                    const {complex_c_type} ab_p = {cmul_fn}(
-                        {make_complex}(({complex_real_type})w_ij, ({complex_real_type})0.0),
-                        {cmul_fn}(gb_j, {conj_fn}(ga_i))
-                    );
-                    const {complex_c_type} ab_m = {cmul_fn}(
-                        {make_complex}(({complex_real_type})w_ij, ({complex_real_type})0.0),
-                        {cmul_fn}(gb_j, ga_i)
-                    );
-                    {complex_c_type} ba_p = ab_p;
-                    {complex_c_type} ba_m = ab_m;
-
-                    if (i != j) {{
-                        const {complex_c_type} ga_q = {cmul_fn}(g_b[i], exp_j);
-                        const {complex_c_type} gb_p = {cmul_fn}(g_a[j], exp_i);
-                        const {map_c_type} w_ji = w_a[j] * w_b[i];
-
-                        ba_p = {cmul_fn}(
-                            {make_complex}(
-                                ({complex_real_type})w_ji,
-                                ({complex_real_type})0.0
-                            ),
-                            {cmul_fn}(ga_q, {conj_fn}(gb_p))
-                        );
-                        ba_m = {cmul_fn}(
-                            {make_complex}(
-                                ({complex_real_type})w_ji,
-                                ({complex_real_type})0.0
-                            ),
-                            {cmul_fn}(ga_q, gb_p)
-                        );
-                    }}
-
-                    const long long out_ab_idx =
-                        (long long)(2 * comb_idx) * npairs + tid;
-                    const long long out_ba_idx = out_ab_idx + npairs;
-                    out_p[out_ab_idx] = ab_p;
-                    out_m[out_ab_idx] = ab_m;
-                    out_p[out_ba_idx] = ba_p;
-                    out_m[out_ba_idx] = ba_m;
-                    ++comb_idx;
-                }}
-            }}
-        }}
-        """
-
-        try:
-            kernel = raw_kernel_ctor(
-                source,
-                kernel_name,
-                options=("--use_fast_math",),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Vectorized tomography RawKernel compilation failed; using legacy path: %s",
-                exc,
-            )
-            return None
-
-        setattr(module, cache_attr, kernel)
-        return kernel
-
     def _xipm_tomo_vectorized(
         self,
         shear_maps_dev: Any,
@@ -1338,6 +1133,10 @@ class Correlation:
         g1_fac: int,
         g2_fac: int,
     ) -> Optional[Tuple[Any, Any]]:
+        tomo_kernel = getattr(self.backend, "xipm_tomo_vectorized_kernel", None)
+        if tomo_kernel is None:
+            return None
+
         if self.backend.name == "numpy":
             return self._xipm_tomo_vectorized_cpu(
                 shear_maps_dev,
@@ -1349,8 +1148,7 @@ class Correlation:
                 g2_fac,
             )
 
-        kernel = self._get_vectorized_tomo_kernel(nzbins)
-        if kernel is None:
+        if self.backend.name != "cupy":
             return None
 
         module = self.backend.module
@@ -1377,24 +1175,18 @@ class Correlation:
             (2 * nzbin_combs, self.ntotpairs), dtype=complex_backend_dtype
         )
 
-        threads = 256
-        blocks = max(1, (self.ntotpairs + threads - 1) // threads)
-        kernel(
-            (blocks,),
-            (threads,),
-            (
-                shear_aos,
-                weights_aos,
-                inds_i,
-                inds_j,
-                exp_i,
-                exp_j,
-                out_p,
-                out_m,
-                np.int32(nzbins),
-                np.int64(self.ntotpairs),
-            ),
+        launched = tomo_kernel(
+            shear_aos,
+            weights_aos,
+            inds_i,
+            inds_j,
+            exp_i,
+            exp_j,
+            out_p,
+            out_m,
         )
+        if not launched:
+            return None
 
         xip_reduced = module.real(self._reduce_pairs(out_p))
         xim_reduced = module.real(self._reduce_pairs(out_m))
@@ -1454,7 +1246,8 @@ class Correlation:
         )
         out_p = np.zeros((nzbin_combs, self.ntotpairs), dtype=complex_dtype)
         out_m = np.zeros((nzbin_combs, self.ntotpairs), dtype=complex_dtype)
-        _cpu_vectorized_tomo_kernel(
+        tomo_kernel = self.backend.xipm_tomo_vectorized_kernel
+        launched = tomo_kernel(
             shear_aos,
             weights_aos,
             np.ascontiguousarray(self.inds_dev[0]),
@@ -1464,6 +1257,10 @@ class Correlation:
             out_p,
             out_m,
         )
+        if launched is False:
+            raise RuntimeError(
+                "Backend tomography vectorized kernel unavailable for CPU backend."
+            )
 
         xip_num = np.real(self._reduce_pairs(out_p))
         xim_num = np.real(self._reduce_pairs(out_m))

@@ -919,47 +919,56 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected = np.array([[3.0], [7.0]], dtype=np.float64)
         np.testing.assert_allclose(reduced, expected)
 
-    def test_get_vectorized_tomo_kernel_non_cupy_returns_none(self):
+    def test_xipm_tomo_vectorized_returns_none_when_backend_kernel_missing(self):
         corr = self._make_small_cpu_corr()
-        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
-
-    def test_get_vectorized_tomo_kernel_missing_rawkernel_returns_none(self):
-        corr = self._make_small_cpu_corr()
-        fake_module = ModuleType("fake_cupy_no_rawkernel")
-        corr.backend.name = "cupy"
-        corr.backend.module = fake_module
-        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
-
-    def test_get_vectorized_tomo_kernel_too_many_bins_returns_none(self):
-        corr = self._make_small_cpu_corr()
-        fake_module = ModuleType("fake_cupy_with_rawkernel")
-        fake_module.RawKernel = lambda *args, **kwargs: object()
-        corr.backend.name = "cupy"
-        corr.backend.module = fake_module
-        self.assertIsNone(
-            corr._get_vectorized_tomo_kernel(correlations_module._MAX_VECTOR_TOMO_BINS + 1)
-        )
-
-    def test_get_vectorized_tomo_kernel_compile_failure_returns_none(self):
-        corr = self._make_small_cpu_corr()
-        fake_module = ModuleType("fake_cupy_compile_fail")
-
-        def _raise_kernel(*_args, **_kwargs):
-            raise RuntimeError("compile failed")
-
-        fake_module.RawKernel = _raise_kernel
-        corr.backend.name = "cupy"
-        corr.backend.module = fake_module
-        self.assertIsNone(corr._get_vectorized_tomo_kernel(2))
-
-    def test_xipm_tomo_vectorized_returns_none_when_kernel_unavailable(self):
-        corr = self._make_small_cpu_corr()
-        corr.backend.name = "cupy"
-        corr.backend.module = ModuleType("fake_cupy")
-
-        with patch.object(corr, "_get_vectorized_tomo_kernel", return_value=None):
-            result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
+        corr.backend.xipm_tomo_vectorized_kernel = None
+        result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
         self.assertIsNone(result)
+
+    def test_xipm_tomo_vectorized_returns_none_when_backend_kernel_declines(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.name = "cupy"
+        corr.backend.module = np
+        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: False
+
+        shear_maps_dev = np.ones((2, 2, 12), dtype=np.float64)
+        w_dev = np.ones((2, 12), dtype=np.float64)
+        sumofweights_dev = np.zeros((2, 3, 1), dtype=np.float64)
+        result = corr._xipm_tomo_vectorized(
+            shear_maps_dev,
+            w_dev,
+            sumofweights_dev,
+            2,
+            3,
+            1,
+            1,
+        )
+        self.assertIsNone(result)
+
+    def test_xipm_tomo_vectorized_returns_none_for_unknown_backend_name(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.name = "other"
+        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: True
+        result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
+        self.assertIsNone(result)
+
+    def test_xipm_tomo_vectorized_cpu_raises_when_kernel_declines(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: False
+        shear_maps_dev = np.ones((2, 2, 12), dtype=np.float64)
+        w_dev = np.ones((2, 12), dtype=np.float64)
+        sumofweights_dev = np.ones((2, 3, 1), dtype=np.float64)
+
+        with self.assertRaises(RuntimeError):
+            corr._xipm_tomo_vectorized(
+                shear_maps_dev,
+                w_dev,
+                sumofweights_dev,
+                2,
+                3,
+                1,
+                1,
+            )
 
     def test_get_full_tomo_legacy_fallback_executes(self):
         corr = self._make_small_cpu_corr()

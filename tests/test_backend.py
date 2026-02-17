@@ -10,6 +10,8 @@ import numpy as np
 import CosmoFuse.backend
 from CosmoFuse.backend import (
     Backend,
+    _MAX_VECTOR_TOMO_BINS,
+    _build_cupy_tomo_vectorized_kernel,
     _cpu_xipm_auto_corr_kernel,
     _cpu_xipm_cross_corr_kernel,
     get_backend,
@@ -311,6 +313,122 @@ class TestBackend(unittest.TestCase):
 
         np.testing.assert_allclose(out_p, exp_p)
         np.testing.assert_allclose(out_m, exp_m)
+
+    def test_cpu_backend_exposes_tomo_vectorized_kernel(self):
+        backend = get_backend("cpu")
+        self.assertIsNotNone(backend.xipm_tomo_vectorized_kernel)
+
+        shear = np.array(
+            [[[1.0, 0.0], [2.0, 0.0]], [[3.0, 0.0], [4.0, 0.0]]], dtype=np.float64
+        )
+        weights = np.ones((2, 2), dtype=np.float64)
+        ind_i = np.array([0], dtype=np.int64)
+        ind_j = np.array([1], dtype=np.int64)
+        rot_i = np.array([1.0 + 0.0j], dtype=np.complex128)
+        rot_j = np.array([1.0 + 0.0j], dtype=np.complex128)
+        out_p = np.zeros((3, 1), dtype=np.complex128)
+        out_m = np.zeros((3, 1), dtype=np.complex128)
+
+        launched = backend.xipm_tomo_vectorized_kernel(
+            shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m
+        )
+        self.assertIsNone(launched)
+        self.assertEqual(out_p.shape, (3, 1))
+        self.assertEqual(out_m.shape, (3, 1))
+
+    def test_cupy_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_tomo_vectorized_kernel_too_many_bins_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1, 2), dtype=np.float32),
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_tomo_vectorized_kernel_compile_failure_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(*_args, **_kwargs):
+                raise RuntimeError("compile failed")
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+            np.zeros((2, 1), dtype=np.complex64),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_tomo_vectorized_kernel_success_and_cache(self):
+        rawkernel_calls = {"count": 0}
+        launches = []
+
+        class FakeKernel:
+            def __call__(self, grid, block, args):
+                launches.append((grid, block, args))
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(*_args, **_kwargs):
+                rawkernel_calls["count"] += 1
+                return FakeKernel()
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        shear = np.zeros((1, 2, 2), dtype=np.float32)
+        weights = np.zeros((1, 2), dtype=np.float32)
+        ind_i = np.zeros(1, dtype=np.int64)
+        ind_j = np.zeros(1, dtype=np.int64)
+        rot_i = np.zeros(1, dtype=np.complex64)
+        rot_j = np.zeros(1, dtype=np.complex64)
+        out_p = np.zeros((6, 1), dtype=np.complex64)
+        out_m = np.zeros((6, 1), dtype=np.complex64)
+
+        ok1 = kernel(shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m)
+        ok2 = kernel(shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m)
+
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        self.assertEqual(rawkernel_calls["count"], 1)
+        self.assertEqual(len(launches), 2)
 
 if __name__ == "__main__":
     unittest.main()

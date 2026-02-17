@@ -3,11 +3,12 @@ import warnings
 from typing import Any, Optional, Union
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
 logger = logging.getLogger(__name__)
 
 _CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
+_MAX_VECTOR_TOMO_BINS = 64
 
 
 @njit(fastmath=True)
@@ -234,6 +235,262 @@ def _cpu_xipm_auto_corr_kernel(
         )
 
 
+@njit(fastmath=True, parallel=True)
+def _cpu_vectorized_tomo_kernel(
+    shear_map: np.ndarray,
+    weights: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    rot_i: np.ndarray,
+    rot_j: np.ndarray,
+    out_p: np.ndarray,
+    out_m: np.ndarray,
+) -> None:
+    n_pairs = ind_i.shape[0]
+    nz = shear_map.shape[1]
+    half = 0.5
+
+    for idx in prange(n_pairs):
+        pix_i = int(ind_i[idx])
+        pix_j = int(ind_j[idx])
+        exp_i = rot_i[idx]
+        exp_j = rot_j[idx]
+
+        comb_idx = 0
+        for i in range(nz):
+            ga_i = (
+                shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
+            ) * exp_i
+            for j in range(i, nz):
+                gb_j = (
+                    shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
+                ) * exp_j
+                w_ij = weights[pix_i, i] * weights[pix_j, j]
+
+                ab_p = w_ij * gb_j * np.conjugate(ga_i)
+                ab_m = w_ij * gb_j * ga_i
+
+                if i == j:
+                    out_p[comb_idx, idx] = ab_p
+                    out_m[comb_idx, idx] = ab_m
+                else:
+                    ga_q = (
+                        shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
+                    ) * exp_j
+                    gb_p = (
+                        shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
+                    ) * exp_i
+                    w_ji = weights[pix_i, j] * weights[pix_j, i]
+
+                    ba_p = w_ji * ga_q * np.conjugate(gb_p)
+                    ba_m = w_ji * ga_q * gb_p
+
+                    out_p[comb_idx, idx] = half * (ab_p + ba_p)
+                    out_m[comb_idx, idx] = half * (ab_m + ba_m)
+                comb_idx += 1
+
+
+def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
+    kernel_cache: dict[tuple[str, str], Any] = {}
+
+    def _get_or_build_raw_kernel(
+        map_c_type: str,
+        complex_c_type: str,
+        complex_real_type: str,
+        make_complex: str,
+        cmul_fn: str,
+        conj_fn: str,
+        suffix: str,
+    ) -> Optional[Any]:
+        key = (map_c_type, suffix)
+        cached = kernel_cache.get(key)
+        if cached is not None:
+            return cached
+
+        kernel_name = f"gpu_vectorized_tomo_xipm_{map_c_type}_{suffix}"
+        source = f"""
+        #include <cuComplex.h>
+        #define MAX_TOMO_BINS {_MAX_VECTOR_TOMO_BINS}
+
+        extern "C" __global__
+        void {kernel_name}(
+            const {map_c_type}* shear,
+            const {map_c_type}* weights,
+            const long long* ind_i,
+            const long long* ind_j,
+            const {complex_c_type}* rot_i,
+            const {complex_c_type}* rot_j,
+            {complex_c_type}* out_p,
+            {complex_c_type}* out_m,
+            const int nzbins,
+            const long long npairs)
+        {{
+            const long long tid =
+                (long long)blockDim.x * (long long)blockIdx.x + (long long)threadIdx.x;
+            if (tid >= npairs || nzbins > MAX_TOMO_BINS) {{
+                return;
+            }}
+
+            const long long idx_a = ind_i[tid];
+            const long long idx_b = ind_j[tid];
+            const {complex_c_type} exp_i = rot_i[tid];
+            const {complex_c_type} exp_j = rot_j[tid];
+
+            {complex_c_type} g_a[MAX_TOMO_BINS];
+            {complex_c_type} g_b[MAX_TOMO_BINS];
+            {map_c_type} w_a[MAX_TOMO_BINS];
+            {map_c_type} w_b[MAX_TOMO_BINS];
+
+            for (int z = 0; z < nzbins; ++z) {{
+                const long long base_a = (idx_a * (long long)nzbins + z) * 2;
+                const long long base_b = (idx_b * (long long)nzbins + z) * 2;
+                g_a[z] = {make_complex}(
+                    ({complex_real_type})shear[base_a],
+                    ({complex_real_type})shear[base_a + 1]
+                );
+                g_b[z] = {make_complex}(
+                    ({complex_real_type})shear[base_b],
+                    ({complex_real_type})shear[base_b + 1]
+                );
+                w_a[z] = weights[idx_a * (long long)nzbins + z];
+                w_b[z] = weights[idx_b * (long long)nzbins + z];
+            }}
+
+            int comb_idx = 0;
+            for (int i = 0; i < nzbins; ++i) {{
+                const {complex_c_type} ga_i = {cmul_fn}(g_a[i], exp_i);
+                for (int j = i; j < nzbins; ++j) {{
+                    const {complex_c_type} gb_j = {cmul_fn}(g_b[j], exp_j);
+                    const {map_c_type} w_ij = w_a[i] * w_b[j];
+
+                    const {complex_c_type} ab_p = {cmul_fn}(
+                        {make_complex}(({complex_real_type})w_ij, ({complex_real_type})0.0),
+                        {cmul_fn}(gb_j, {conj_fn}(ga_i))
+                    );
+                    const {complex_c_type} ab_m = {cmul_fn}(
+                        {make_complex}(({complex_real_type})w_ij, ({complex_real_type})0.0),
+                        {cmul_fn}(gb_j, ga_i)
+                    );
+                    {complex_c_type} ba_p = ab_p;
+                    {complex_c_type} ba_m = ab_m;
+
+                    if (i != j) {{
+                        const {complex_c_type} ga_q = {cmul_fn}(g_b[i], exp_j);
+                        const {complex_c_type} gb_p = {cmul_fn}(g_a[j], exp_i);
+                        const {map_c_type} w_ji = w_a[j] * w_b[i];
+
+                        ba_p = {cmul_fn}(
+                            {make_complex}(
+                                ({complex_real_type})w_ji,
+                                ({complex_real_type})0.0
+                            ),
+                            {cmul_fn}(ga_q, {conj_fn}(gb_p))
+                        );
+                        ba_m = {cmul_fn}(
+                            {make_complex}(
+                                ({complex_real_type})w_ji,
+                                ({complex_real_type})0.0
+                            ),
+                            {cmul_fn}(ga_q, gb_p)
+                        );
+                    }}
+
+                    const long long out_ab_idx =
+                        (long long)(2 * comb_idx) * npairs + tid;
+                    const long long out_ba_idx = out_ab_idx + npairs;
+                    out_p[out_ab_idx] = ab_p;
+                    out_m[out_ab_idx] = ab_m;
+                    out_p[out_ba_idx] = ba_p;
+                    out_m[out_ba_idx] = ba_m;
+                    ++comb_idx;
+                }}
+            }}
+        }}
+        """
+
+        try:
+            kernel = module.RawKernel(
+                source,
+                kernel_name,
+                options=_CUPY_FASTMATH_OPTIONS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vectorized tomography RawKernel compilation failed; using legacy path: %s",
+                exc,
+            )
+            return None
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_tomo_vectorized_kernel(
+        shear_map: Any,
+        weights: Any,
+        ind_i: Any,
+        ind_j: Any,
+        rot_i: Any,
+        rot_j: Any,
+        out_p: Any,
+        out_m: Any,
+    ) -> bool:
+        nzbins = int(shear_map.shape[1])
+        if nzbins > _MAX_VECTOR_TOMO_BINS:
+            return False
+        if getattr(module, "RawKernel", None) is None:
+            return False
+
+        if rot_i.dtype == module.complex64:
+            complex_c_type = "cuFloatComplex"
+            complex_real_type = "float"
+            make_complex = "make_cuFloatComplex"
+            cmul_fn = "cuCmulf"
+            conj_fn = "cuConjf"
+            suffix = "c64"
+        else:
+            complex_c_type = "cuDoubleComplex"
+            complex_real_type = "double"
+            make_complex = "make_cuDoubleComplex"
+            cmul_fn = "cuCmul"
+            conj_fn = "cuConj"
+            suffix = "c128"
+
+        map_c_type = "float" if weights.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(
+            map_c_type,
+            complex_c_type,
+            complex_real_type,
+            make_complex,
+            cmul_fn,
+            conj_fn,
+            suffix,
+        )
+        if raw_kernel is None:
+            return False
+
+        npairs = int(ind_i.shape[0])
+        threads = 256
+        blocks = max(1, (npairs + threads - 1) // threads)
+        raw_kernel(
+            (blocks,),
+            (threads,),
+            (
+                shear_map,
+                weights,
+                ind_i,
+                ind_j,
+                rot_i,
+                rot_j,
+                out_p,
+                out_m,
+                np.int32(nzbins),
+                np.int64(npairs),
+            ),
+        )
+        return True
+
+    return _cupy_tomo_vectorized_kernel
+
+
 def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
@@ -293,12 +550,14 @@ class Backend:
         device_id: Optional[int] = None,
         xipm_cross_corr_kernel: Optional[Any] = None,
         xipm_auto_corr_kernel: Optional[Any] = None,
+        xipm_tomo_vectorized_kernel: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
         self.device_id = device_id
         self.xipm_cross_corr_kernel = xipm_cross_corr_kernel
         self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
+        self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -375,6 +634,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             np,
             xipm_cross_corr_kernel=_cpu_xipm_cross_corr_kernel,
             xipm_auto_corr_kernel=_cpu_xipm_auto_corr_kernel,
+            xipm_tomo_vectorized_kernel=_cpu_vectorized_tomo_kernel,
         )
 
     elif device_type == 'gpu':
@@ -390,6 +650,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 device_id,
                 xipm_cross_corr_kernel=_build_cupy_xipm_cross_corr_kernel(cupy),
                 xipm_auto_corr_kernel=_build_cupy_xipm_auto_corr_kernel(cupy),
+                xipm_tomo_vectorized_kernel=_build_cupy_tomo_vectorized_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':
