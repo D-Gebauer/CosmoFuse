@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1]
+
+### Changed
+- Removed redundant padding/allocation in `Correlation._reduce_pairs` by applying `add.reduceat` directly to the pair-value array.
+- Enabled CuPy ElementwiseKernel fast-math compiler option (`--use_fast_math`) for fused GPU correlation kernels.
+- `Correlation.prepare` now supports optional host-memory release via `release_host_pairs=True`.
+
+### Added
+- `Correlation.save_pairs` now warns and returns without writing when host pair arrays were previously released.
+- Tests covering CuPy fast-math kernel options and host-pair memory-release behavior.
+
 ## [3.3.0]
 
 ### Changed

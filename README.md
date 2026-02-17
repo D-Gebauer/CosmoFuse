@@ -54,7 +54,7 @@ First create a Correlation object:
         nbins=10,                           # number of angular bins
         theta_min=10, theta_max=170,        # angular range (arcminutes)
         mask=mask,                          # mask
-        fastmath=False,                     # numba fastmath toggle
+        fastmath=False,                     # numba/cupy fastmath toggle
         device="auto",                      # "cpu", "gpu", "auto", or GPU id
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
@@ -64,6 +64,12 @@ First create a Correlation object:
 Then Calculate pairs:
 
     correlation.preprocess()
+
+If host RAM is limited for large runs, you can optionally release host-side pair arrays after preparing backend buffers:
+
+    correlation.prepare(release_host_pairs=True)
+
+This keeps only arrays needed for later computations in memory. Save pairs before releasing host arrays (or reload/recompute before saving again).
 
 These can be saved & loaded using:
 

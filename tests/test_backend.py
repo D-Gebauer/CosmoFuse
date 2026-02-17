@@ -51,6 +51,19 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(backend.device_id, 0)
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
+    def test_cupy_elementwise_kernels_use_fast_math(self):
+        import cupy
+        cupy.cuda.runtime.getDeviceCount.return_value = 1
+        cupy.ElementwiseKernel.side_effect = [MagicMock(), MagicMock()]
+
+        backend = get_backend(0)
+
+        self.assertEqual(backend.name, "cupy")
+        self.assertEqual(cupy.ElementwiseKernel.call_count, 2)
+        for call in cupy.ElementwiseKernel.call_args_list:
+            self.assertEqual(call.kwargs.get("options"), ("--use_fast_math",))
+
+    @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_to_device_cupy(self):
         import cupy
         cupy.cuda.runtime.getDeviceCount.return_value = 1

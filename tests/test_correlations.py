@@ -689,6 +689,69 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIsNone(restored.Q_inds_flat)
         self.assertIsNone(restored.Q_offsets)
 
+    def test_prepare_can_release_pair_inds(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        corr.bins = [np.array([2], dtype=np.uint32)]
+
+        corr.prepare(release_host_pairs=True)
+
+        self.assertIsNone(corr.pair_inds)
+        self.assertIsNone(corr.pair_exp2phi)
+        self.assertIsNone(corr.bins)
+        self.assertIsNotNone(corr.inds_dev)
+        self.assertEqual(corr.ntotpairs, 2)
+
+    def test_prepare_raises_when_host_pairs_released_and_not_prepared(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = None
+
+        with self.assertRaisesRegex(RuntimeError, "Host pair arrays were released"):
+            corr.prepare()
+
+    def test_save_pairs_warns_when_host_pair_arrays_released(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = None
+        corr.pair_exp2phi = None
+        corr.bins = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outpath = Path(tmpdir) / "pairs.h5"
+            with self.assertWarnsRegex(RuntimeWarning, "Cannot save pairs"):
+                corr.save_pairs(str(outpath))
+            self.assertFalse(outpath.exists())
+
     def test_get_full_tomo_fused_cpu_assignments(self):
         """Cover fused-kernel assignment lines for CPU backend."""
         corr = Correlation(

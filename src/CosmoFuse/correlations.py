@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
@@ -658,6 +659,18 @@ class Correlation:
         self.prepare()
 
     def save_pairs(self, filepath: str) -> None:
+        if (
+            self.pair_inds is None
+            or self.pair_exp2phi is None
+            or self.bins is None
+        ):
+            warnings.warn(
+                "Cannot save pairs because host pair arrays were released. "
+                "Reload or recompute pairs before calling save_pairs().",
+                RuntimeWarning,
+            )
+            return
+
         with h5py.File(filepath, "w") as fp:
             fp.attrs["nside"] = self.nside
             fp.attrs["nbins"] = self.nbins
@@ -746,8 +759,33 @@ class Correlation:
             self.Q_patch_area_flat,
         )
 
-    def prepare(self) -> None:
-        """Prepares pair arrays for correlation calculations on the backend device."""
+    def prepare(self, release_host_pairs: bool = False) -> None:
+        """Prepares pair arrays for correlation calculations on the backend device.
+
+        Args:
+            release_host_pairs:
+                If ``True``, releases host-side pair arrays (``pair_inds``,
+                ``pair_exp2phi``, ``bins``) after device buffers are built
+                to reduce RAM usage for large runs.
+        """
+        host_pairs_available = (
+            self.pair_inds is not None
+            and self.pair_exp2phi is not None
+            and self.bins is not None
+        )
+        if not host_pairs_available:
+            if (
+                self.inds_dev is not None
+                and self.exp2phi_dev is not None
+                and self.bins_dev is not None
+                and self.tot_bins_reduceat_dev is not None
+            ):
+                return
+            raise RuntimeError(
+                "Host pair arrays were released and prepared device buffers are "
+                "unavailable; reload or recompute pairs before prepare()."
+            )
+
         size = 0
         ninds = []
         for i in range(self.n_patches):
@@ -785,6 +823,10 @@ class Correlation:
         )
         self.ntotpairs = size
         self._prepare_version += 1
+        if release_host_pairs:
+            self.pair_inds = None
+            self.pair_exp2phi = None
+            self.bins = None
 
     def xipm(
         self,
@@ -1000,9 +1042,7 @@ class Correlation:
     def _reduce_pairs(self, values: Any) -> Any:
         """Reduce pair-valued arrays into flattened per-patch/per-bin sums."""
         starts = self.tot_bins_reduceat_dev[:-1]
-        zero = self.backend.zeros(1, dtype=values.dtype)
-        padded = self.backend.module.concatenate((values, zero))
-        reduced = self.backend.add.reduceat(padded, starts)
+        reduced = self.backend.add.reduceat(values, starts)
         reduced[self.bins_dev == 0] = 0
         return reduced
 

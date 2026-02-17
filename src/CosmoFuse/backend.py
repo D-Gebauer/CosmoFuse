@@ -7,6 +7,8 @@ from numba import njit
 
 logger = logging.getLogger(__name__)
 
+_CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
+
 
 @njit(fastmath=True)
 def _cpu_fused_cross_corr_kernel_c64(
@@ -260,6 +262,7 @@ def _build_cupy_fused_cross_corr_kernel(module: Any) -> Any:
         out_ba_m = ga_j_rot * gb_i_rot;
         """,
         "fused_cross_corr",
+        options=_CUPY_FASTMATH_OPTIONS,
     )
 
 
@@ -279,6 +282,7 @@ def _build_cupy_xipm_kernel(module: Any) -> Any:
         out_m = g1 * g2;
         """,
         "xipm_kernel",
+        options=_CUPY_FASTMATH_OPTIONS,
     )
 
 class Backend:
