@@ -363,8 +363,10 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 2, 1), dtype=np.complex64),
         )
         self.assertFalse(ok)
 
@@ -382,8 +384,10 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 2, 1), dtype=np.complex64),
         )
         self.assertFalse(ok)
 
@@ -404,8 +408,10 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
-            np.zeros((2, 1), dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 2, 1), dtype=np.complex64),
         )
         self.assertFalse(ok)
 
@@ -433,16 +439,122 @@ class TestBackend(unittest.TestCase):
         ind_j = np.zeros(1, dtype=np.int64)
         rot_i = np.zeros(1, dtype=np.complex64)
         rot_j = np.zeros(1, dtype=np.complex64)
-        out_p = np.zeros((6, 1), dtype=np.complex64)
-        out_m = np.zeros((6, 1), dtype=np.complex64)
+        bin_offsets = np.array([0, 1], dtype=np.int64)
+        comb_i = np.array([0, 0, 1], dtype=np.int32)
+        comb_j = np.array([0, 1, 1], dtype=np.int32)
+        out_num = np.zeros((2, 6, 1), dtype=np.complex64)
 
-        ok1 = kernel(shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m)
-        ok2 = kernel(shear, weights, ind_i, ind_j, rot_i, rot_j, out_p, out_m)
+        ok1 = kernel(
+            shear,
+            weights,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
+        ok2 = kernel(
+            shear,
+            weights,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
 
         self.assertTrue(ok1)
         self.assertTrue(ok2)
         self.assertEqual(rawkernel_calls["count"], 1)
         self.assertEqual(len(launches), 2)
+
+    def test_cupy_tomo_vectorized_kernel_templates_exact_bin_count(self):
+        compiled_sources = []
+
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(source, kernel_name, options=None):
+                compiled_sources.append((source, kernel_name, options))
+                return FakeKernel()
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        ind_i = np.zeros(1, dtype=np.int64)
+        ind_j = np.zeros(1, dtype=np.int64)
+        rot_i = np.zeros(1, dtype=np.complex64)
+        rot_j = np.zeros(1, dtype=np.complex64)
+        bin_offsets = np.array([0, 1], dtype=np.int64)
+
+        shear_2 = np.zeros((1, 2, 2), dtype=np.float32)
+        weights_2 = np.zeros((1, 2), dtype=np.float32)
+        comb_i_2 = np.array([0, 0, 1], dtype=np.int32)
+        comb_j_2 = np.array([0, 1, 1], dtype=np.int32)
+        out_num_2 = np.zeros((2, 6, 1), dtype=np.complex64)
+
+        shear_3 = np.zeros((1, 3, 2), dtype=np.float32)
+        weights_3 = np.zeros((1, 3), dtype=np.float32)
+        comb_i_3 = np.array([0, 0, 0, 1, 1, 2], dtype=np.int32)
+        comb_j_3 = np.array([0, 1, 2, 1, 2, 2], dtype=np.int32)
+        out_num_3 = np.zeros((2, 12, 1), dtype=np.complex64)
+
+        ok_2 = kernel(
+            shear_2,
+            weights_2,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i_2,
+            comb_j_2,
+            out_num_2,
+        )
+        ok_3 = kernel(
+            shear_3,
+            weights_3,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i_3,
+            comb_j_3,
+            out_num_3,
+        )
+        ok_2_cached = kernel(
+            shear_2,
+            weights_2,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i_2,
+            comb_j_2,
+            out_num_2,
+        )
+
+        self.assertTrue(ok_2)
+        self.assertTrue(ok_3)
+        self.assertTrue(ok_2_cached)
+        self.assertEqual(len(compiled_sources), 2)
+        self.assertIn("#define TOMO_BINS 2", compiled_sources[0][0])
+        self.assertIn("#define TOMO_BINS 3", compiled_sources[1][0])
+        for source, _kernel_name, options in compiled_sources:
+            self.assertNotIn("MAX_TOMO_BINS", source)
+            self.assertEqual(options, ("--use_fast_math",))
 
 if __name__ == "__main__":
     unittest.main()

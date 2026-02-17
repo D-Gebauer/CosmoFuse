@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.3]
+
+### Changed
+- Replaced the tomographic CuPy RawKernel path with a true fused-reduction implementation that accumulates directly into per-bin numerators instead of materializing per-pair tomographic scratch arrays.
+- Optimized fused tomographic GPU execution by removing output atomics where a single block owns each output element.
+- Optimized fused tomographic GPU execution by skipping BA-orientation work for auto-bin combinations (`i == j`).
+- Updated fused tomographic accumulation to write real-valued numerators directly (matching downstream normalization) instead of complex numerators.
+- Added cached tomographic combination-index buffers (`comb_i`/`comb_j`) in `Correlation` to avoid rebuilding/transferring them on repeated `get_full_tomo` calls.
+- `get_full_tomo` now always uses the fused tomographic kernel path and no longer accepts a `low_mem` option.
+
+### Removed
+- Removed the legacy `get_full_tomo` low-memory fallback implementation (`_xipm_auto`/`_xipm_cross` loop path).
+- Removed redundant tests in `tests/test_unified.py` that duplicated backend device-selection behavior already covered in `tests/test_backend.py`.
+
 ## [3.3.2]
 
 ### Changed

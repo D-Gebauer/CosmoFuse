@@ -365,6 +365,7 @@ class Correlation:
         self._xipm_sumofweights_cache = None
         self._xipm_sumofweights_cache_w_fingerprint = None
         self._xipm_sumofweights_cache_prepare_version = None
+        self._tomo_combination_cache = {}
         self.Q_inds_flat = None
         self.Q_cos_flat = None
         self.Q_sin_flat = None
@@ -376,6 +377,8 @@ class Correlation:
         state = self.__dict__.copy()
         if 'backend' in state:
             del state['backend']
+        if '_tomo_combination_cache' in state:
+            state['_tomo_combination_cache'] = {}
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
@@ -397,6 +400,8 @@ class Correlation:
             self._xipm_sumofweights_cache_w_fingerprint = None
         if "_xipm_sumofweights_cache_prepare_version" not in self.__dict__:
             self._xipm_sumofweights_cache_prepare_version = None
+        if "_tomo_combination_cache" not in self.__dict__:
+            self._tomo_combination_cache = {}
         if "Q_inds_flat" not in self.__dict__:
             self.Q_inds_flat = None
         if "Q_cos_flat" not in self.__dict__:
@@ -430,6 +435,31 @@ class Correlation:
         self.Q_val_flat = None
         self.Q_offsets = None
         self.Q_patch_area_flat = None
+
+    def _get_tomo_combination_indices(
+        self, nzbins: int, nzbin_combs: int
+    ) -> Tuple[Any, Any, np.ndarray]:
+        cached = self._tomo_combination_cache.get(nzbins)
+        if cached is not None:
+            return cached
+
+        comb_i_np = np.zeros(nzbin_combs, dtype=np.int32)
+        comb_j_np = np.zeros(nzbin_combs, dtype=np.int32)
+        auto_comb_np = np.zeros(nzbin_combs, dtype=bool)
+        comb_idx = 0
+        for i in range(nzbins):
+            for j in range(i, nzbins):
+                comb_i_np[comb_idx] = i
+                comb_j_np[comb_idx] = j
+                auto_comb_np[comb_idx] = i == j
+                comb_idx += 1
+
+        module = self.backend.module
+        comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
+        comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
+        cached_tuple = (comb_i_dev, comb_j_dev, auto_comb_np)
+        self._tomo_combination_cache[nzbins] = cached_tuple
+        return cached_tuple
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -838,6 +868,11 @@ class Correlation:
         w2: np.ndarray,
         sumofweights: Optional[Union[np.ndarray, float]] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute xi+/xi- for one map pair.
+
+        If ``sumofweights`` is provided explicitly, weight fingerprint/cache
+        checks are bypassed.
+        """
         if self.inds_dev is None:
             self.prepare()
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
@@ -956,12 +991,12 @@ class Correlation:
         w2_dev = self.backend.to_device(w2).astype(self.map_dtype, copy=False)
 
         if sumofweights_ab is None:
-            sum_ab = self._compute_xipm_sumofweights(w1_dev, w2_dev)
+            sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
         else:
             sum_ab = self._normalize_xipm_sumofweights(sumofweights_ab)
 
         if sumofweights_ba is None:
-            sum_ba = self._compute_xipm_sumofweights(w2_dev, w1_dev)
+            sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
         else:
             sum_ba = self._normalize_xipm_sumofweights(sumofweights_ba)
 
@@ -1172,18 +1207,28 @@ class Correlation:
         )
 
         cache = self._xipm_sumofweights_cache
-        cache_is_valid = (
-            cache is not None
-            and self._xipm_sumofweights_cache_w_fingerprint == w_fingerprint
-            and self._xipm_sumofweights_cache_prepare_version == self._prepare_version
-        )
-        if cache_is_valid:
-            return cache
+        if not isinstance(cache, dict):
+            migrated_cache: Dict[Any, Any] = {}
+            if (
+                cache is not None
+                and self._xipm_sumofweights_cache_w_fingerprint is not None
+                and self._xipm_sumofweights_cache_prepare_version == self._prepare_version
+            ):
+                migrated_cache[self._xipm_sumofweights_cache_w_fingerprint] = cache
+            self._xipm_sumofweights_cache = migrated_cache
+            self._xipm_sumofweights_cache_w_fingerprint = None
+            cache = migrated_cache
+
+        if self._xipm_sumofweights_cache_prepare_version != self._prepare_version:
+            cache.clear()
+            self._xipm_sumofweights_cache_prepare_version = self._prepare_version
+
+        cached = cache.get(w_fingerprint)
+        if cached is not None:
+            return cached
 
         sumofweights_dev = self._compute_xipm_sumofweights(w1_dev, w2_dev)
-        self._xipm_sumofweights_cache = sumofweights_dev
-        self._xipm_sumofweights_cache_w_fingerprint = w_fingerprint
-        self._xipm_sumofweights_cache_prepare_version = self._prepare_version
+        cache[w_fingerprint] = sumofweights_dev
         return sumofweights_dev
 
     def _compute_tomo_sumofweights(
@@ -1261,17 +1306,17 @@ class Correlation:
         inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
         exp_i = module.ascontiguousarray(self.exp2phi_dev[0])
         exp_j = module.ascontiguousarray(self.exp2phi_dev[1])
+        bin_offsets = module.ascontiguousarray(
+            self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
+        )
+        comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
+            nzbins, nzbin_combs
+        )
 
-        complex_backend_dtype = (
-            module.complex64
-            if self.rotation_complex_dtype == np.dtype(np.complex64)
-            else module.complex128
-        )
-        out_p = self.backend.zeros(
-            (2 * nzbin_combs, self.ntotpairs), dtype=complex_backend_dtype
-        )
-        out_m = self.backend.zeros(
-            (2 * nzbin_combs, self.ntotpairs), dtype=complex_backend_dtype
+        map_backend_dtype = getattr(module, self.map_dtype.name)
+        nbins_total = int(self.n_patches * self.nbins)
+        out_num = self.backend.zeros(
+            (2, 2 * nzbin_combs, nbins_total), dtype=map_backend_dtype
         )
 
         launched = tomo_kernel(
@@ -1281,17 +1326,18 @@ class Correlation:
             inds_j,
             exp_i,
             exp_j,
-            out_p,
-            out_m,
+            bin_offsets,
+            comb_i,
+            comb_j,
+            out_num,
         )
         if not launched:
             return None
 
-        xip_reduced = module.real(self._reduce_pairs(out_p))
-        xim_reduced = module.real(self._reduce_pairs(out_m))
+        xip_reduced = out_num[0]
+        xim_reduced = out_num[1]
         xip_num = module.stack((xip_reduced[0::2], xip_reduced[1::2]), axis=0)
         xim_num = module.stack((xim_reduced[0::2], xim_reduced[1::2]), axis=0)
-        map_backend_dtype = getattr(module, self.map_dtype.name)
         xip = self.backend.zeros(
             (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
         )
@@ -1300,13 +1346,6 @@ class Correlation:
         )
 
         half = self.map_dtype.type(0.5)
-        auto_comb = np.zeros(nzbin_combs, dtype=bool)
-        comb_idx = 0
-        for i in range(nzbins):
-            for j in range(i, nzbins):
-                auto_comb[comb_idx] = i == j
-                comb_idx += 1
-
         for k in range(nzbin_combs):
             xip_ab, xim_ab = self._normalize_xipm_pairs(
                 xip_num[0, k], xim_num[0, k], sumofweights_dev[0, k]
@@ -1389,6 +1428,11 @@ class Correlation:
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute M_ap, xi+, and xi- for full tomography.
+
+        If ``sumofweights`` is provided explicitly, weight fingerprint/cache
+        checks are bypassed.
+        """
         if self.inds_dev is None:
             self.prepare()
 
@@ -1397,12 +1441,11 @@ class Correlation:
 
         shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
-        w_fingerprint = self._fingerprint_weights(w_np)
-
         shear_maps_dev = self.backend.to_device(shear_maps_np)
         w_dev = self.backend.to_device(w_np)
 
         if sumofweights is None:
+            w_fingerprint = self._fingerprint_weights(w_np)
             cache = self._tomo_sumofweights_cache
             cache_is_valid = (
                 cache is not None
@@ -1435,9 +1478,6 @@ class Correlation:
                     f"got {sumofweights_np.shape}"
                 )
             sumofweights_dev = self.backend.to_device(sumofweights_np)
-            self._tomo_sumofweights_cache = sumofweights_dev
-            self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
-            self._tomo_sumofweights_cache_prepare_version = self._prepare_version
 
         g1_fac, g2_fac = 1, 1
         if flip_g1:
@@ -1462,53 +1502,10 @@ class Correlation:
             g1_fac,
             g2_fac,
         )
-        if vectorized_xipm is not None:
-            xip, xim = vectorized_xipm
-            return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
+        if vectorized_xipm is None:
+            raise RuntimeError(
+                "Tomographic fused-reduction kernel unavailable for this backend."
+            )
 
-        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
-
-        xim1 = self.backend.zeros(
-            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
-        )
-        xim2 = self.backend.zeros(
-            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
-        )
-        xip1 = self.backend.zeros(
-            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
-        )
-        xip2 = self.backend.zeros(
-            [nzbin_combs, self.n_patches, self.nbins], dtype=map_backend_dtype
-        )
-
-        k = 0
-        for i in range(nzbins):
-            for j in range(i, nzbins):
-                if i == j:
-                    xip1[k], xim1[k] = self._xipm_auto(
-                        g1_fac * shear_maps_dev[i, 0],
-                        g2_fac * shear_maps_dev[i, 1],
-                        w_dev[i],
-                        sumofweights=sumofweights_dev[0, k],
-                        return_numpy=False,
-                    )
-                    xip2[k], xim2[k] = xip1[k], xim1[k]
-                else:
-                    xip1[k], xim1[k] = self._xipm_cross(
-                        g1_fac * shear_maps_dev[i, 0],
-                        g2_fac * shear_maps_dev[i, 1],
-                        g1_fac * shear_maps_dev[j, 0],
-                        g2_fac * shear_maps_dev[j, 1],
-                        w_dev[i],
-                        w_dev[j],
-                        sumofweights_ab=sumofweights_dev[0, k],
-                        sumofweights_ba=sumofweights_dev[1, k],
-                        return_numpy=False,
-                    )
-                    xip2[k], xim2[k] = xip1[k], xim1[k]
-                k += 1
-        
-        xip = (xip1 + xip2) / 2
-        xim = (xim1 + xim2) / 2
-
+        xip, xim = vectorized_xipm
         return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)

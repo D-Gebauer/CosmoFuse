@@ -693,6 +693,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_xipm_sumofweights_cache",
             "_xipm_sumofweights_cache_w_fingerprint",
             "_xipm_sumofweights_cache_prepare_version",
+            "_tomo_combination_cache",
             "Q_inds_flat",
             "Q_cos_flat",
             "Q_sin_flat",
@@ -709,6 +710,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(restored._prepare_version, 0)
         self.assertIsNone(restored._tomo_sumofweights_cache)
         self.assertIsNone(restored._xipm_sumofweights_cache)
+        self.assertEqual(restored._tomo_combination_cache, {})
         self.assertIsNone(restored.Q_inds_flat)
         self.assertIsNone(restored.Q_offsets)
 
@@ -1056,29 +1058,14 @@ class TestCorrelationCoverage(unittest.TestCase):
                 1,
             )
 
-    def test_get_full_tomo_legacy_fallback_executes(self):
+    def test_get_full_tomo_raises_when_vectorized_unavailable(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
-        auto_1 = corr.backend.to_device(np.array([[1.0]], dtype=np.float64))
-        auto_3 = corr.backend.to_device(np.array([[3.0]], dtype=np.float64))
-        cross_2 = corr.backend.to_device(np.array([[2.0]], dtype=np.float64))
 
-        with patch.object(corr, "_xipm_tomo_vectorized", return_value=None), patch.object(
-            corr,
-            "_xipm_auto",
-            side_effect=[(auto_1, auto_1), (auto_3, auto_3)],
-        ) as spy_auto, patch.object(
-            corr,
-            "_xipm_cross",
-            return_value=(cross_2, cross_2),
-        ) as spy_cross:
-            _, xip, xim = corr.get_full_tomo(shear_maps, w)
-
-        self.assertEqual(spy_auto.call_count, 2)
-        self.assertEqual(spy_cross.call_count, 1)
-        np.testing.assert_allclose(xip[:, 0, 0], np.array([1.0, 2.0, 3.0]))
-        np.testing.assert_allclose(xim[:, 0, 0], np.array([1.0, 2.0, 3.0]))
+        with patch.object(corr, "_xipm_tomo_vectorized", return_value=None):
+            with self.assertRaises(RuntimeError):
+                corr.get_full_tomo(shear_maps, w)
 
     def test_get_full_tomo_fused_cpu_assignments(self):
         """CPU get_full_tomo should use vectorized tomography, not legacy cross kernel."""
@@ -1456,6 +1443,102 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.corr.xipm(g11, g21, g12, g22, w1, w2)
             self.assertEqual(spy_compute.call_count, 1)
 
+    def test_xipm_cross_uses_sumofweights_getter(self):
+        self._setup_mock_pairs()
+        g11 = np.random.rand(self.npix)
+        g21 = np.random.rand(self.npix)
+        g12 = np.random.rand(self.npix)
+        g22 = np.random.rand(self.npix)
+        w1 = np.random.rand(self.npix)
+        w2 = np.random.rand(self.npix)
+
+        with patch.object(
+            self.corr,
+            "_get_xipm_sumofweights",
+            wraps=self.corr._get_xipm_sumofweights,
+        ) as spy_get:
+            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+
+        self.assertEqual(spy_get.call_count, 2)
+
+    def test_xipm_cross_sumofweights_reuses_cache(self):
+        self._setup_mock_pairs()
+        g11 = np.random.rand(self.npix)
+        g21 = np.random.rand(self.npix)
+        g12 = np.random.rand(self.npix)
+        g22 = np.random.rand(self.npix)
+        w1 = np.random.rand(self.npix)
+        w2 = np.random.rand(self.npix)
+
+        with patch.object(
+            self.corr,
+            "_compute_xipm_sumofweights",
+            wraps=self.corr._compute_xipm_sumofweights,
+        ) as spy_compute:
+            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+
+        self.assertEqual(spy_compute.call_count, 2)
+        self.assertIsInstance(self.corr._xipm_sumofweights_cache, dict)
+        self.assertEqual(len(self.corr._xipm_sumofweights_cache), 2)
+
+    def test_xipm_sumofweights_legacy_single_entry_cache_migrates(self):
+        self._setup_mock_pairs()
+        w1 = np.random.rand(self.npix)
+        w2 = np.random.rand(self.npix)
+        w1_dev = self.corr.backend.to_device(w1)
+        w2_dev = self.corr.backend.to_device(w2)
+        legacy_key = (
+            self.corr._fingerprint_weights(np.asarray(w1)),
+            self.corr._fingerprint_weights(np.asarray(w2)),
+        )
+        legacy_value = self.corr.backend.to_device(
+            np.ones(self.corr.n_patches * self.corr.nbins, dtype=self.corr.map_dtype)
+        )
+        self.corr._xipm_sumofweights_cache = legacy_value
+        self.corr._xipm_sumofweights_cache_w_fingerprint = legacy_key
+        self.corr._xipm_sumofweights_cache_prepare_version = self.corr._prepare_version
+
+        with patch.object(
+            self.corr,
+            "_compute_xipm_sumofweights",
+            side_effect=AssertionError("legacy cache should satisfy lookup"),
+        ):
+            looked_up = self.corr._get_xipm_sumofweights(w1_dev, w2_dev)
+
+        self.assertIs(looked_up, legacy_value)
+        self.assertIsInstance(self.corr._xipm_sumofweights_cache, dict)
+        self.assertIs(self.corr._xipm_sumofweights_cache[legacy_key], legacy_value)
+        self.assertIsNone(self.corr._xipm_sumofweights_cache_w_fingerprint)
+
+    def test_xipm_explicit_sumofweights_skips_fingerprint_checks(self):
+        self._setup_mock_pairs()
+        g11 = np.random.rand(self.npix)
+        g21 = np.random.rand(self.npix)
+        g12 = g11
+        g22 = g21
+        w1 = np.random.rand(self.npix)
+        w2 = w1
+        explicit_sum = np.ones((self.corr.n_patches, self.corr.nbins), dtype=np.float64)
+
+        with patch.object(
+            self.corr,
+            "_fingerprint_weights",
+            side_effect=AssertionError("fingerprint should be skipped"),
+        ):
+            xip, xim = self.corr.xipm(
+                g11,
+                g21,
+                g12,
+                g22,
+                w1,
+                w2,
+                sumofweights=explicit_sum,
+            )
+
+        self.assertEqual(xip.shape, (self.corr.n_patches, self.corr.nbins))
+        self.assertEqual(xim.shape, (self.corr.n_patches, self.corr.nbins))
+
         def test_xipm_gpu_fallback_path_with_fake_cupy(self):
             """Cover the non-CPU xipm path with a fake CuPy backend."""
             import importlib.util
@@ -1583,6 +1666,35 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
+
+    def test_get_full_tomo_explicit_sumofweights_skips_fingerprint_checks(self):
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        explicit_sum = np.ones((2, nzbin_combs), dtype=np.float64)
+        self._setup_mock_pairs()
+
+        cache_sentinel = np.array([123.0], dtype=np.float64)
+        self.corr._tomo_sumofweights_cache = cache_sentinel
+        self.corr._tomo_sumofweights_cache_w_fingerprint = ("sentinel",)
+        self.corr._tomo_sumofweights_cache_prepare_version = -1
+
+        with patch.object(
+            self.corr,
+            "_fingerprint_weights",
+            side_effect=AssertionError("fingerprint should be skipped"),
+        ):
+            M_ap, xip, xim = self.corr.get_full_tomo(
+                shear_maps, w, sumofweights=explicit_sum
+            )
+
+        self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
+        self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
+        self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
+        self.assertIs(self.corr._tomo_sumofweights_cache, cache_sentinel)
+        self.assertEqual(self.corr._tomo_sumofweights_cache_w_fingerprint, ("sentinel",))
+        self.assertEqual(self.corr._tomo_sumofweights_cache_prepare_version, -1)
 
     def test_get_full_tomo_prepares(self):
         """Test that get_full_tomo calls prepare if needed."""
