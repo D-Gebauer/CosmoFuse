@@ -730,6 +730,31 @@ class TestCorrelationCoverage(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Host pair arrays were released"):
             corr.prepare()
 
+    def test_prepare_returns_when_host_pairs_released_but_device_ready(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        corr.pair_inds = None
+        corr.pair_exp2phi = None
+        corr.bins = None
+
+        corr.inds_dev = np.zeros((2, 1), dtype=np.uint32)
+        corr.exp2phi_dev = np.zeros((2, 1), dtype=np.complex128)
+        corr.bins_dev = np.zeros(1, dtype=np.uint32)
+        corr.tot_bins_reduceat_dev = np.zeros(1, dtype=np.int64)
+
+        prepare_version_before = corr._prepare_version
+        corr.prepare()
+        self.assertEqual(corr._prepare_version, prepare_version_before)
+
     def test_save_pairs_warns_when_host_pair_arrays_released(self):
         corr = Correlation(
             nside=1,
