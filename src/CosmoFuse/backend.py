@@ -11,7 +11,7 @@ _CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
 
 
 @njit(fastmath=True)
-def _cpu_fused_cross_corr_kernel_c64(
+def _cpu_xipm_cross_corr_kernel_c64(
     g1a: np.ndarray,
     g2a: np.ndarray,
     g1b: np.ndarray,
@@ -48,7 +48,7 @@ def _cpu_fused_cross_corr_kernel_c64(
 
 
 @njit(fastmath=True)
-def _cpu_fused_cross_corr_kernel_c128(
+def _cpu_xipm_cross_corr_kernel_c128(
     g1a: np.ndarray,
     g2a: np.ndarray,
     g1b: np.ndarray,
@@ -84,7 +84,7 @@ def _cpu_fused_cross_corr_kernel_c128(
         out_ba_m[idx] = ga_j_rot * gb_i_rot
 
 
-def _cpu_fused_cross_corr_kernel(
+def _cpu_xipm_cross_corr_kernel(
     g1a: np.ndarray,
     g2a: np.ndarray,
     g1b: np.ndarray,
@@ -101,7 +101,7 @@ def _cpu_fused_cross_corr_kernel(
     out_ba_m: np.ndarray,
 ) -> None:
     if exp_i.dtype == np.complex64:
-        _cpu_fused_cross_corr_kernel_c64(
+        _cpu_xipm_cross_corr_kernel_c64(
             g1a,
             g2a,
             g1b,
@@ -118,7 +118,7 @@ def _cpu_fused_cross_corr_kernel(
             out_ba_m,
         )
     else:
-        _cpu_fused_cross_corr_kernel_c128(
+        _cpu_xipm_cross_corr_kernel_c128(
             g1a,
             g2a,
             g1b,
@@ -137,7 +137,7 @@ def _cpu_fused_cross_corr_kernel(
 
 
 @njit(fastmath=True)
-def _cpu_xipm_kernel_c64(
+def _cpu_xipm_auto_corr_kernel_c64(
     g11: np.ndarray,
     g21: np.ndarray,
     g12: np.ndarray,
@@ -163,7 +163,7 @@ def _cpu_xipm_kernel_c64(
 
 
 @njit(fastmath=True)
-def _cpu_xipm_kernel_c128(
+def _cpu_xipm_auto_corr_kernel_c128(
     g11: np.ndarray,
     g21: np.ndarray,
     g12: np.ndarray,
@@ -188,7 +188,7 @@ def _cpu_xipm_kernel_c128(
         out_m[idx] = g1 * g2
 
 
-def _cpu_xipm_kernel(
+def _cpu_xipm_auto_corr_kernel(
     g11: np.ndarray,
     g21: np.ndarray,
     g12: np.ndarray,
@@ -203,7 +203,7 @@ def _cpu_xipm_kernel(
     out_m: np.ndarray,
 ) -> None:
     if exp_i.dtype == np.complex64:
-        _cpu_xipm_kernel_c64(
+        _cpu_xipm_auto_corr_kernel_c64(
             g11,
             g21,
             g12,
@@ -218,7 +218,7 @@ def _cpu_xipm_kernel(
             out_m,
         )
     else:
-        _cpu_xipm_kernel_c128(
+        _cpu_xipm_auto_corr_kernel_c128(
             g11,
             g21,
             g12,
@@ -234,7 +234,7 @@ def _cpu_xipm_kernel(
         )
 
 
-def _build_cupy_fused_cross_corr_kernel(module: Any) -> Any:
+def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
@@ -261,12 +261,12 @@ def _build_cupy_fused_cross_corr_kernel(module: Any) -> Any:
         out_ba_p = ga_j_rot * conj(gb_i_rot);
         out_ba_m = ga_j_rot * gb_i_rot;
         """,
-        "fused_cross_corr",
+        "gpu_xipm_cross_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
     )
 
 
-def _build_cupy_xipm_kernel(module: Any) -> Any:
+def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g11, raw T g21, raw T g12, raw T g22, raw T w1, raw T w2,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
@@ -281,7 +281,7 @@ def _build_cupy_xipm_kernel(module: Any) -> Any:
         out_p = g1 * conj(g2);
         out_m = g1 * g2;
         """,
-        "xipm_kernel",
+        "gpu_xipm_auto_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
     )
 
@@ -291,14 +291,14 @@ class Backend:
         name: str,
         module: Any,
         device_id: Optional[int] = None,
-        fused_cross_corr_kernel: Optional[Any] = None,
-        xipm_kernel: Optional[Any] = None,
+        xipm_cross_corr_kernel: Optional[Any] = None,
+        xipm_auto_corr_kernel: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
         self.device_id = device_id
-        self.fused_cross_corr_kernel = fused_cross_corr_kernel
-        self.xipm_kernel = xipm_kernel
+        self.xipm_cross_corr_kernel = xipm_cross_corr_kernel
+        self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -373,8 +373,8 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
         return Backend(
             'numpy',
             np,
-            fused_cross_corr_kernel=_cpu_fused_cross_corr_kernel,
-            xipm_kernel=_cpu_xipm_kernel,
+            xipm_cross_corr_kernel=_cpu_xipm_cross_corr_kernel,
+            xipm_auto_corr_kernel=_cpu_xipm_auto_corr_kernel,
         )
 
     elif device_type == 'gpu':
@@ -388,8 +388,8 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 'cupy',
                 cupy,
                 device_id,
-                fused_cross_corr_kernel=_build_cupy_fused_cross_corr_kernel(cupy),
-                xipm_kernel=_build_cupy_xipm_kernel(cupy),
+                xipm_cross_corr_kernel=_build_cupy_xipm_cross_corr_kernel(cupy),
+                xipm_auto_corr_kernel=_build_cupy_xipm_auto_corr_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':

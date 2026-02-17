@@ -586,7 +586,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             backend = module.get_backend("gpu")
-            self.assertIsNotNone(backend.fused_cross_corr_kernel)
+            self.assertIsNotNone(backend.xipm_cross_corr_kernel)
         finally:
             sys.modules.pop("cupy", None)
             sys.modules.pop(module_name, None)
@@ -846,7 +846,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 out_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
                 out_ba_m[idx] = ga_j_rot * gb_i_rot
 
-        corr.backend.fused_cross_corr_kernel = fused_kernel
+        corr.backend.xipm_cross_corr_kernel = fused_kernel
 
         _, xip, xim = corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
 
@@ -936,7 +936,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.Q_val = [np.array([1.0], dtype=np.float64)]
         corr.Q_patch_area = [1.0]
 
-        corr.backend.fused_cross_corr_kernel = None
+        corr.backend.xipm_cross_corr_kernel = None
 
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
@@ -963,7 +963,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.bins = [np.array([2], dtype=np.uint32)]
         corr.prepare()
 
-        corr.backend.xipm_kernel = None
+        corr.backend.xipm_auto_corr_kernel = None
 
         g11 = np.ones(12, dtype=np.float64)
         g21 = np.ones(12, dtype=np.float64)

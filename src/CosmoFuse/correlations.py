@@ -871,10 +871,10 @@ class Correlation:
         else:
             sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
 
-        xipm_kernel = getattr(self.backend, "xipm_kernel", None)
-        if xipm_kernel is None:
+        xipm_auto_corr_kernel = getattr(self.backend, "xipm_auto_corr_kernel", None)
+        if xipm_auto_corr_kernel is None:
             raise RuntimeError(
-                "Backend does not provide an xipm kernel; use a supported backend."
+                "Backend does not provide an xipm auto-correlation kernel; use a supported backend."
             )
 
         complex_dtype = (
@@ -885,7 +885,7 @@ class Correlation:
         out_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
         out_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
 
-        xipm_kernel(
+        xipm_auto_corr_kernel(
             g1_dev,
             g2_dev,
             g1_dev,
@@ -941,10 +941,10 @@ class Correlation:
         else:
             sum_ba = self._normalize_xipm_sumofweights(sumofweights_ba)
 
-        fused_kernel = getattr(self.backend, "fused_cross_corr_kernel", None)
-        if fused_kernel is None:
+        xipm_cross_corr_kernel = getattr(self.backend, "xipm_cross_corr_kernel", None)
+        if xipm_cross_corr_kernel is None:
             raise RuntimeError(
-                "Backend does not provide a fused cross-correlation kernel; "
+                "Backend does not provide an xipm cross-correlation kernel; "
                 "use a supported backend."
             )
 
@@ -958,7 +958,7 @@ class Correlation:
         out_ba_p = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
         out_ba_m = self.backend.zeros(self.ntotpairs, dtype=complex_dtype)
 
-        fused_kernel(
+        xipm_cross_corr_kernel(
             g11_dev,
             g21_dev,
             g12_dev,

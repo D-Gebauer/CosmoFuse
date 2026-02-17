@@ -8,7 +8,7 @@ import importlib
 import numpy as np
 
 import CosmoFuse.backend
-from CosmoFuse.backend import Backend, _cpu_fused_cross_corr_kernel, get_backend
+from CosmoFuse.backend import Backend, _cpu_xipm_cross_corr_kernel, get_backend
 
 
 class TestBackend(unittest.TestCase):
@@ -155,7 +155,7 @@ class TestBackend(unittest.TestCase):
         backend = get_backend("auto")
         self.assertEqual(backend.name, "cupy")
 
-    def test_cpu_fused_cross_corr_kernel_complex128_dispatch(self):
+    def test_cpu_xipm_cross_corr_kernel_complex128_dispatch(self):
         g1a = np.array([0.1, 0.2, 0.3], dtype=np.float64)
         g2a = np.array([0.4, 0.5, 0.6], dtype=np.float64)
         g1b = np.array([0.7, 0.8, 0.9], dtype=np.float64)
@@ -173,7 +173,7 @@ class TestBackend(unittest.TestCase):
         out_ba_p = np.zeros(ind_i.shape[0], dtype=np.complex128)
         out_ba_m = np.zeros(ind_i.shape[0], dtype=np.complex128)
 
-        _cpu_fused_cross_corr_kernel(
+        _cpu_xipm_cross_corr_kernel(
             g1a,
             g2a,
             g1b,
