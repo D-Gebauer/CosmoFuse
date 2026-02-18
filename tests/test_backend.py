@@ -11,7 +11,14 @@ import CosmoFuse.backend
 from CosmoFuse.backend import (
     Backend,
     _MAX_VECTOR_TOMO_BINS,
+    _cpu_aperture_density_kernel,
+    _build_cupy_density_density_tomo_vectorized_kernel,
+    _build_cupy_density_shear_tomo_vectorized_kernel,
     _build_cupy_tomo_vectorized_kernel,
+    _cpu_density_density_corr_kernel,
+    _cpu_density_density_tomo_vectorized_kernel,
+    _cpu_density_shear_corr_kernel,
+    _cpu_density_shear_tomo_vectorized_kernel,
     _cpu_xipm_auto_corr_kernel,
     _cpu_xipm_cross_corr_kernel,
     get_backend,
@@ -61,12 +68,18 @@ class TestBackend(unittest.TestCase):
     def test_cupy_elementwise_kernels_use_fast_math(self):
         import cupy
         cupy.cuda.runtime.getDeviceCount.return_value = 1
-        cupy.ElementwiseKernel.side_effect = [MagicMock(), MagicMock()]
+        cupy.ElementwiseKernel.side_effect = [
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ]
 
         backend = get_backend(0)
 
         self.assertEqual(backend.name, "cupy")
-        self.assertEqual(cupy.ElementwiseKernel.call_count, 2)
+        self.assertEqual(cupy.ElementwiseKernel.call_count, 5)
         for call in cupy.ElementwiseKernel.call_args_list:
             self.assertEqual(call.kwargs.get("options"), ("--use_fast_math",))
 
@@ -323,6 +336,10 @@ class TestBackend(unittest.TestCase):
     def test_cpu_backend_exposes_tomo_vectorized_kernel(self):
         backend = get_backend("cpu")
         self.assertIsNotNone(backend.xipm_tomo_vectorized_kernel)
+        self.assertIsNotNone(backend.kernel_density_density)
+        self.assertIsNotNone(backend.kernel_density_shear)
+        self.assertIsNotNone(backend.kernel_density_density_tomo_vectorized)
+        self.assertIsNotNone(backend.kernel_density_shear_tomo_vectorized)
 
         shear = np.array(
             [[[1.0, 0.0], [2.0, 0.0]], [[3.0, 0.0], [4.0, 0.0]]], dtype=np.float64
@@ -349,6 +366,425 @@ class TestBackend(unittest.TestCase):
         self.assertIsNone(launched)
         self.assertEqual(out_p.shape, (3, 1))
         self.assertEqual(out_m.shape, (3, 1))
+
+    def test_cpu_density_density_corr_kernel(self):
+        density_a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        density_b = np.array([4.0, 5.0, 6.0], dtype=np.float64)
+        w_a = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        w_b = np.array([1.0, 2.0, 0.25], dtype=np.float64)
+        ind_i = np.array([0, 1, 2], dtype=np.int64)
+        ind_j = np.array([1, 2, 0], dtype=np.int64)
+        offsets = np.array([0, 2, 3], dtype=np.int64)
+        out_w = np.zeros(2, dtype=np.float64)
+
+        _cpu_density_density_corr_kernel(
+            density_a,
+            density_b,
+            w_a,
+            w_b,
+            ind_i,
+            ind_j,
+            offsets,
+            out_w,
+        )
+
+        expected = np.zeros_like(out_w)
+        for b in range(offsets.shape[0] - 1):
+            for idx in range(offsets[b], offsets[b + 1]):
+                i = ind_i[idx]
+                j = ind_j[idx]
+                expected[b] += w_a[i] * w_b[j] * density_a[i] * density_b[j]
+
+        np.testing.assert_allclose(out_w, expected)
+
+    def test_cpu_density_shear_corr_kernel(self):
+        density_lens = np.array([1.0, 2.0, 0.5], dtype=np.float64)
+        g1_source = np.array([0.2, -0.1, 0.4], dtype=np.float64)
+        g2_source = np.array([0.3, 0.5, -0.2], dtype=np.float64)
+        w_lens = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        w_source = np.array([1.0, 1.5, 0.25], dtype=np.float64)
+        ind_i = np.array([0, 1, 2], dtype=np.int64)
+        ind_j = np.array([1, 2, 0], dtype=np.int64)
+        exp_j = np.array([0.6 + 0.8j, 1.0 + 0.0j, -0.5 + 0.5j], dtype=np.complex128)
+        offsets = np.array([0, 2, 3], dtype=np.int64)
+        out_gt = np.zeros(2, dtype=np.float64)
+
+        _cpu_density_shear_corr_kernel(
+            density_lens,
+            g1_source,
+            g2_source,
+            w_lens,
+            w_source,
+            ind_i,
+            ind_j,
+            exp_j,
+            offsets,
+            out_gt,
+        )
+
+        expected = np.zeros_like(out_gt)
+        for b in range(offsets.shape[0] - 1):
+            for idx in range(offsets[b], offsets[b + 1]):
+                i = ind_i[idx]
+                j = ind_j[idx]
+                gamma_t = -(g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag)
+                expected[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
+
+        np.testing.assert_allclose(out_gt, expected)
+
+    def test_cpu_density_density_tomo_vectorized_kernel(self):
+        density = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+        weights = np.array([[1.0, 0.5], [2.0, 1.0]], dtype=np.float64)
+        ind_i = np.array([0], dtype=np.int64)
+        ind_j = np.array([1], dtype=np.int64)
+        offsets = np.array([0, 1], dtype=np.int64)
+        comb_i = np.array([0, 0, 1], dtype=np.int32)
+        comb_j = np.array([0, 1, 1], dtype=np.int32)
+        out_num = np.zeros((3, 1), dtype=np.float64)
+
+        _cpu_density_density_tomo_vectorized_kernel(
+            density,
+            weights,
+            ind_i,
+            ind_j,
+            offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
+
+        self.assertEqual(out_num.shape, (3, 1))
+        self.assertNotEqual(out_num[0, 0], 0.0)
+
+    def test_cpu_density_shear_tomo_vectorized_kernel(self):
+        density = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+        shear = np.array(
+            [
+                [[0.1, 0.2], [0.3, 0.4]],
+                [[0.5, 0.6], [0.7, 0.8]],
+            ],
+            dtype=np.float64,
+        )
+        lens_weights = np.array([[1.0, 0.5], [2.0, 1.0]], dtype=np.float64)
+        source_weights = np.array([[1.0, 1.5], [0.5, 2.0]], dtype=np.float64)
+        ind_i = np.array([0], dtype=np.int64)
+        ind_j = np.array([1], dtype=np.int64)
+        rot_j = np.array([0.6 + 0.8j], dtype=np.complex128)
+        offsets = np.array([0, 1], dtype=np.int64)
+        comb_i = np.array([0, 1], dtype=np.int32)
+        comb_j = np.array([0, 1], dtype=np.int32)
+        out_num = np.zeros((2, 1), dtype=np.float64)
+
+        _cpu_density_shear_tomo_vectorized_kernel(
+            density,
+            shear,
+            lens_weights,
+            source_weights,
+            ind_i,
+            ind_j,
+            rot_j,
+            offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
+
+        self.assertEqual(out_num.shape, (2, 1))
+        self.assertNotEqual(out_num[0, 0], 0.0)
+
+    def test_cpu_aperture_density_kernel(self):
+        Q_inds = np.array([0, 1, 2], dtype=np.int64)
+        Q_val = np.array([0.2, 0.3, 0.5], dtype=np.float64)
+        Q_offsets = np.array([0, 2, 3], dtype=np.int64)
+        map_values = np.array([1.0, 2.0, 4.0], dtype=np.float64)
+        weights = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        Q_patch_area = np.array([1.0, 2.0], dtype=np.float64)
+        out = np.zeros(2, dtype=np.float64)
+
+        _cpu_aperture_density_kernel(
+            Q_inds,
+            Q_val,
+            Q_offsets,
+            map_values,
+            weights,
+            Q_patch_area,
+            out,
+        )
+
+        expected0 = 1.0 * (
+            (weights[0] * map_values[0] * Q_val[0])
+            + (weights[1] * map_values[1] * Q_val[1])
+        ) / (weights[0] + weights[1])
+        expected1 = 2.0 * (weights[2] * map_values[2] * Q_val[2]) / weights[2]
+        np.testing.assert_allclose(out, np.array([expected0, expected1]))
+
+    def test_cupy_density_density_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+
+        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_density_tomo_vectorized_kernel_compile_failure_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+
+            @staticmethod
+            def RawKernel(*_args, **_kwargs):
+                raise RuntimeError("compile failed")
+
+        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_density_tomo_vectorized_kernel_too_many_bins_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
+
+        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((2, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_density_tomo_vectorized_kernel_success_and_source(self):
+        compiled_sources = []
+        compile_calls = {"count": 0}
+
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+
+            @staticmethod
+            def RawKernel(source, kernel_name, options=None):
+                compile_calls["count"] += 1
+                compiled_sources.append((source, kernel_name, options))
+                return FakeKernel()
+
+        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0, 0, 1], dtype=np.int32),
+            np.array([0, 1, 1], dtype=np.int32),
+            np.zeros((6, 1), dtype=np.float32),
+        )
+        ok_cached = kernel(
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0, 0, 1], dtype=np.int32),
+            np.array([0, 1, 1], dtype=np.int32),
+            np.zeros((6, 1), dtype=np.float32),
+        )
+        self.assertTrue(ok)
+        self.assertTrue(ok_cached)
+        self.assertEqual(len(compiled_sources), 1)
+        self.assertEqual(compile_calls["count"], 1)
+        self.assertNotIn("cuComplex", compiled_sources[0][0])
+        self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_too_many_bins_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1, 2), dtype=np.float32),
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_compile_failure_returns_false(self):
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(*_args, **_kwargs):
+                raise RuntimeError("compile failed")
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        self.assertFalse(ok)
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_success_and_source(self):
+        compiled_sources = []
+
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(source, kernel_name, options=None):
+                compiled_sources.append((source, kernel_name, options))
+                return FakeKernel()
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        self.assertTrue(ok)
+        self.assertEqual(len(compiled_sources), 1)
+        self.assertNotIn("rot_i", compiled_sources[0][0])
+        self.assertIn("rot_j", compiled_sources[0][0])
+        self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_cache_reuse(self):
+        compile_calls = {"count": 0}
+
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(_source, _kernel_name, options=None):
+                compile_calls["count"] += 1
+                return FakeKernel()
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        args = (
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        self.assertTrue(kernel(*args))
+        self.assertTrue(kernel(*args))
+        self.assertEqual(compile_calls["count"], 1)
+
+    def test_cupy_density_shear_tomo_vectorized_kernel_float64_rotation_branch(self):
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+
+            @staticmethod
+            def RawKernel(_source, _kernel_name, options=None):
+                return FakeKernel()
+
+        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
+        ok = kernel(
+            np.zeros((1, 1), dtype=np.float64),
+            np.zeros((1, 1, 2), dtype=np.float64),
+            np.zeros((1, 1), dtype=np.float64),
+            np.zeros((1, 1), dtype=np.float64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex128),
+            np.array([0, 1], dtype=np.int64),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float64),
+        )
+        self.assertTrue(ok)
 
     def test_cupy_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
         class FakeModule:

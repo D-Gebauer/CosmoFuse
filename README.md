@@ -33,6 +33,8 @@ where $g_1$ and $g_2$ are the complex shear values rotated relative to the 2 pos
 - Calculate pairs for given mask & resolution once
 - Save/Load pairs using hdf5 files
 - Reuse pairs to measure i3PCF across maps
+- Optimized scalar backend kernels for Spin-0×Spin-0 (`w(θ)`) and Spin-0×Spin-2 (`γ_t`) workloads
+- Fused-reduction tomography kernels for scalar correlation paths on CPU and GPU
 
 ## Installation
 Install using:
@@ -78,14 +80,37 @@ These can be saved & loaded using:
 
 To measure patch-level 2PCFs directly for one map pair:
     
-    M_ap = correlation.get_M_a(g1, g2, w)
-    xip, xim = correlation.xipm(g11, g21, g12, g22, w1, w2)
+    M_ap = correlation.get_aperture_shear(g1, g2, w)
+    xip, xim = correlation.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+
+For direct scalar/spin-mixed 2PCFs:
+
+    wtheta, = correlation.compute_density_density(delta1, delta2, w1, w2)
+    gamma_t, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_lens, w_source)
+
+For scalar (spin-0) fields (e.g. galaxy density or convergence), use:
+
+    M_delta = correlation.get_aperture_density(delta_map, w)
 
 Or directly for all tomographic bin combinations:
 
     # shear_maps shape: [nzbins, 2, npix]
     # w shape:          [nzbins, npix]
     M_ap, xip, xim = correlation.get_full_tomo(shear_maps, w)
+
+For a direct 3x2pt tomographic bundle (with map-type dependent `None` outputs):
+
+    # shear_maps:   [nzbins_s, 2, npix] or None
+    # density_maps: [nzbins_d, npix] or None
+    # weights can be:
+    #   - None
+    #   - {"shear": shear_weights, "density": density_weights}
+    #   - (shear_weights, density_weights)
+    M_ap, N_ap, xipm, wtheta, gammat = correlation.get_3x2pt_tomo(
+        shear_maps=shear_maps,
+        density_maps=density_maps,
+        weights={"shear": shear_w, "density": density_w},
+    )
 
 These (in the tomographic case) can be converted to $\zeta_+$ & $\zeta_-$:
 

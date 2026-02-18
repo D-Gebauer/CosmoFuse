@@ -11,7 +11,7 @@ from scipy.special import binom
 from tqdm import trange
 
 from .backend import get_backend
-from .correlation_helpers import Q_T, M_a_patch
+from .correlation_helpers import Q_T
 from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ _ROTATION_COMPLEX_PRECISION = {
 }
 
 
-def _compute_M_a_all_patches(
+def _compute_aperture_shear_all_patches(
     Q_inds: np.ndarray,
     Q_cos: np.ndarray,
     Q_sin: np.ndarray,
@@ -42,7 +42,7 @@ def _compute_M_a_all_patches(
     Q_patch_area: np.ndarray,
 ) -> np.ndarray:
     n_patches = Q_offsets.size - 1
-    M_a = np.zeros(n_patches, dtype=g1.dtype)
+    aperture_shear = np.zeros(n_patches, dtype=g1.dtype)
     for patch_idx in range(n_patches):
         start = Q_offsets[patch_idx]
         end = Q_offsets[patch_idx + 1]
@@ -54,8 +54,8 @@ def _compute_M_a_all_patches(
             weight = Q_w[idx]
             sum_w += weight
             sum_gtw += weight * gt * Q_val[i]
-        M_a[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
-    return M_a
+        aperture_shear[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
+    return aperture_shear
 
 
 def _compute_pairs_impl(
@@ -332,8 +332,9 @@ class Correlation:
         self.theta_center = theta_center
         self.n_patches = len(phi_center)
         self.fastmath = fastmath
-        self.M_A_patch = njit(fastmath=fastmath)(M_a_patch)
-        self.M_A_all_patches = njit(fastmath=fastmath)(_compute_M_a_all_patches)
+        self.aperture_shear_all_patches = njit(fastmath=fastmath)(
+            _compute_aperture_shear_all_patches
+        )
         self.radius_filter = 5 * self.theta_Q
 
         if mask is not None:
@@ -384,8 +385,10 @@ class Correlation:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
         self.backend = get_backend(self.device)
-        if "M_A_all_patches" not in self.__dict__:
-            self.M_A_all_patches = njit(fastmath=self.fastmath)(_compute_M_a_all_patches)
+        if "aperture_shear_all_patches" not in self.__dict__:
+            self.aperture_shear_all_patches = njit(fastmath=self.fastmath)(
+                _compute_aperture_shear_all_patches
+            )
         if "_prepare_version" not in self.__dict__:
             self._prepare_version = 0
         if "_tomo_sumofweights_cache" not in self.__dict__:
@@ -774,10 +777,12 @@ class Correlation:
             self._prepare_aperture_flat()
         self.prepare()
 
-    def get_M_a(self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray) -> np.ndarray:
+    def get_aperture_shear(
+        self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray
+    ) -> np.ndarray:
         if self.Q_inds_flat is None:
             self._prepare_aperture_flat()
-        return self.M_A_all_patches(
+        return self.aperture_shear_all_patches(
             self.Q_inds_flat,
             self.Q_cos_flat,
             self.Q_sin_flat,
@@ -788,6 +793,54 @@ class Correlation:
             w,
             self.Q_patch_area_flat,
         )
+
+    def get_aperture_density(
+        self, map_values: np.ndarray, w: np.ndarray
+    ) -> np.ndarray:
+        if self.Q_inds_flat is None:
+            self._prepare_aperture_flat()
+
+        map_values_np = np.asarray(map_values, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        kernel = getattr(self.backend, "aperture_density_kernel", None)
+        if kernel is None:
+            raise RuntimeError(
+                "Backend does not provide an aperture-density kernel; use a supported backend."
+            )
+
+        if self.backend.name == "numpy":
+            aperture_density = np.zeros(self.n_patches, dtype=self.map_dtype)
+            kernel(
+                self.Q_inds_flat,
+                self.Q_val_flat,
+                self.Q_offsets,
+                map_values_np,
+                w_np,
+                self.Q_patch_area_flat,
+                aperture_density,
+            )
+            return aperture_density
+
+        module = self.backend.module
+        backend_dtype = getattr(module, self.map_dtype.name)
+
+        Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
+        Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
+        Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
+        Q_patch_area_dev = self.backend.to_device(
+            self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
+        ).astype(backend_dtype, copy=False)
+        map_values_dev = self.backend.to_device(map_values_np).astype(backend_dtype, copy=False)
+        w_dev = self.backend.to_device(w_np).astype(backend_dtype, copy=False)
+
+        weighted_num = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
+        weighted_den = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
+        kernel(Q_inds_dev, Q_val_dev, map_values_dev, w_dev, weighted_num, weighted_den)
+
+        weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
+        weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
+        aperture_density = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        return self.backend.to_numpy(aperture_density)
 
     def prepare(self, release_host_pairs: bool = False) -> None:
         """Prepares pair arrays for correlation calculations on the backend device.
@@ -858,7 +911,7 @@ class Correlation:
             self.pair_exp2phi = None
             self.bins = None
 
-    def xipm(
+    def compute_shear_shear(
         self,
         g11: np.ndarray,
         g21: np.ndarray,
@@ -888,6 +941,161 @@ class Correlation:
             sumofweights_ab=sumofweights,
             sumofweights_ba=sumofweights,
         )
+
+    def compute_density_density(
+        self,
+        density1: np.ndarray,
+        density2: np.ndarray,
+        w1: np.ndarray,
+        w2: np.ndarray,
+        sumofweights: Optional[Union[np.ndarray, float]] = None,
+    ) -> Tuple[np.ndarray]:
+        """Compute scalar density-density 2PCF (w(theta)) for one map pair."""
+        if self.inds_dev is None:
+            self.prepare()
+
+        density1_dev = self.backend.to_device(density1).astype(self.map_dtype, copy=False)
+        density2_dev = self.backend.to_device(density2).astype(self.map_dtype, copy=False)
+        w1_dev = self.backend.to_device(w1).astype(self.map_dtype, copy=False)
+        w2_dev = self.backend.to_device(w2).astype(self.map_dtype, copy=False)
+
+        if sumofweights is None:
+            sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
+            sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
+        else:
+            sum_ab = self._normalize_xipm_sumofweights(sumofweights)
+            sum_ba = sum_ab
+
+        density_density_kernel = getattr(self.backend, "kernel_density_density", None)
+        if density_density_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide a density-density kernel; use a supported backend."
+            )
+
+        if self.backend.name == "numpy":
+            nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
+            out_ab = self.backend.zeros(nbins_total, dtype=self.map_dtype)
+            offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
+            density_density_kernel(
+                density1_dev,
+                density2_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                offsets,
+                out_ab,
+            )
+            w_ab_num = out_ab
+
+            out_ba = self.backend.zeros(nbins_total, dtype=self.map_dtype)
+            density_density_kernel(
+                density1_dev,
+                density2_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[1],
+                self.inds_dev[0],
+                offsets,
+                out_ba,
+            )
+            w_ba_num = out_ba
+        else:
+            out_ab = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
+            density_density_kernel(
+                density1_dev,
+                density2_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                out_ab,
+            )
+            w_ab_num = self._reduce_pairs(out_ab)
+
+            out_ba = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
+            density_density_kernel(
+                density1_dev,
+                density2_dev,
+                w1_dev,
+                w2_dev,
+                self.inds_dev[1],
+                self.inds_dev[0],
+                out_ba,
+            )
+            w_ba_num = self._reduce_pairs(out_ba)
+
+        w_ab = self._normalize_scalar_pairs(w_ab_num, sum_ab)
+        w_ba = self._normalize_scalar_pairs(w_ba_num, sum_ba)
+        w_theta = 0.5 * (w_ab + w_ba)
+        return (np.real(self.backend.to_numpy(w_theta)),)
+
+    def compute_density_shear(
+        self,
+        density_lens: np.ndarray,
+        g1_source: np.ndarray,
+        g2_source: np.ndarray,
+        w_lens: np.ndarray,
+        w_source: np.ndarray,
+        sumofweights: Optional[Union[np.ndarray, float]] = None,
+    ) -> Tuple[np.ndarray]:
+        """Compute scalar-shear 2PCF (gamma_t) for one lens/source map pair."""
+        if self.inds_dev is None:
+            self.prepare()
+
+        density_lens_dev = self.backend.to_device(density_lens).astype(
+            self.map_dtype, copy=False
+        )
+        g1_source_dev = self.backend.to_device(g1_source).astype(self.map_dtype, copy=False)
+        g2_source_dev = self.backend.to_device(g2_source).astype(self.map_dtype, copy=False)
+        w_lens_dev = self.backend.to_device(w_lens).astype(self.map_dtype, copy=False)
+        w_source_dev = self.backend.to_device(w_source).astype(self.map_dtype, copy=False)
+
+        if sumofweights is None:
+            sumofweights_dev = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
+        else:
+            sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
+
+        density_shear_kernel = getattr(self.backend, "kernel_density_shear", None)
+        if density_shear_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide a density-shear kernel; use a supported backend."
+            )
+
+        if self.backend.name == "numpy":
+            nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
+            out_num = self.backend.zeros(nbins_total, dtype=self.map_dtype)
+            offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
+            density_shear_kernel(
+                density_lens_dev,
+                g1_source_dev,
+                g2_source_dev,
+                w_lens_dev,
+                w_source_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[1],
+                offsets,
+                out_num,
+            )
+            gamma_num = out_num
+        else:
+            out_num = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
+            density_shear_kernel(
+                density_lens_dev,
+                g1_source_dev,
+                g2_source_dev,
+                w_lens_dev,
+                w_source_dev,
+                self.inds_dev[0],
+                self.inds_dev[1],
+                self.exp2phi_dev[1],
+                out_num,
+            )
+            gamma_num = self._reduce_pairs(out_num)
+
+        gamma_t = self._normalize_scalar_pairs(gamma_num, sumofweights_dev)
+        return (np.real(self.backend.to_numpy(gamma_t)),)
 
     def _xipm_auto(
         self,
@@ -1104,6 +1312,16 @@ class Correlation:
         xip = xip.reshape((self.n_patches, self.nbins))
         xim = xim.reshape((self.n_patches, self.nbins))
         return xip, xim
+
+    def _normalize_scalar_pairs(self, num: Any, sumofweights_dev: Any) -> Any:
+        val = self.backend.zeros(num.shape, dtype=num.dtype)
+        if np.ndim(self.backend.to_numpy(sumofweights_dev)) == 0:
+            if self.backend.to_numpy(sumofweights_dev) != 0:
+                val = num / sumofweights_dev
+        else:
+            nonzero = sumofweights_dev != 0
+            val[nonzero] = num[nonzero] / sumofweights_dev[nonzero]
+        return val.reshape((self.n_patches, self.nbins))
 
     def _fingerprint_weights(
         self, w_np: np.ndarray
@@ -1420,6 +1638,161 @@ class Correlation:
 
         return xip, xim
 
+    def vectorized_shear_shear(
+        self,
+        shear_maps: np.ndarray,
+        w: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        _, xip, xim = self.get_full_tomo(
+            shear_maps,
+            w,
+            sumofweights=sumofweights,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
+        )
+        return xip, xim
+
+    def vectorized_density_density(
+        self,
+        density_maps: np.ndarray,
+        w: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        nzbins = density_np.shape[0]
+        n_comb = int(binom(nzbins + 1, 2))
+        out = np.zeros((n_comb, self.n_patches, self.nbins), dtype=self.map_dtype)
+        k = 0
+        for i in range(nzbins):
+            for j in range(i, nzbins):
+                pair_sum = None if sumofweights is None else sumofweights[k]
+                (wtheta_ij,) = self.compute_density_density(
+                    density_np[i],
+                    density_np[j],
+                    w_np[i],
+                    w_np[j],
+                    sumofweights=pair_sum,
+                )
+                out[k] = wtheta_ij
+                k += 1
+        return np.real(out)
+
+    def vectorized_density_shear(
+        self,
+        density_maps: np.ndarray,
+        shear_maps: np.ndarray,
+        density_weights: np.ndarray,
+        shear_weights: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        wd_np = np.asarray(density_weights, dtype=self.map_dtype)
+        ws_np = np.asarray(shear_weights, dtype=self.map_dtype)
+        n_comb = int(density_np.shape[0] * shear_np.shape[0])
+        out = np.zeros((n_comb, self.n_patches, self.nbins), dtype=self.map_dtype)
+        k = 0
+        for i in range(density_np.shape[0]):
+            for j in range(shear_np.shape[0]):
+                pair_sum = None if sumofweights is None else sumofweights[k]
+                (gammat_ij,) = self.compute_density_shear(
+                    density_np[i],
+                    shear_np[j],
+                    wd_np[i],
+                    ws_np[j],
+                    sumofweights=pair_sum,
+                )
+                out[k] = gammat_ij
+                k += 1
+        return np.real(out)
+
+    def get_3x2pt_tomo(
+        self,
+        shear_maps: Optional[np.ndarray] = None,
+        density_maps: Optional[np.ndarray] = None,
+        weights: Optional[Any] = None,
+    ) -> Tuple[
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+    ]:
+        if shear_maps is None and density_maps is None:
+            raise ValueError("At least one of shear_maps or density_maps must be provided.")
+
+        shear_np = None if shear_maps is None else np.asarray(shear_maps, dtype=self.map_dtype)
+        density_np = None if density_maps is None else np.asarray(density_maps, dtype=self.map_dtype)
+
+        shear_w = None
+        density_w = None
+        if weights is None:
+            if shear_np is not None:
+                shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
+            if density_np is not None:
+                density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
+        elif isinstance(weights, dict):
+            shear_w = weights.get("shear")
+            density_w = weights.get("density")
+        elif isinstance(weights, (tuple, list)) and len(weights) == 2:
+            shear_w, density_w = weights
+        else:
+            if shear_np is not None and density_np is None:
+                shear_w = weights
+            elif density_np is not None and shear_np is None:
+                density_w = weights
+            elif shear_np is not None and density_np is not None:
+                weight_arr = np.asarray(weights)
+                if (
+                    weight_arr.ndim == 2
+                    and weight_arr.shape[0] == shear_np.shape[0]
+                    and weight_arr.shape[0] == density_np.shape[0]
+                ):
+                    shear_w = weight_arr
+                    density_w = weight_arr
+                else:
+                    raise ValueError(
+                        "When both shear_maps and density_maps are provided, weights must be a dict or (shear_weights, density_weights)."
+                    )
+
+        if shear_np is not None:
+            if shear_w is None:
+                shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
+            shear_w = np.asarray(shear_w, dtype=self.map_dtype)
+            M_ap, xip, _xim = self.get_full_tomo(shear_np, shear_w)
+            xipm = xip
+        else:
+            M_ap = None
+            xipm = None
+
+        if density_np is not None:
+            if density_w is None:
+                density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
+            density_w = np.asarray(density_w, dtype=self.map_dtype)
+            N_ap = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
+            for i in range(density_np.shape[0]):
+                N_ap[i] = self.get_aperture_density(density_np[i], density_w[i])
+            wtheta = self.vectorized_density_density(density_np, density_w)
+        else:
+            N_ap = None
+            wtheta = None
+
+        if density_np is not None and shear_np is not None:
+            gammat = self.vectorized_density_shear(
+                density_np,
+                shear_np,
+                density_w,
+                shear_w,
+            )
+        else:
+            gammat = None
+
+        return M_ap, N_ap, xipm, wtheta, gammat
+
     def get_full_tomo(
         self,
         shear_maps: np.ndarray,
@@ -1487,7 +1860,7 @@ class Correlation:
 
         M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
         for i in range(nzbins):
-            M_ap[i] = self.get_M_a(
+            M_ap[i] = self.get_aperture_shear(
                 g1_fac * shear_maps_np[i, 0],
                 g2_fac * shear_maps_np[i, 1],
                 w_np[i],

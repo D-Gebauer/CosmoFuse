@@ -11,29 +11,17 @@ sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 from CosmoFuse.correlation_helpers import (
     Q_T,
-    M_a_patch,
     zeta,
 )
+import CosmoFuse.correlation_helpers as correlation_helpers
 
 
 class TestCorrelationHelpers(unittest.TestCase):
     """Test correlation helper functions."""
 
-    def test_M_a_patch(self):
-        """Test M_a_patch function."""
-        # Create test data
-        Q_inds = np.array([0, 1, 2])
-        Q_cos = np.array([1.0, 0.5, 0.0])
-        Q_sin = np.array([0.0, 0.5, 1.0])
-        Q_val = np.array([0.1, 0.2, 0.3])
-        g1 = np.array([0.01, 0.02, 0.03, 0.04])
-        g2 = np.array([0.005, 0.015, 0.025, 0.035])
-        Q_w = np.array([1.0, 1.0, 1.0, 1.0])
-        Q_patch_area = 1.0
-
-        result = M_a_patch(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, Q_w, Q_patch_area)
-
-        self.assertIsInstance(result, float)
+    def test_M_a_patch_removed(self):
+        """Deprecated helper M_a_patch is intentionally removed."""
+        self.assertFalse(hasattr(correlation_helpers, "M_a_patch"))
 
     def test_Q_T(self):
         """Test Q_T function."""

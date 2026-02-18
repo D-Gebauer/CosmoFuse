@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0]
+
+### Changed
+- Consolidated all `3.3.x` changes into a major release reflecting API and behavior updates since `3.3.0`.
+- Pair finding and CPU/GPU correlation execution paths are now fully fused in hot loops to reduce temporary allocations and improve throughput.
+- Tomographic correlation execution now uses fused vectorized kernels and cached combination buffers, with streamlined sum-of-weights handling and reuse.
+- Public 2PCF API now uses explicit physics naming:
+  - `compute_shear_shear` (replacing `xipm`)
+  - `compute_density_density`
+  - `compute_density_shear`
+- Aperture API now uses explicit field type names:
+  - `get_aperture_shear` (replacing `get_M_a`)
+  - `get_aperture_density`
+
+### Added
+- Optimized scalar backend kernels for Spin-0 × Spin-0 and Spin-0 × Spin-2 pair correlations, with CPU and CuPy implementations.
+- Fused scalar tomographic kernels for density-density and density-shear on CPU/GPU backends.
+- New 3x2pt tomography convenience API:
+  - `get_3x2pt_tomo(shear_maps=None, density_maps=None, weights=None)`
+  - Returns `(M_ap, N_ap, xipm, wtheta, gammat)` with map-type-dependent `None` values.
+- New public vectorized helpers:
+  - `vectorized_shear_shear`
+  - `vectorized_density_density`
+  - `vectorized_density_shear`
+- `prepare(release_host_pairs=True)` host-memory release option for large runs.
+
+### Removed
+- Deprecated/public legacy interfaces removed:
+  - `xipm`
+  - `get_M_a`
+  - `get_full_tomo(low_mem=...)` fallback mode
+  - older wrapper classes and obsolete helper utilities removed across `3.3.x`
+
+### Tests & Docs
+- End-to-end test coverage now includes shear-shear (GG), density-density (GC), and density-shear (GGL) parity checks against TreeCorr.
+- README and tests were updated throughout for explicit method naming and 3x2pt usage.
+
+## [3.3.7]
+
+### Added
+- Added `Correlation.get_3x2pt_tomo(shear_maps=None, density_maps=None, weights=None)` returning a flat tuple:
+  - `(M_ap, N_ap, xipm, wtheta, gammat)`
+  - Outputs tied to absent map types are returned as `None`.
+- Added `vectorized_shear_shear`, `vectorized_density_density`, and `vectorized_density_shear` public helper methods for tomographic bundle computation.
+
+### Changed
+- `get_3x2pt_tomo` now accepts flexible weight inputs (`None`, dict, tuple/list, or single shared 2D array when bin counts match) and normalizes to explicit shear/density weight arrays.
+- Updated tests and README with direct 3x2pt tomography usage and branch coverage.
+
+## [3.3.6]
+
+### Changed
+- **Breaking change**: renamed `Correlation.xipm` to `Correlation.compute_shear_shear` and removed the old `xipm` alias.
+- Updated tests and README examples to use physics-explicit 2PCF naming.
+
+### Added
+- Added direct 2PCF methods in `Correlation`:
+  - `compute_density_density` (Spin-0 × Spin-0)
+  - `compute_density_shear` (Spin-0 × Spin-2)
+- `compute_density_density` now calls the optimized scalar backend kernel path without passing rotation arrays.
+- `compute_density_shear` now passes only source-side rotation (`exp2phi_dev[1]`) to optimized backend kernels.
+
+## [3.3.5]
+
+### Added
+- Added highly optimized scalar correlation kernels in `backend.py` for:
+  - Spin-0 × Spin-0 (`kernel_density_density`) using pure float accumulation and no rotation-array loads.
+  - Spin-0 × Spin-2 (`kernel_density_shear`) loading only source-side rotations (`exp_j`) for direct tangential projection.
+- Added fused-reduction tomography kernels for both scalar paths on CPU and GPU:
+  - `kernel_density_density_tomo_vectorized`
+  - `kernel_density_shear_tomo_vectorized`
+
+### Changed
+- Extended backend wiring so CPU/CuPy backends expose scalar pair and tomographic kernels through the unified `Backend` interface.
+- Updated tests and README to cover/document the new scalar kernel paths.
+
+## [3.3.4]
+
+### Changed
+- **Breaking change**: renamed `Correlation.get_M_a` to `Correlation.get_aperture_shear`.
+- Added `Correlation.get_aperture_density` for scalar (spin-0) fields (e.g. galaxy density / convergence).
+- Added dedicated backend aperture-density kernels for CPU (Numba) and GPU (CuPy) that compute weighted scalar apertures from `Q_val`, map values, and weights.
+
+### Removed
+- Removed deprecated `M_a_patch` helper from `correlation_helpers.py`.
+- Removed backward compatibility alias for `get_M_a`.
+
 ## [3.3.3]
 
 ### Changed

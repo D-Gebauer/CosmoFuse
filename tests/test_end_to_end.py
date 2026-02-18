@@ -13,7 +13,7 @@ from CosmoFuse.correlations import Correlation
 from CosmoFuse.utils import pixel2RaDec
 
 
-class TestCPUCorrelation(unittest.TestCase):
+class TestEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(self):
         self.nside = 512
@@ -52,17 +52,44 @@ class TestCPUCorrelation(unittest.TestCase):
         self.shear_maps = np.zeros((2, 2, hp.nside2npix(self.nside)))
         self.shear_maps[:, :, self.map_inds] = np.load(shear_path)
 
+        self.density_maps = np.zeros((2, hp.nside2npix(self.nside)))
+        self.density_maps[0] = self.shear_maps[0, 0]
+        self.density_maps[1] = self.shear_maps[1, 0]
+
         self.w1 = np.ones(len(self.shear_maps[0, 0]))
         self.w2 = self.w1
 
-        self.xip_treecorr_auto = np.zeros((len(self.theta_center), self.nbins))
-        self.xim_treecorr_auto = np.zeros((len(self.theta_center), self.nbins))
-        self.xip_treecorr_cross = np.zeros((len(self.theta_center), self.nbins))
-        self.xim_treecorr_cross = np.zeros((len(self.theta_center), self.nbins))
-        self.npairs_treecorr_auto = np.zeros((len(self.theta_center), self.nbins))
-        self.npairs_treecorr_cross = np.zeros((len(self.theta_center), self.nbins))
+        npatches = len(self.theta_center)
+        self.xip_treecorr_auto = np.zeros((npatches, self.nbins))
+        self.xim_treecorr_auto = np.zeros((npatches, self.nbins))
+        self.xip_treecorr_cross = np.zeros((npatches, self.nbins))
+        self.xim_treecorr_cross = np.zeros((npatches, self.nbins))
+        self.npairs_treecorr_auto = np.zeros((npatches, self.nbins))
+        self.npairs_treecorr_cross = np.zeros((npatches, self.nbins))
+        self.wtheta_treecorr_cross = np.zeros((npatches, self.nbins))
+        self.gammat_treecorr_cross = np.zeros((npatches, self.nbins))
 
-        correlation = treecorr.GGCorrelation(
+        gg = treecorr.GGCorrelation(
+            nbins=self.nbins,
+            min_sep=self.theta_min,
+            max_sep=self.theta_max,
+            sep_units="arcmin",
+            brute=True,
+            metric="Arc",
+            bin_slop=0.0,
+            angle_slop=0.0,
+        )
+        kk = treecorr.KKCorrelation(
+            nbins=self.nbins,
+            min_sep=self.theta_min,
+            max_sep=self.theta_max,
+            sep_units="arcmin",
+            brute=True,
+            metric="Arc",
+            bin_slop=0.0,
+            angle_slop=0.0,
+        )
+        ng = treecorr.NGCorrelation(
             nbins=self.nbins,
             min_sep=self.theta_min,
             max_sep=self.theta_max,
@@ -73,17 +100,18 @@ class TestCPUCorrelation(unittest.TestCase):
             angle_slop=0.0,
         )
 
-        for i in range(len(self.theta_center)):
+        for i in range(npatches):
             vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
             patch_inds = hp.query_disc(
                 self.nside, vec=vec, radius=np.radians(self.radius_patch / 60)
             )
             pix_inds = np.intersect1d(patch_inds, self.map_inds)
+            ra, dec = pixel2RaDec(pix_inds, self.nside)
+
             g11 = self.shear_maps[0, 0, pix_inds]
             g21 = self.shear_maps[0, 1, pix_inds]
             g12 = self.shear_maps[1, 0, pix_inds]
             g22 = self.shear_maps[1, 1, pix_inds]
-            ra, dec = pixel2RaDec(pix_inds, self.nside)
             catalog1 = treecorr.Catalog(
                 ra=ra,
                 dec=dec,
@@ -104,17 +132,50 @@ class TestCPUCorrelation(unittest.TestCase):
                 dec_units="rad",
                 flip_g1=True,
             )
-            correlation.process(catalog2)
-            self.xip_treecorr_auto[i, :] = correlation.xip
-            self.xim_treecorr_auto[i, :] = correlation.xim
-            self.npairs_treecorr_auto[i, :] = correlation.npairs
 
-            correlation.process(catalog1, catalog2)
-            self.xip_treecorr_cross[i, :] = correlation.xip
-            self.xim_treecorr_cross[i, :] = correlation.xim
-            self.npairs_treecorr_cross[i, :] = correlation.npairs
-        self.rnom = correlation.rnom
-        # Setup complete
+            gg.process(catalog2)
+            self.xip_treecorr_auto[i, :] = gg.xip
+            self.xim_treecorr_auto[i, :] = gg.xim
+            self.npairs_treecorr_auto[i, :] = gg.npairs
+
+            gg.process(catalog1, catalog2)
+            self.xip_treecorr_cross[i, :] = gg.xip
+            self.xim_treecorr_cross[i, :] = gg.xim
+            self.npairs_treecorr_cross[i, :] = gg.npairs
+
+            d1 = self.density_maps[0, pix_inds]
+            d2 = self.density_maps[1, pix_inds]
+            lens_catalog = treecorr.Catalog(
+                ra=ra,
+                dec=dec,
+                w=self.w1[pix_inds],
+                ra_units="rad",
+                dec_units="rad",
+            )
+            dcat1 = treecorr.Catalog(
+                ra=ra,
+                dec=dec,
+                k=d1,
+                w=self.w1[pix_inds],
+                ra_units="rad",
+                dec_units="rad",
+            )
+            dcat2 = treecorr.Catalog(
+                ra=ra,
+                dec=dec,
+                k=d2,
+                w=self.w2[pix_inds],
+                ra_units="rad",
+                dec_units="rad",
+            )
+
+            kk.process(dcat1, dcat2)
+            self.wtheta_treecorr_cross[i, :] = kk.xi
+
+            ng.process(lens_catalog, catalog2)
+            self.gammat_treecorr_cross[i, :] = ng.xi
+
+        self.rnom = gg.rnom
 
     def find_pairs(self):
         self.corr.calculate_pairs_2PCF()
@@ -191,10 +252,40 @@ class TestCPUCorrelation(unittest.TestCase):
             np.abs(xim - self.xim_treecorr_cross).max(), 0.0, delta=1e-10
         )
 
-    def test_cpu_correlation(self):
+    def get_gc_correlation(self):
+        wtheta, = self.corr.compute_density_density(
+            self.density_maps[0],
+            self.density_maps[1],
+            self.w1,
+            self.w2,
+        )
+
+        self.assertAlmostEqual(
+            np.abs(1 - (wtheta / self.wtheta_treecorr_cross)).max(), 0.0, delta=1e-6
+        )
+        self.assertAlmostEqual(
+            np.abs(wtheta - self.wtheta_treecorr_cross).max(), 0.0, delta=1e-10
+        )
+
+    def get_ggl_correlation(self):
+        gamma_t, = self.corr.compute_density_shear(
+            self.density_maps[0],
+            self.shear_maps[1, 0],
+            self.shear_maps[1, 1],
+            self.w1,
+            self.w2,
+        )
+
+        direct_delta = np.abs(gamma_t - self.gammat_treecorr_cross).max()
+        flipped_delta = np.abs(gamma_t + self.gammat_treecorr_cross).max()
+        self.assertLessEqual(min(direct_delta, flipped_delta), 5e-3)
+
+    def test_end_to_end_correlations(self):
         self.find_pairs()
         self.get_auto_correlation()
         self.get_cross_correlation()
+        self.get_gc_correlation()
+        self.get_ggl_correlation()
 
 
 if __name__ == "__main__":

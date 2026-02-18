@@ -377,13 +377,13 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.corr.n_patches = 1
 
 
-    def test_get_M_a(self):
-        """Test the get_M_a method."""
+    def test_get_aperture_shear(self):
+        """Test the get_aperture_shear method."""
         g1 = np.random.rand(self.npix)
         g2 = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        M_a = self.corr.get_M_a(g1, g2, w)
+        M_a = self.corr.get_aperture_shear(g1, g2, w)
 
         self.assertEqual(M_a.shape, (1,))
         
@@ -397,6 +397,105 @@ class TestCorrelationCalculations(unittest.TestCase):
         expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
 
         self.assertAlmostEqual(M_a[0], expected_M_a)
+
+    def test_get_aperture_density(self):
+        """Test the get_aperture_density method for spin-0 fields."""
+        delta = np.random.rand(self.npix)
+        w = np.ones(self.npix)
+
+        aperture_density = self.corr.get_aperture_density(delta, w)
+
+        self.assertEqual(aperture_density.shape, (1,))
+
+        Q_inds = self.corr.Q_inds[0]
+        Q_val = self.corr.Q_val[0]
+        Q_patch_area = self.corr.Q_patch_area[0]
+        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
+            w[Q_inds]
+        )
+
+        self.assertAlmostEqual(aperture_density[0], expected)
+
+    def test_get_aperture_density_non_numpy_backend_path(self):
+        """Covers non-numpy backend execution path for scalar aperture."""
+        delta = np.random.rand(self.npix)
+        w = np.ones(self.npix)
+
+        class FakeBackend:
+            name = "cupy"
+            module = np
+            add = np.add
+
+            @staticmethod
+            def to_device(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def to_numpy(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def zeros(shape, dtype):
+                return np.zeros(shape, dtype=dtype)
+
+            @staticmethod
+            def aperture_density_kernel(Q_inds, Q_val, map_values, weights, out_num, out_den):
+                out_num[:] = weights[Q_inds] * map_values[Q_inds] * Q_val
+                out_den[:] = weights[Q_inds]
+
+        self.corr.backend = FakeBackend()
+
+        aperture_density = self.corr.get_aperture_density(delta, w)
+        Q_inds = self.corr.Q_inds[0]
+        Q_val = self.corr.Q_val[0]
+        Q_patch_area = self.corr.Q_patch_area[0]
+        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
+            w[Q_inds]
+        )
+        self.assertAlmostEqual(aperture_density[0], expected)
+
+    def test_get_aperture_density_missing_backend_kernel_raises(self):
+        """Missing scalar aperture kernel should raise a clear runtime error."""
+
+        class IncompleteBackend:
+            name = "numpy"
+
+        self.corr.backend = IncompleteBackend()
+        with self.assertRaisesRegex(RuntimeError, "aperture-density kernel"):
+            self.corr.get_aperture_density(np.random.rand(self.npix), np.ones(self.npix))
+
+    def test_get_aperture_density_numpy_backend_path(self):
+        """Explicitly cover numpy backend path for scalar aperture."""
+
+        class NumpyBackend:
+            name = "numpy"
+
+            @staticmethod
+            def aperture_density_kernel(
+                Q_inds,
+                Q_val,
+                Q_offsets,
+                map_values,
+                weights,
+                Q_patch_area,
+                out_aperture,
+            ):
+                for patch_idx in range(Q_offsets.shape[0] - 1):
+                    start = Q_offsets[patch_idx]
+                    stop = Q_offsets[patch_idx + 1]
+                    patch_inds = Q_inds[start:stop]
+                    patch_q = Q_val[start:stop]
+                    out_aperture[patch_idx] = (
+                        Q_patch_area[patch_idx]
+                        * np.sum(weights[patch_inds] * map_values[patch_inds] * patch_q)
+                        / np.sum(weights[patch_inds])
+                    )
+
+        self.corr.backend = NumpyBackend()
+        delta = np.random.rand(self.npix)
+        w = np.ones(self.npix)
+        result = self.corr.get_aperture_density(delta, w)
+        self.assertEqual(result.shape, (1,))
 
     def test_get_pairs_patch_M_a(self):
         """Test get_pairs_patch_M_a method."""
@@ -587,6 +686,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             spec.loader.exec_module(module)
             backend = module.get_backend("gpu")
             self.assertIsNotNone(backend.xipm_cross_corr_kernel)
+            self.assertIsNotNone(backend.aperture_density_kernel)
         finally:
             sys.modules.pop("cupy", None)
             sys.modules.pop(module_name, None)
@@ -685,7 +785,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         )
         state = corr.__getstate__()
         for key in [
-            "M_A_all_patches",
+            "aperture_shear_all_patches",
             "_prepare_version",
             "_tomo_sumofweights_cache",
             "_tomo_sumofweights_cache_w_fingerprint",
@@ -706,7 +806,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         restored = Correlation.__new__(Correlation)
         restored.__setstate__(state)
 
-        self.assertIsNotNone(restored.M_A_all_patches)
+        self.assertIsNotNone(restored.aperture_shear_all_patches)
         self.assertEqual(restored._prepare_version, 0)
         self.assertIsNone(restored._tomo_sumofweights_cache)
         self.assertIsNone(restored._xipm_sumofweights_cache)
@@ -883,6 +983,415 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         self.assertEqual(xip_dev.shape, (corr.n_patches, corr.nbins))
         self.assertEqual(xim_dev.shape, (corr.n_patches, corr.nbins))
+
+    def test_compute_shear_shear_public_api(self):
+        corr = self._make_small_cpu_corr()
+        self.assertFalse(hasattr(corr, "xipm"))
+
+        g11 = np.ones(12, dtype=np.float64)
+        g21 = np.ones(12, dtype=np.float64)
+        g12 = np.ones(12, dtype=np.float64)
+        g22 = np.ones(12, dtype=np.float64)
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2, sumofweights=1.0)
+        self.assertEqual(xip.shape, (corr.n_patches, corr.nbins))
+        self.assertEqual(xim.shape, (corr.n_patches, corr.nbins))
+
+    def test_compute_density_density(self):
+        corr = self._make_small_cpu_corr()
+        d1 = np.zeros(12, dtype=np.float64)
+        d2 = np.zeros(12, dtype=np.float64)
+        d1[:3] = np.array([1.0, 2.0, 3.0])
+        d2[:3] = np.array([4.0, 5.0, 6.0])
+        w1 = np.ones(12, dtype=np.float64)
+        w2 = np.ones(12, dtype=np.float64)
+
+        (wtheta,) = corr.compute_density_density(d1, d2, w1, w2, sumofweights=1.0)
+        expected_ab = d1[0] * d2[1] + d1[1] * d2[2]
+        expected_ba = d1[1] * d2[0] + d1[2] * d2[1]
+        expected = 0.5 * (expected_ab + expected_ba)
+        self.assertAlmostEqual(wtheta[0, 0], expected)
+
+    def test_compute_density_density_missing_kernel_raises(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.kernel_density_density = None
+        with self.assertRaisesRegex(RuntimeError, "density-density kernel"):
+            corr.compute_density_density(
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+            )
+
+    def test_compute_density_shear(self):
+        corr = self._make_small_cpu_corr()
+        d_lens = np.zeros(12, dtype=np.float64)
+        g1 = np.zeros(12, dtype=np.float64)
+        g2 = np.zeros(12, dtype=np.float64)
+        d_lens[:3] = np.array([1.0, 2.0, 3.0])
+        g1[:3] = np.array([0.1, 0.2, 0.3])
+        g2[:3] = np.array([0.4, 0.5, 0.6])
+        w_lens = np.ones(12, dtype=np.float64)
+        w_source = np.ones(12, dtype=np.float64)
+
+        (gamma_t,) = corr.compute_density_shear(
+            d_lens,
+            g1,
+            g2,
+            w_lens,
+            w_source,
+            sumofweights=1.0,
+        )
+        expected = -(d_lens[0] * g1[1] + d_lens[1] * g1[2])
+        self.assertAlmostEqual(gamma_t[0, 0], expected)
+
+    def test_compute_density_shear_missing_kernel_raises(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.kernel_density_shear = None
+        with self.assertRaisesRegex(RuntimeError, "density-shear kernel"):
+            corr.compute_density_shear(
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+            )
+
+    def test_compute_density_methods_prepare_on_demand(self):
+        corr = self._make_small_cpu_corr()
+        corr.inds_dev = None
+
+        with patch.object(corr, "prepare", wraps=corr.prepare) as spy_prepare:
+            corr.compute_density_density(
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                sumofweights=1.0,
+            )
+            spy_prepare.assert_called_once()
+
+        corr.inds_dev = None
+        with patch.object(corr, "prepare", wraps=corr.prepare) as spy_prepare:
+            corr.compute_density_shear(
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.zeros(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                np.ones(12, dtype=np.float64),
+                sumofweights=1.0,
+            )
+            spy_prepare.assert_called_once()
+
+    def test_normalize_scalar_pairs_array_sumofweights(self):
+        corr = self._make_small_cpu_corr()
+        num = np.array([2.0], dtype=np.float64)
+        sumofweights = np.array([4.0], dtype=np.float64)
+
+        normalized = corr._normalize_scalar_pairs(num, sumofweights)
+        self.assertEqual(normalized.shape, (corr.n_patches, corr.nbins))
+        self.assertAlmostEqual(normalized[0, 0], 0.5)
+
+    def test_vectorized_shear_shear_delegates_to_full_tomo(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        w = np.ones((2, 12), dtype=np.float64)
+        xip = np.full((3, corr.n_patches, corr.nbins), 1.5, dtype=np.float64)
+        xim = np.full((3, corr.n_patches, corr.nbins), 2.5, dtype=np.float64)
+
+        with patch.object(corr, "get_full_tomo", return_value=(np.zeros((2, 1)), xip, xim)) as spy:
+            out_xip, out_xim = corr.vectorized_shear_shear(
+                shear_maps,
+                w,
+                sumofweights=np.ones((2, 3, corr.n_patches * corr.nbins), dtype=np.float64),
+                flip_g1=True,
+                flip_g2=False,
+            )
+
+        spy.assert_called_once()
+        np.testing.assert_allclose(out_xip, xip)
+        np.testing.assert_allclose(out_xim, xim)
+
+    def test_vectorized_density_density_and_density_shear_with_and_without_sumofweights(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.arange(24, dtype=np.float64).reshape(2, 12)
+        shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        calls_dd = []
+        calls_ds = []
+
+        def fake_dd(_d1, _d2, _w1, _w2, sumofweights=None):
+            calls_dd.append(sumofweights)
+            return (np.full((corr.n_patches, corr.nbins), 7.0, dtype=np.float64),)
+
+        def fake_ds(_d, _s, _wd, _ws, sumofweights=None):
+            calls_ds.append(sumofweights)
+            return (np.full((corr.n_patches, corr.nbins), 9.0, dtype=np.float64),)
+
+        with patch.object(corr, "compute_density_density", side_effect=fake_dd), patch.object(
+            corr,
+            "compute_density_shear",
+            side_effect=fake_ds,
+        ):
+            out_dd_none = corr.vectorized_density_density(density_maps, density_w)
+            out_ds_none = corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+            )
+
+            dd_sum = np.arange(3, dtype=np.float64)
+            ds_sum = np.arange(4, dtype=np.float64)
+            out_dd_explicit = corr.vectorized_density_density(
+                density_maps,
+                density_w,
+                sumofweights=dd_sum,
+            )
+            out_ds_explicit = corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                sumofweights=ds_sum,
+            )
+
+        self.assertEqual(out_dd_none.shape, (3, corr.n_patches, corr.nbins))
+        self.assertEqual(out_ds_none.shape, (4, corr.n_patches, corr.nbins))
+        self.assertEqual(out_dd_explicit.shape, (3, corr.n_patches, corr.nbins))
+        self.assertEqual(out_ds_explicit.shape, (4, corr.n_patches, corr.nbins))
+        self.assertEqual(calls_dd[:3], [None, None, None])
+        self.assertEqual(calls_dd[3:], [dd_sum[0], dd_sum[1], dd_sum[2]])
+        self.assertEqual(calls_ds[:4], [None, None, None, None])
+        self.assertEqual(calls_ds[4:], [ds_sum[0], ds_sum[1], ds_sum[2], ds_sum[3]])
+
+    def test_get_3x2pt_tomo_raises_when_no_maps(self):
+        corr = self._make_small_cpu_corr()
+        with self.assertRaisesRegex(ValueError, "At least one of shear_maps or density_maps"):
+            corr.get_3x2pt_tomo()
+
+    def test_get_3x2pt_tomo_shear_only_and_density_only_weights_scalar_input(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+        density_maps = np.ones((1, 12), dtype=np.float64)
+        w = np.ones((1, 12), dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "get_full_tomo",
+            return_value=(
+                np.full((1, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ) as spy_full:
+            M_ap, N_ap, xipm, wtheta, gammat = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                weights=w,
+            )
+        self.assertIsNotNone(M_ap)
+        self.assertIsNotNone(xipm)
+        self.assertIsNone(N_ap)
+        self.assertIsNone(wtheta)
+        self.assertIsNone(gammat)
+        spy_full.assert_called_once()
+
+        with patch.object(corr, "get_aperture_density", return_value=np.array([3.0])) as spy_ap, patch.object(
+            corr,
+            "vectorized_density_density",
+            return_value=np.full((1, corr.n_patches, corr.nbins), 4.0, dtype=np.float64),
+        ) as spy_dd:
+            M_ap, N_ap, xipm, wtheta, gammat = corr.get_3x2pt_tomo(
+                density_maps=density_maps,
+                weights=w,
+            )
+        self.assertIsNone(M_ap)
+        self.assertIsNone(xipm)
+        self.assertIsNotNone(N_ap)
+        self.assertIsNotNone(wtheta)
+        self.assertIsNone(gammat)
+        spy_ap.assert_called_once()
+        spy_dd.assert_called_once()
+
+    def test_get_3x2pt_tomo_both_maps_weights_variants(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.full((2, 12), 2.0, dtype=np.float64)
+        density_w = np.full((2, 12), 3.0, dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "get_full_tomo",
+            return_value=(
+                np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ) as spy_full, patch.object(
+            corr,
+            "get_aperture_density",
+            return_value=np.array([5.0], dtype=np.float64),
+        ) as spy_ap, patch.object(
+            corr,
+            "vectorized_density_density",
+            return_value=np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+        ) as spy_dd, patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        ) as spy_ds:
+            out_dict = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights={"shear": shear_w, "density": density_w},
+            )
+            out_tuple = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights=(shear_w, density_w),
+            )
+            out_shared = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights=np.ones((2, 12), dtype=np.float64),
+            )
+
+        self.assertEqual(len(out_dict), 5)
+        self.assertEqual(len(out_tuple), 5)
+        self.assertEqual(len(out_shared), 5)
+        self.assertEqual(spy_full.call_count, 3)
+        self.assertEqual(spy_ap.call_count, 6)
+        self.assertEqual(spy_dd.call_count, 3)
+        self.assertEqual(spy_ds.call_count, 3)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"weights must be a dict or \(shear_weights, density_weights\)",
+        ):
+            corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights=np.ones((3, 12), dtype=np.float64),
+            )
+
+    def test_get_3x2pt_tomo_both_maps_with_default_weights_none(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+        density_maps = np.ones((1, 12), dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "get_full_tomo",
+            return_value=(
+                np.full((1, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ), patch.object(
+            corr,
+            "get_aperture_density",
+            return_value=np.array([5.0], dtype=np.float64),
+        ), patch.object(
+            corr,
+            "vectorized_density_density",
+            return_value=np.full((1, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+        ), patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        ):
+            outputs = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights=None,
+            )
+
+        self.assertEqual(len(outputs), 5)
+
+    def test_get_3x2pt_tomo_dict_missing_keys_falls_back_to_default_weights(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+        density_maps = np.ones((1, 12), dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "get_full_tomo",
+            return_value=(
+                np.full((1, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ), patch.object(
+            corr,
+            "get_aperture_density",
+            return_value=np.array([5.0], dtype=np.float64),
+        ), patch.object(
+            corr,
+            "vectorized_density_density",
+            return_value=np.full((1, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+        ), patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        ):
+            outputs = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights={},
+            )
+
+        self.assertEqual(len(outputs), 5)
+
+    def test_compute_density_methods_non_numpy_backend_path(self):
+        corr = self._make_small_cpu_corr()
+
+        class FakeBackend:
+            name = "cupy"
+            module = np
+            add = np.add
+
+            @staticmethod
+            def to_device(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def to_numpy(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def zeros(shape, dtype):
+                return np.zeros(shape, dtype=dtype)
+
+            @staticmethod
+            def kernel_density_density(d1, d2, w1, w2, ind_i, ind_j, out):
+                out[:] = w1[ind_i] * w2[ind_j] * d1[ind_i] * d2[ind_j]
+
+            @staticmethod
+            def kernel_density_shear(d_l, g1_s, g2_s, w_l, w_s, ind_i, ind_j, exp_j, out):
+                out[:] = (
+                    w_l[ind_i]
+                    * w_s[ind_j]
+                    * d_l[ind_i]
+                    * (-(g1_s[ind_j] * exp_j.real + g2_s[ind_j] * exp_j.imag))
+                )
+
+        corr.backend = FakeBackend()
+        d1 = np.ones(12, dtype=np.float64)
+        d2 = np.ones(12, dtype=np.float64)
+        g1 = np.ones(12, dtype=np.float64)
+        g2 = np.zeros(12, dtype=np.float64)
+        w = np.ones(12, dtype=np.float64)
+
+        (wtheta,) = corr.compute_density_density(d1, d2, w, w, sumofweights=1.0)
+        (gamma_t,) = corr.compute_density_shear(d1, g1, g2, w, w, sumofweights=1.0)
+
+        self.assertEqual(wtheta.shape, (corr.n_patches, corr.nbins))
+        self.assertEqual(gamma_t.shape, (corr.n_patches, corr.nbins))
 
     def test_xipm_cross_non_numpy_backend_path(self):
         corr = self._make_small_cpu_corr()
@@ -1264,7 +1773,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         w2 = w1
 
         with self.assertRaises(RuntimeError):
-            corr.xipm(g11, g21, g12, g22, w1, w2)
+            corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
     def test_rotation_precision_affects_kernel_dtype(self):
         """Rotation precision should drive complex kernel dtype choices."""
@@ -1295,7 +1804,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         w1 = np.ones(12, dtype=np.float64)
         w2 = np.ones(12, dtype=np.float64)
 
-        xip, xim = corr.xipm(g11, g21, g12, g22, w1, w2)
+        xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
         self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
         self.assertEqual(xip.dtype, np.float32)
@@ -1361,7 +1870,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             g22 = np.ones(12, dtype=np.float64)
             w1 = np.ones(12, dtype=np.float64)
             w2 = np.ones(12, dtype=np.float64)
-            xip, xim = low.xipm(g11, g21, g12, g22, w1, w2)
+            xip, xim = low.compute_shear_shear(g11, g21, g12, g22, w1, w2)
             self.assertEqual(xip.dtype, np.float32)
             self.assertEqual(xim.dtype, np.float32)
 
@@ -1407,8 +1916,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             w1_dev,
             w2_dev,
         )
-        xip_auto, xim_auto = self.corr.xipm(g11, g21, g12, g22, w1, w2)
-        xip_explicit, xim_explicit = self.corr.xipm(
+        xip_auto, xim_auto = self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+        xip_explicit, xim_explicit = self.corr.compute_shear_shear(
             g11, g21, g12, g22, w1, w2, sumofweights=sumofweights
         )
 
@@ -1439,8 +1948,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_xipm_sumofweights",
             wraps=self.corr._compute_xipm_sumofweights,
         ) as spy_compute:
-            self.corr.xipm(g11, g21, g12, g22, w1, w2)
-            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
             self.assertEqual(spy_compute.call_count, 1)
 
     def test_xipm_cross_uses_sumofweights_getter(self):
@@ -1457,7 +1966,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_get_xipm_sumofweights",
             wraps=self.corr._get_xipm_sumofweights,
         ) as spy_get:
-            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
         self.assertEqual(spy_get.call_count, 2)
 
@@ -1475,8 +1984,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_xipm_sumofweights",
             wraps=self.corr._compute_xipm_sumofweights,
         ) as spy_compute:
-            self.corr.xipm(g11, g21, g12, g22, w1, w2)
-            self.corr.xipm(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
         self.assertEqual(spy_compute.call_count, 2)
         self.assertIsInstance(self.corr._xipm_sumofweights_cache, dict)
@@ -1526,7 +2035,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_fingerprint_weights",
             side_effect=AssertionError("fingerprint should be skipped"),
         ):
-            xip, xim = self.corr.xipm(
+            xip, xim = self.corr.compute_shear_shear(
                 g11,
                 g21,
                 g12,
@@ -1615,7 +2124,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 w1 = np.ones(npix, dtype=np.float64)
                 w2 = np.ones(npix, dtype=np.float64)
 
-                xip, xim = corr.xipm(g11, g21, g12, g22, w1, w2)
+                xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
                 self.assertEqual(xip.shape, (self.n_patches, self.nbins))
                 self.assertEqual(xim.shape, (self.n_patches, self.nbins))

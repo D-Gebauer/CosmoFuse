@@ -55,13 +55,13 @@ class TestUnifiedCorrelation(unittest.TestCase):
         w1 = np.ones(npix, dtype=np.float64)
         w2 = np.ones(npix, dtype=np.float64)
 
-        xip_zero, xim_zero = corr.xipm(
+        xip_zero, xim_zero = corr.compute_shear_shear(
             g11, g21, g12, g22, w1, w2, sumofweights=0.0
         )
         self.assertTrue(np.all(xip_zero == 0))
         self.assertTrue(np.all(xim_zero == 0))
 
-        xip_one, xim_one = corr.xipm(
+        xip_one, xim_one = corr.compute_shear_shear(
             g11, g21, g12, g22, w1, w2, sumofweights=1.0
         )
         self.assertTrue(np.all(np.isfinite(xip_one)))
@@ -127,7 +127,7 @@ class TestUnifiedCorrelation(unittest.TestCase):
         w2 = np.ones(npix, dtype=np.float64)
 
         # xipm should trigger prepare() when inds_dev is None.
-        xip, xim = corr.xipm(g11, g21, g12, g22, w1, w2, sumofweights=1.0)
+        xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2, sumofweights=1.0)
         self.assertEqual(xip.shape, (1, self.nbins))
         self.assertEqual(xim.shape, (1, self.nbins))
 

@@ -4,37 +4,6 @@ from typing import Tuple
 import numpy as np
 
 
-def M_a_patch(
-    Q_inds: np.ndarray,
-    Q_cos: np.ndarray,
-    Q_sin: np.ndarray,
-    Q_val: np.ndarray,
-    g1: np.ndarray,
-    g2: np.ndarray,
-    Q_w: np.ndarray,
-    Q_patch_area: float,
-) -> float:
-    """Calculate aperture mass for a patch.
-
-    Args:
-        Q_inds: Indices of pixels in the filter
-        Q_cos: Cosine values for filter
-        Q_sin: Sine values for filter
-        Q_val: Filter values
-        g1: First component of shear
-        g2: Second component of shear
-        Q_w: Weights
-        Q_patch_area: Area of the patch
-
-    Returns:
-        Aperture mass value
-    """
-    gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
-    M_a_Re = Q_patch_area * np.sum(Q_w[Q_inds] * gt * Q_val) / np.sum(Q_w[Q_inds])
-
-    return M_a_Re
-
-
 def Q_T(theta: float, theta_Q: float = 90) -> float:
     """The compensated filter used for aperture mass.
 

@@ -12,6 +12,560 @@ _MAX_VECTOR_TOMO_BINS = 64
 
 
 @njit(fastmath=True, parallel=True)
+def _cpu_aperture_density_kernel(
+    Q_inds: np.ndarray,
+    Q_val: np.ndarray,
+    Q_offsets: np.ndarray,
+    map_values: np.ndarray,
+    weights: np.ndarray,
+    Q_patch_area: np.ndarray,
+    out_aperture: np.ndarray,
+) -> None:
+    n_patches = Q_offsets.shape[0] - 1
+    zero = map_values[0] * 0.0
+
+    for patch_idx in prange(n_patches):
+        start = Q_offsets[patch_idx]
+        stop = Q_offsets[patch_idx + 1]
+        sum_w = zero
+        sum_wdelta_q = zero
+        for i in range(start, stop):
+            pix_idx = Q_inds[i]
+            weight = weights[pix_idx]
+            sum_w += weight
+            sum_wdelta_q += weight * map_values[pix_idx] * Q_val[i]
+        out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wdelta_q / sum_w
+
+
+def _build_cupy_aperture_density_kernel(module: Any) -> Any:
+    return module.ElementwiseKernel(
+        "raw I Q_inds, raw T Q_val, raw T map_values, raw T weights",
+        "T out_num, T out_den",
+        """
+        const I idx = Q_inds[i];
+        const T w = weights[idx];
+        out_num = w * map_values[idx] * Q_val[i];
+        out_den = w;
+        """,
+        "gpu_aperture_density_kernel",
+        options=_CUPY_FASTMATH_OPTIONS,
+    )
+
+
+@njit(fastmath=True, parallel=True)
+def _cpu_density_density_corr_kernel(
+    density_a: np.ndarray,
+    density_b: np.ndarray,
+    w_a: np.ndarray,
+    w_b: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    offsets: np.ndarray,
+    out_w: np.ndarray,
+) -> None:
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        sum_w = 0.0
+        start = offsets[b]
+        stop = offsets[b + 1]
+
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
+            sum_w += w_a[i] * w_b[j] * density_a[i] * density_b[j]
+
+        out_w[b] = sum_w
+
+
+@njit(fastmath=True, parallel=True)
+def _cpu_density_shear_corr_kernel(
+    density_lens: np.ndarray,
+    g1_source: np.ndarray,
+    g2_source: np.ndarray,
+    w_lens: np.ndarray,
+    w_source: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    exp_j: np.ndarray,
+    offsets: np.ndarray,
+    out_gt: np.ndarray,
+) -> None:
+    nbins = offsets.shape[0] - 1
+    for b in prange(nbins):
+        sum_gt = 0.0
+        start = offsets[b]
+        stop = offsets[b + 1]
+
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
+            rot = exp_j[idx]
+            gamma_t = -(g1_source[j] * rot.real + g2_source[j] * rot.imag)
+            sum_gt += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
+
+        out_gt[b] = sum_gt
+
+
+@njit(fastmath=True, parallel=True)
+def _cpu_density_density_tomo_vectorized_kernel(
+    density_map: np.ndarray,
+    weights: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    offsets: np.ndarray,
+    comb_i: np.ndarray,
+    comb_j: np.ndarray,
+    out_num: np.ndarray,
+) -> None:
+    n_bins = offsets.shape[0] - 1
+    ncomb = comb_i.shape[0]
+    half = 0.5
+
+    for b in prange(n_bins):
+        start = offsets[b]
+        stop = offsets[b + 1]
+
+        for comb_idx in range(ncomb):
+            i = comb_i[comb_idx]
+            j = comb_j[comb_idx]
+            sum_w = 0.0
+
+            for idx in range(start, stop):
+                pix_i = int(ind_i[idx])
+                pix_j = int(ind_j[idx])
+
+                ab = (
+                    weights[pix_i, i]
+                    * weights[pix_j, j]
+                    * density_map[pix_i, i]
+                    * density_map[pix_j, j]
+                )
+
+                if i == j:
+                    sum_w += ab
+                else:
+                    ba = (
+                        weights[pix_i, j]
+                        * weights[pix_j, i]
+                        * density_map[pix_i, j]
+                        * density_map[pix_j, i]
+                    )
+                    sum_w += half * (ab + ba)
+
+            out_num[comb_idx, b] = sum_w
+
+
+@njit(fastmath=True, parallel=True)
+def _cpu_density_shear_tomo_vectorized_kernel(
+    density_map: np.ndarray,
+    shear_map: np.ndarray,
+    lens_weights: np.ndarray,
+    source_weights: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    rot_j: np.ndarray,
+    offsets: np.ndarray,
+    comb_i: np.ndarray,
+    comb_j: np.ndarray,
+    out_num: np.ndarray,
+) -> None:
+    n_bins = offsets.shape[0] - 1
+    ncomb = comb_i.shape[0]
+
+    for b in prange(n_bins):
+        start = offsets[b]
+        stop = offsets[b + 1]
+
+        for comb_idx in range(ncomb):
+            lens_bin = comb_i[comb_idx]
+            source_bin = comb_j[comb_idx]
+            sum_gt = 0.0
+
+            for idx in range(start, stop):
+                pix_i = int(ind_i[idx])
+                pix_j = int(ind_j[idx])
+                exp_b = rot_j[idx]
+                gamma_t = -(
+                    shear_map[pix_j, source_bin, 0] * exp_b.real
+                    + shear_map[pix_j, source_bin, 1] * exp_b.imag
+                )
+                sum_gt += (
+                    lens_weights[pix_i, lens_bin]
+                    * source_weights[pix_j, source_bin]
+                    * density_map[pix_i, lens_bin]
+                    * gamma_t
+                )
+
+            out_num[comb_idx, b] = sum_gt
+
+
+def _build_cupy_density_density_corr_kernel(module: Any) -> Any:
+    return module.ElementwiseKernel(
+        "raw T density_a, raw T density_b, raw T w_a, raw T w_b,"
+        " raw I ind_i, raw I ind_j",
+        "T out_w",
+        """
+        const I i_idx = ind_i[i];
+        const I j_idx = ind_j[i];
+        out_w = w_a[i_idx] * w_b[j_idx] * density_a[i_idx] * density_b[j_idx];
+        """,
+        "gpu_density_density_corr_kernel",
+        options=_CUPY_FASTMATH_OPTIONS,
+    )
+
+
+def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
+    return module.ElementwiseKernel(
+        "raw T density_lens, raw T g1_source, raw T g2_source,"
+        " raw T w_lens, raw T w_source, raw I ind_i, raw I ind_j, raw C exp_j",
+        "T out_gt",
+        """
+        const I i_idx = ind_i[i];
+        const I j_idx = ind_j[i];
+        const C rot = exp_j[i];
+        const T gamma_t = -(g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot));
+        out_gt = w_lens[i_idx] * w_source[j_idx] * density_lens[i_idx] * gamma_t;
+        """,
+        "gpu_density_shear_corr_kernel",
+        options=_CUPY_FASTMATH_OPTIONS,
+    )
+
+
+def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
+    kernel_cache: dict[tuple[str, int], Any] = {}
+
+    def _get_or_build_raw_kernel(map_c_type: str, nzbins: int) -> Optional[Any]:
+        key = (map_c_type, nzbins)
+        cached = kernel_cache.get(key)
+        if cached is not None:
+            return cached
+
+        kernel_name = f"gpu_fused_tomo_reduce_dd_{map_c_type}_{nzbins}"
+        source = f"""
+        #define TOMO_BINS {nzbins}
+        #define BLOCK_SIZE 256
+
+        extern "C" __global__
+        void {kernel_name}(
+            const {map_c_type}* density,
+            const {map_c_type}* weights,
+            const long long* ind_i,
+            const long long* ind_j,
+            const long long* bin_offsets,
+            const int* comb_i,
+            const int* comb_j,
+            {map_c_type}* out_num,
+            const int ncomb,
+            const long long nbins_total,
+            const long long npairs)
+        {{
+            const int lane = (int)threadIdx.x;
+            const int comb_ori = (int)blockIdx.y;
+            const long long bin_flat = (long long)blockIdx.x;
+            if (bin_flat >= nbins_total || comb_ori >= (2 * ncomb)) {{
+                return;
+            }}
+
+            const int comb_idx = comb_ori >> 1;
+            const int i = comb_i[comb_idx];
+            const int j = comb_j[comb_idx];
+            const bool use_ba = (comb_ori & 1) == 1;
+            if (use_ba && i == j) {{
+                return;
+            }}
+
+            const long long start = bin_offsets[bin_flat];
+            const long long stop = bin_offsets[bin_flat + 1];
+
+            {map_c_type} sum_val = ({map_c_type})0.0;
+
+            for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
+                const long long idx_a = ind_i[tid];
+                const long long idx_b = ind_j[tid];
+
+                int ai = i;
+                int bj = j;
+                if (use_ba && i != j) {{
+                    ai = j;
+                    bj = i;
+                }}
+
+                const long long base_a = idx_a * (long long)TOMO_BINS + ai;
+                const long long base_b = idx_b * (long long)TOMO_BINS + bj;
+
+                sum_val += (
+                    weights[base_a]
+                    * weights[base_b]
+                    * density[base_a]
+                    * density[base_b]
+                );
+            }}
+
+            __shared__ {map_c_type} s_sum[BLOCK_SIZE];
+            s_sum[lane] = sum_val;
+            __syncthreads();
+
+            for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {{
+                if (lane < stride) {{
+                    s_sum[lane] += s_sum[lane + stride];
+                }}
+                __syncthreads();
+            }}
+
+            if (lane == 0) {{
+                const long long out_idx =
+                    ((long long)comb_ori) * nbins_total + bin_flat;
+                out_num[out_idx] = s_sum[0];
+            }}
+        }}
+        """
+
+        try:
+            kernel = module.RawKernel(
+                source,
+                kernel_name,
+                options=_CUPY_FASTMATH_OPTIONS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vectorized density-density RawKernel compilation failed for %d bins; using legacy path: %s",
+                nzbins,
+                exc,
+            )
+            return None
+
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_density_density_tomo_vectorized_kernel(
+        density_map: Any,
+        weights: Any,
+        ind_i: Any,
+        ind_j: Any,
+        bin_offsets: Any,
+        comb_i: Any,
+        comb_j: Any,
+        out_num: Any,
+    ) -> bool:
+        nzbins = int(density_map.shape[1])
+        if nzbins > _MAX_VECTOR_TOMO_BINS:
+            return False
+        if getattr(module, "RawKernel", None) is None:
+            return False
+
+        map_c_type = "float" if weights.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins)
+        if raw_kernel is None:
+            return False
+
+        npairs = int(ind_i.shape[0])
+        nbins_total = int(bin_offsets.shape[0] - 1)
+        ncomb = int(comb_i.shape[0])
+        threads = 256
+        blocks = (max(1, nbins_total), max(1, 2 * ncomb), 1)
+        raw_kernel(
+            blocks,
+            (threads,),
+            (
+                density_map,
+                weights,
+                ind_i,
+                ind_j,
+                bin_offsets,
+                comb_i,
+                comb_j,
+                out_num,
+                np.int32(ncomb),
+                np.int64(nbins_total),
+                np.int64(npairs),
+            ),
+        )
+        return True
+
+    return _cupy_density_density_tomo_vectorized_kernel
+
+
+def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
+    kernel_cache: dict[tuple[str, str, int], Any] = {}
+
+    def _get_or_build_raw_kernel(
+        map_c_type: str,
+        complex_c_type: str,
+        complex_real_type: str,
+        suffix: str,
+        nzbins: int,
+    ) -> Optional[Any]:
+        key = (map_c_type, suffix, nzbins)
+        cached = kernel_cache.get(key)
+        if cached is not None:
+            return cached
+
+        kernel_name = f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_{nzbins}"
+        source = f"""
+        #include <cuComplex.h>
+        #define TOMO_BINS {nzbins}
+        #define BLOCK_SIZE 256
+
+        extern "C" __global__
+        void {kernel_name}(
+            const {map_c_type}* density,
+            const {map_c_type}* shear,
+            const {map_c_type}* lens_weights,
+            const {map_c_type}* source_weights,
+            const long long* ind_i,
+            const long long* ind_j,
+            const {complex_c_type}* rot_j,
+            const long long* bin_offsets,
+            const int* comb_i,
+            const int* comb_j,
+            {map_c_type}* out_num,
+            const int ncomb,
+            const long long nbins_total,
+            const long long npairs)
+        {{
+            const int lane = (int)threadIdx.x;
+            const int comb_idx = (int)blockIdx.y;
+            const long long bin_flat = (long long)blockIdx.x;
+            if (bin_flat >= nbins_total || comb_idx >= ncomb) {{
+                return;
+            }}
+
+            const int lens_bin = comb_i[comb_idx];
+            const int source_bin = comb_j[comb_idx];
+
+            const long long start = bin_offsets[bin_flat];
+            const long long stop = bin_offsets[bin_flat + 1];
+
+            {map_c_type} sum_val = ({map_c_type})0.0;
+
+            for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
+                const long long idx_a = ind_i[tid];
+                const long long idx_b = ind_j[tid];
+                const {complex_c_type} rot = rot_j[tid];
+
+                const long long lens_idx = idx_a * (long long)TOMO_BINS + lens_bin;
+                const long long source_idx = idx_b * (long long)TOMO_BINS + source_bin;
+                const long long shear_base = source_idx * 2;
+
+                const {complex_real_type} gamma_t = -(
+                    ({complex_real_type})shear[shear_base] * rot.x
+                    + ({complex_real_type})shear[shear_base + 1] * rot.y
+                );
+
+                sum_val += (
+                    lens_weights[lens_idx]
+                    * source_weights[source_idx]
+                    * density[lens_idx]
+                    * ({map_c_type})gamma_t
+                );
+            }}
+
+            __shared__ {map_c_type} s_sum[BLOCK_SIZE];
+            s_sum[lane] = sum_val;
+            __syncthreads();
+
+            for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {{
+                if (lane < stride) {{
+                    s_sum[lane] += s_sum[lane + stride];
+                }}
+                __syncthreads();
+            }}
+
+            if (lane == 0) {{
+                const long long out_idx =
+                    ((long long)comb_idx) * nbins_total + bin_flat;
+                out_num[out_idx] = s_sum[0];
+            }}
+        }}
+        """
+
+        try:
+            kernel = module.RawKernel(
+                source,
+                kernel_name,
+                options=_CUPY_FASTMATH_OPTIONS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vectorized density-shear RawKernel compilation failed for %d bins; using legacy path: %s",
+                nzbins,
+                exc,
+            )
+            return None
+
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_density_shear_tomo_vectorized_kernel(
+        density_map: Any,
+        shear_map: Any,
+        lens_weights: Any,
+        source_weights: Any,
+        ind_i: Any,
+        ind_j: Any,
+        rot_j: Any,
+        bin_offsets: Any,
+        comb_i: Any,
+        comb_j: Any,
+        out_num: Any,
+    ) -> bool:
+        nzbins = int(density_map.shape[1])
+        if nzbins > _MAX_VECTOR_TOMO_BINS:
+            return False
+        if getattr(module, "RawKernel", None) is None:
+            return False
+
+        if rot_j.dtype == module.complex64:
+            complex_c_type = "cuFloatComplex"
+            complex_real_type = "float"
+            suffix = "c64"
+        else:
+            complex_c_type = "cuDoubleComplex"
+            complex_real_type = "double"
+            suffix = "c128"
+
+        map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(
+            map_c_type,
+            complex_c_type,
+            complex_real_type,
+            suffix,
+            nzbins,
+        )
+        if raw_kernel is None:
+            return False
+
+        npairs = int(ind_i.shape[0])
+        nbins_total = int(bin_offsets.shape[0] - 1)
+        ncomb = int(comb_i.shape[0])
+        threads = 256
+        blocks = (max(1, nbins_total), max(1, ncomb), 1)
+        raw_kernel(
+            blocks,
+            (threads,),
+            (
+                density_map,
+                shear_map,
+                lens_weights,
+                source_weights,
+                ind_i,
+                ind_j,
+                rot_j,
+                bin_offsets,
+                comb_i,
+                comb_j,
+                out_num,
+                np.int32(ncomb),
+                np.int64(nbins_total),
+                np.int64(npairs),
+            ),
+        )
+        return True
+
+    return _cupy_density_shear_tomo_vectorized_kernel
+
+
+@njit(fastmath=True, parallel=True)
 def _cpu_xipm_cross_corr_kernel_c64(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -662,6 +1216,11 @@ class Backend:
         xipm_cross_corr_kernel: Optional[Any] = None,
         xipm_auto_corr_kernel: Optional[Any] = None,
         xipm_tomo_vectorized_kernel: Optional[Any] = None,
+        aperture_density_kernel: Optional[Any] = None,
+        kernel_density_density: Optional[Any] = None,
+        kernel_density_shear: Optional[Any] = None,
+        kernel_density_density_tomo_vectorized: Optional[Any] = None,
+        kernel_density_shear_tomo_vectorized: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
@@ -669,6 +1228,15 @@ class Backend:
         self.xipm_cross_corr_kernel = xipm_cross_corr_kernel
         self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
         self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
+        self.aperture_density_kernel = aperture_density_kernel
+        self.kernel_density_density = kernel_density_density
+        self.kernel_density_shear = kernel_density_shear
+        self.kernel_density_density_tomo_vectorized = (
+            kernel_density_density_tomo_vectorized
+        )
+        self.kernel_density_shear_tomo_vectorized = (
+            kernel_density_shear_tomo_vectorized
+        )
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -746,6 +1314,11 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             xipm_cross_corr_kernel=_cpu_xipm_cross_corr_kernel,
             xipm_auto_corr_kernel=_cpu_xipm_auto_corr_kernel,
             xipm_tomo_vectorized_kernel=_cpu_vectorized_tomo_kernel,
+            aperture_density_kernel=_cpu_aperture_density_kernel,
+            kernel_density_density=_cpu_density_density_corr_kernel,
+            kernel_density_shear=_cpu_density_shear_corr_kernel,
+            kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,
+            kernel_density_shear_tomo_vectorized=_cpu_density_shear_tomo_vectorized_kernel,
         )
 
     elif device_type == 'gpu':
@@ -762,6 +1335,11 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 xipm_cross_corr_kernel=_build_cupy_xipm_cross_corr_kernel(cupy),
                 xipm_auto_corr_kernel=_build_cupy_xipm_auto_corr_kernel(cupy),
                 xipm_tomo_vectorized_kernel=_build_cupy_tomo_vectorized_kernel(cupy),
+                aperture_density_kernel=_build_cupy_aperture_density_kernel(cupy),
+                kernel_density_density=_build_cupy_density_density_corr_kernel(cupy),
+                kernel_density_shear=_build_cupy_density_shear_corr_kernel(cupy),
+                kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(cupy),
+                kernel_density_shear_tomo_vectorized=_build_cupy_density_shear_tomo_vectorized_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':
