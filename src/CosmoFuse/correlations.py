@@ -1323,6 +1323,52 @@ class Correlation:
             val[nonzero] = num[nonzero] / sumofweights_dev[nonzero]
         return val.reshape((self.n_patches, self.nbins))
 
+    def _normalize_tomo_sumofweights_per_comb(
+        self, sumofweights: Union[np.ndarray, float], nzbin_combs: int
+    ) -> Any:
+        sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
+        nbins_total = self.n_patches * self.nbins
+
+        if sum_np.ndim == 0:
+            expanded = np.full((nzbin_combs, nbins_total), sum_np.item(), dtype=self.map_dtype)
+            return self.backend.to_device(expanded)
+
+        if sum_np.ndim == 1:
+            if sum_np.size == nzbin_combs:
+                expanded = np.repeat(sum_np.reshape(nzbin_combs, 1), nbins_total, axis=1)
+                return self.backend.to_device(expanded)
+            if nzbin_combs == 1 and sum_np.size == nbins_total:
+                return self.backend.to_device(sum_np.reshape(1, nbins_total))
+            if sum_np.size == nzbin_combs * nbins_total:
+                return self.backend.to_device(sum_np.reshape(nzbin_combs, nbins_total))
+
+        if sum_np.ndim == 2:
+            if sum_np.shape == (nzbin_combs, nbins_total):
+                return self.backend.to_device(sum_np)
+            if nzbin_combs == 1 and sum_np.shape == (self.n_patches, self.nbins):
+                return self.backend.to_device(sum_np.reshape(1, nbins_total))
+
+        if sum_np.ndim == 3 and sum_np.shape == (nzbin_combs, self.n_patches, self.nbins):
+            return self.backend.to_device(sum_np.reshape(nzbin_combs, nbins_total))
+
+        raise ValueError(
+            "sumofweights must be scalar, (nzbin_combs,), "
+            f"({nzbin_combs}, {self.n_patches}, {self.nbins}), "
+            f"or ({nzbin_combs}, {nbins_total}); got {sum_np.shape}"
+        )
+
+    def _normalize_tomo_sumofweights_directional(
+        self, sumofweights: Union[np.ndarray, float], nzbin_combs: int
+    ) -> Any:
+        sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
+        if sum_np.ndim >= 2 and sum_np.shape[0] == 2:
+            sum_ab = self._normalize_tomo_sumofweights_per_comb(sum_np[0], nzbin_combs)
+            sum_ba = self._normalize_tomo_sumofweights_per_comb(sum_np[1], nzbin_combs)
+            return self.backend.module.stack((sum_ab, sum_ba), axis=0)
+
+        per_comb = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
+        return self.backend.module.stack((per_comb, per_comb), axis=0)
+
     def _fingerprint_weights(
         self, w_np: np.ndarray
     ) -> Tuple[Tuple[int, ...], str, str]:
@@ -1655,6 +1701,217 @@ class Correlation:
         )
         return xip, xim
 
+    def _density_density_tomo_vectorized(
+        self,
+        density_maps: np.ndarray,
+        weights: np.ndarray,
+        sumofweights: Optional[np.ndarray],
+        nzbins: int,
+        nzbin_combs: int,
+    ) -> Any:
+        if self.inds_dev is None:
+            self.prepare()
+
+        tomo_kernel = getattr(self.backend, "kernel_density_density_tomo_vectorized", None)
+        if tomo_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide a vectorized density-density tomography kernel."
+            )
+
+        module = self.backend.module
+        map_backend_dtype = getattr(module, self.map_dtype.name)
+        half = self.map_dtype.type(0.5)
+        nbins_total = self.n_patches * self.nbins
+
+        density_dev = self.backend.to_device(density_maps).astype(self.map_dtype, copy=False)
+        w_dev = self.backend.to_device(weights).astype(self.map_dtype, copy=False)
+        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
+        w_soa = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
+
+        if sumofweights is None:
+            sumofweights_dev = self._compute_tomo_sumofweights(w_dev, nzbins, nzbin_combs)
+        else:
+            sumofweights_dev = self._normalize_tomo_sumofweights_directional(
+                sumofweights, nzbin_combs
+            )
+
+        comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(nzbins, nzbin_combs)
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        bin_offsets = module.ascontiguousarray(
+            self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
+        )
+
+        out = self.backend.zeros(
+            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        )
+
+        if self.backend.name == "numpy":
+            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            tomo_kernel(
+                density_soa,
+                w_soa,
+                np.ascontiguousarray(inds_i),
+                np.ascontiguousarray(inds_j),
+                np.asarray(bin_offsets, dtype=np.int64),
+                np.ascontiguousarray(comb_i),
+                np.ascontiguousarray(comb_j),
+                out_num,
+            )
+
+            for k in range(nzbin_combs):
+                if auto_comb[k]:
+                    sum_k = sumofweights_dev[0, k]
+                else:
+                    sum_k = half * (sumofweights_dev[0, k] + sumofweights_dev[1, k])
+                out[k] = self._normalize_scalar_pairs(out_num[k], sum_k)
+            return out
+
+        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
+        launched = tomo_kernel(
+            density_soa,
+            w_soa,
+            inds_i,
+            inds_j,
+            bin_offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
+        if not launched:
+            raise RuntimeError(
+                "Backend declined vectorized density-density tomography kernel launch."
+            )
+
+        num_ab = out_num[0::2]
+        num_ba = out_num[1::2]
+        for k in range(nzbin_combs):
+            w_ab = self._normalize_scalar_pairs(num_ab[k], sumofweights_dev[0, k])
+            if auto_comb[k]:
+                out[k] = w_ab
+            else:
+                w_ba = self._normalize_scalar_pairs(num_ba[k], sumofweights_dev[1, k])
+                out[k] = half * (w_ab + w_ba)
+
+        return out
+
+    def _density_shear_tomo_vectorized(
+        self,
+        density_maps: np.ndarray,
+        shear_maps: np.ndarray,
+        density_w: np.ndarray,
+        shear_w: np.ndarray,
+        sumofweights: Optional[np.ndarray],
+        nzbins: int,
+    ) -> Any:
+        if self.inds_dev is None:
+            self.prepare()
+
+        tomo_kernel = getattr(self.backend, "kernel_density_shear_tomo_vectorized", None)
+        if tomo_kernel is None:
+            raise RuntimeError(
+                "Backend does not provide a vectorized density-shear tomography kernel."
+            )
+
+        module = self.backend.module
+        map_backend_dtype = getattr(module, self.map_dtype.name)
+        nbins_total = self.n_patches * self.nbins
+        nzbin_combs = int(binom(nzbins + 1, 2))
+
+        density_dev = self.backend.to_device(density_maps).astype(self.map_dtype, copy=False)
+        shear_dev = self.backend.to_device(shear_maps).astype(self.map_dtype, copy=False)
+        density_w_dev = self.backend.to_device(density_w).astype(self.map_dtype, copy=False)
+        shear_w_dev = self.backend.to_device(shear_w).astype(self.map_dtype, copy=False)
+
+        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
+        shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
+        density_w_soa = module.ascontiguousarray(module.transpose(density_w_dev, (1, 0)))
+        shear_w_soa = module.ascontiguousarray(module.transpose(shear_w_dev, (1, 0)))
+
+        comb_i_base, comb_j_base, _auto_comb = self._get_tomo_combination_indices(
+            nzbins, nzbin_combs
+        )
+        comb_i_perm = module.ascontiguousarray(
+            module.stack((comb_i_base, comb_j_base), axis=1).reshape(2 * nzbin_combs)
+        )
+        comb_j_perm = module.ascontiguousarray(
+            module.stack((comb_j_base, comb_i_base), axis=1).reshape(2 * nzbin_combs)
+        )
+
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
+        bin_offsets = module.ascontiguousarray(
+            self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
+        )
+
+        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
+        if self.backend.name == "numpy":
+            tomo_kernel(
+                density_soa,
+                shear_soa,
+                density_w_soa,
+                shear_w_soa,
+                np.ascontiguousarray(inds_i),
+                np.ascontiguousarray(inds_j),
+                np.ascontiguousarray(rot_j),
+                np.asarray(bin_offsets, dtype=np.int64),
+                np.ascontiguousarray(comb_i_perm),
+                np.ascontiguousarray(comb_j_perm),
+                out_num,
+            )
+        else:
+            launched = tomo_kernel(
+                density_soa,
+                shear_soa,
+                density_w_soa,
+                shear_w_soa,
+                inds_i,
+                inds_j,
+                rot_j,
+                bin_offsets,
+                comb_i_perm,
+                comb_j_perm,
+                out_num,
+            )
+            if not launched:
+                raise RuntimeError(
+                    "Backend declined vectorized density-shear tomography kernel launch."
+                )
+
+        num_ab = out_num[0::2]
+        num_ba = out_num[1::2]
+
+        if sumofweights is None:
+            comb_i_np = np.asarray(self.backend.to_numpy(comb_i_base), dtype=np.int64)
+            comb_j_np = np.asarray(self.backend.to_numpy(comb_j_base), dtype=np.int64)
+            sum_ab = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            sum_ba = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            for k in range(nzbin_combs):
+                i = int(comb_i_np[k])
+                j = int(comb_j_np[k])
+                sum_ab[k] = self._reduce_pairs(
+                    density_w_dev[i][self.inds_dev[0]] * shear_w_dev[j][self.inds_dev[1]]
+                )
+                sum_ba[k] = self._reduce_pairs(
+                    density_w_dev[j][self.inds_dev[0]] * shear_w_dev[i][self.inds_dev[1]]
+                )
+            sum_total = sum_ab + sum_ba
+        else:
+            sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
+            if sum_np.ndim >= 2 and sum_np.shape[0] == 2:
+                sum_dir = self._normalize_tomo_sumofweights_directional(sum_np, nzbin_combs)
+                sum_total = sum_dir[0] + sum_dir[1]
+            else:
+                sum_total = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
+
+        out = self.backend.zeros(
+            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        )
+        for k in range(nzbin_combs):
+            out[k] = self._normalize_scalar_pairs(num_ab[k] + num_ba[k], sum_total[k])
+        return out
+
     def vectorized_density_density(
         self,
         density_maps: np.ndarray,
@@ -1664,22 +1921,15 @@ class Correlation:
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
         nzbins = density_np.shape[0]
-        n_comb = int(binom(nzbins + 1, 2))
-        out = np.zeros((n_comb, self.n_patches, self.nbins), dtype=self.map_dtype)
-        k = 0
-        for i in range(nzbins):
-            for j in range(i, nzbins):
-                pair_sum = None if sumofweights is None else sumofweights[k]
-                (wtheta_ij,) = self.compute_density_density(
-                    density_np[i],
-                    density_np[j],
-                    w_np[i],
-                    w_np[j],
-                    sumofweights=pair_sum,
-                )
-                out[k] = wtheta_ij
-                k += 1
-        return np.real(out)
+        nzbin_combs = int(binom(nzbins + 1, 2))
+        wtheta = self._density_density_tomo_vectorized(
+            density_np,
+            w_np,
+            sumofweights,
+            nzbins,
+            nzbin_combs,
+        )
+        return np.real(self.backend.to_numpy(wtheta))
 
     def vectorized_density_shear(
         self,
@@ -1693,22 +1943,28 @@ class Correlation:
         shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
         wd_np = np.asarray(density_weights, dtype=self.map_dtype)
         ws_np = np.asarray(shear_weights, dtype=self.map_dtype)
-        n_comb = int(density_np.shape[0] * shear_np.shape[0])
-        out = np.zeros((n_comb, self.n_patches, self.nbins), dtype=self.map_dtype)
-        k = 0
-        for i in range(density_np.shape[0]):
-            for j in range(shear_np.shape[0]):
-                pair_sum = None if sumofweights is None else sumofweights[k]
-                (gammat_ij,) = self.compute_density_shear(
-                    density_np[i],
-                    shear_np[j],
-                    wd_np[i],
-                    ws_np[j],
-                    sumofweights=pair_sum,
-                )
-                out[k] = gammat_ij
-                k += 1
-        return np.real(out)
+        if density_np.shape[0] != shear_np.shape[0]:
+            raise ValueError(
+                "vectorized_density_shear requires equal numbers of density and shear "
+                f"tomographic bins for symmetric AB+BA evaluation; got "
+                f"{density_np.shape[0]} and {shear_np.shape[0]}."
+            )
+        if shear_np.ndim != 3 or shear_np.shape[1] != 2:
+            raise ValueError(
+                "shear_maps must have shape (nzbins, 2, npix); "
+                f"got {shear_np.shape}"
+            )
+
+        nzbins = density_np.shape[0]
+        gammat = self._density_shear_tomo_vectorized(
+            density_np,
+            shear_np,
+            wd_np,
+            ws_np,
+            sumofweights,
+            nzbins,
+        )
+        return np.real(self.backend.to_numpy(gammat))
 
     def get_3x2pt_tomo(
         self,

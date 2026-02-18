@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1]
+
+### Changed
+- Refactored tomographic galaxy clustering (`vectorized_density_density`) to use backend fused tomo kernels directly, removing Python loops over redshift bins.
+- Refactored tomographic galaxy-galaxy lensing (`vectorized_density_shear`) to use backend fused tomo kernels with explicit symmetric AB+BA permutation evaluation.
+- Enforced GC auto-bin handling to avoid redundant BA evaluation and preserve single-term normalization for `i == j`.
+- Enforced GGL symmetric normalization over both permutations for all bin pairs, including auto-bin pairs.
+
+### Added
+- New private helpers in `Correlation` for fused scalar tomography execution:
+  - `_density_density_tomo_vectorized`
+  - `_density_shear_tomo_vectorized`
+- Additional sum-of-weights normalization helpers for tomographic per-combination and directional inputs.
+
+### Tests & Docs
+- Updated correlation unit tests to validate helper delegation, GC auto-bin uniqueness behavior, GGL AB+BA symmetry, and matching-bin validation for symmetric GGL tomography.
+
 ## [4.0.0]
 
 ### Changed

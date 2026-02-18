@@ -1114,28 +1114,33 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(out_xip, xip)
         np.testing.assert_allclose(out_xim, xim)
 
-    def test_vectorized_density_density_and_density_shear_with_and_without_sumofweights(self):
+    def test_vectorized_density_methods_delegate_to_tomo_helpers(self):
         corr = self._make_small_cpu_corr()
         density_maps = np.arange(24, dtype=np.float64).reshape(2, 12)
         shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
         density_w = np.ones((2, 12), dtype=np.float64)
         shear_w = np.ones((2, 12), dtype=np.float64)
+        dd_out = np.full((3, corr.n_patches, corr.nbins), 7.0, dtype=np.float64)
+        ds_out = np.full((3, corr.n_patches, corr.nbins), 9.0, dtype=np.float64)
+        dd_sum = np.arange(3, dtype=np.float64)
+        ds_sum = np.arange(3, dtype=np.float64)
 
-        calls_dd = []
-        calls_ds = []
-
-        def fake_dd(_d1, _d2, _w1, _w2, sumofweights=None):
-            calls_dd.append(sumofweights)
-            return (np.full((corr.n_patches, corr.nbins), 7.0, dtype=np.float64),)
-
-        def fake_ds(_d, _s, _wd, _ws, sumofweights=None):
-            calls_ds.append(sumofweights)
-            return (np.full((corr.n_patches, corr.nbins), 9.0, dtype=np.float64),)
-
-        with patch.object(corr, "compute_density_density", side_effect=fake_dd), patch.object(
+        with patch.object(
+            corr,
+            "_density_density_tomo_vectorized",
+            return_value=corr.backend.to_device(dd_out),
+        ) as spy_dd, patch.object(
+            corr,
+            "_density_shear_tomo_vectorized",
+            return_value=corr.backend.to_device(ds_out),
+        ) as spy_ds, patch.object(
+            corr,
+            "compute_density_density",
+            side_effect=AssertionError("legacy density-density loop path should not run"),
+        ), patch.object(
             corr,
             "compute_density_shear",
-            side_effect=fake_ds,
+            side_effect=AssertionError("legacy density-shear loop path should not run"),
         ):
             out_dd_none = corr.vectorized_density_density(density_maps, density_w)
             out_ds_none = corr.vectorized_density_shear(
@@ -1145,8 +1150,6 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_w,
             )
 
-            dd_sum = np.arange(3, dtype=np.float64)
-            ds_sum = np.arange(4, dtype=np.float64)
             out_dd_explicit = corr.vectorized_density_density(
                 density_maps,
                 density_w,
@@ -1161,13 +1164,121 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
 
         self.assertEqual(out_dd_none.shape, (3, corr.n_patches, corr.nbins))
-        self.assertEqual(out_ds_none.shape, (4, corr.n_patches, corr.nbins))
+        self.assertEqual(out_ds_none.shape, (3, corr.n_patches, corr.nbins))
         self.assertEqual(out_dd_explicit.shape, (3, corr.n_patches, corr.nbins))
-        self.assertEqual(out_ds_explicit.shape, (4, corr.n_patches, corr.nbins))
-        self.assertEqual(calls_dd[:3], [None, None, None])
-        self.assertEqual(calls_dd[3:], [dd_sum[0], dd_sum[1], dd_sum[2]])
-        self.assertEqual(calls_ds[:4], [None, None, None, None])
-        self.assertEqual(calls_ds[4:], [ds_sum[0], ds_sum[1], ds_sum[2], ds_sum[3]])
+        self.assertEqual(out_ds_explicit.shape, (3, corr.n_patches, corr.nbins))
+        np.testing.assert_allclose(out_dd_none, dd_out)
+        np.testing.assert_allclose(out_ds_none, ds_out)
+        np.testing.assert_allclose(out_dd_explicit, dd_out)
+        np.testing.assert_allclose(out_ds_explicit, ds_out)
+        self.assertEqual(spy_dd.call_count, 2)
+        self.assertEqual(spy_ds.call_count, 2)
+        self.assertIsNone(spy_dd.call_args_list[0].args[2])
+        self.assertIsNone(spy_ds.call_args_list[0].args[4])
+        np.testing.assert_array_equal(spy_dd.call_args_list[1].args[2], dd_sum)
+        np.testing.assert_array_equal(spy_ds.call_args_list[1].args[4], ds_sum)
+
+    def test_vectorized_density_density_auto_pairs_use_unique_term(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.arange(24, dtype=np.float64).reshape(2, 12)
+        density_w = np.linspace(1.0, 2.0, 24, dtype=np.float64).reshape(2, 12)
+
+        out = corr.vectorized_density_density(density_maps, density_w)
+        self.assertEqual(out.shape, (3, corr.n_patches, corr.nbins))
+
+        (auto_00,) = corr.compute_density_density(
+            density_maps[0],
+            density_maps[0],
+            density_w[0],
+            density_w[0],
+        )
+        (auto_11,) = corr.compute_density_density(
+            density_maps[1],
+            density_maps[1],
+            density_w[1],
+            density_w[1],
+        )
+        np.testing.assert_allclose(out[0], auto_00)
+        np.testing.assert_allclose(out[2], auto_11)
+
+    def test_vectorized_density_shear_enforces_symmetric_ab_ba_sum(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.array(
+            [
+                np.linspace(0.2, 1.3, 12, dtype=np.float64),
+                np.linspace(1.4, 0.3, 12, dtype=np.float64),
+            ]
+        )
+        shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
+        shear_maps[0, 0] = np.linspace(-0.4, 0.8, 12, dtype=np.float64)
+        shear_maps[0, 1] = np.linspace(0.1, -0.2, 12, dtype=np.float64)
+        shear_maps[1, 0] = np.linspace(0.7, -0.5, 12, dtype=np.float64)
+        shear_maps[1, 1] = np.linspace(-0.3, 0.6, 12, dtype=np.float64)
+        density_w = np.linspace(0.8, 1.6, 24, dtype=np.float64).reshape(2, 12)
+        shear_w = np.linspace(1.1, 2.3, 24, dtype=np.float64).reshape(2, 12)
+
+        out = corr.vectorized_density_shear(density_maps, shear_maps, density_w, shear_w)
+        self.assertEqual(out.shape, (3, corr.n_patches, corr.nbins))
+
+        combos = [(0, 0), (0, 1), (1, 1)]
+        for k, (i, j) in enumerate(combos):
+            (num_ab,) = corr.compute_density_shear(
+                density_maps[i],
+                shear_maps[j, 0],
+                shear_maps[j, 1],
+                density_w[i],
+                shear_w[j],
+                sumofweights=1.0,
+            )
+            sum_ab = corr.backend.to_numpy(
+                corr._get_xipm_sumofweights(
+                    corr.backend.to_device(density_w[i]),
+                    corr.backend.to_device(shear_w[j]),
+                )
+            ).reshape(corr.n_patches, corr.nbins)
+
+            if i == j:
+                expected = np.zeros_like(num_ab)
+                nonzero = sum_ab != 0
+                expected[nonzero] = num_ab[nonzero] / sum_ab[nonzero]
+            else:
+                (num_ba,) = corr.compute_density_shear(
+                    density_maps[j],
+                    shear_maps[i, 0],
+                    shear_maps[i, 1],
+                    density_w[j],
+                    shear_w[i],
+                    sumofweights=1.0,
+                )
+                sum_ba = corr.backend.to_numpy(
+                    corr._get_xipm_sumofweights(
+                        corr.backend.to_device(density_w[j]),
+                        corr.backend.to_device(shear_w[i]),
+                    )
+                ).reshape(corr.n_patches, corr.nbins)
+                expected = np.zeros_like(num_ab)
+                denom = sum_ab + sum_ba
+                nonzero = denom != 0
+                expected[nonzero] = (
+                    num_ab[nonzero] + num_ba[nonzero]
+                ) / denom[nonzero]
+
+            np.testing.assert_allclose(out[k], expected)
+
+    def test_vectorized_density_shear_requires_matching_tomo_bins(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((3, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((3, 12), dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "equal numbers of density and shear"):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+            )
 
     def test_get_3x2pt_tomo_raises_when_no_maps(self):
         corr = self._make_small_cpu_corr()

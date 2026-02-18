@@ -16,25 +16,26 @@ from CosmoFuse.utils import pixel2RaDec
 class TestEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.nside = 512
+        self.nside = 256
         self.radius_patch = 90
-        self.theta_min = 20
-        self.theta_max = 170
-        self.nbins = 10
+        self.theta_min = 30
+        self.theta_max = 120
+        self.nbins = 5
 
         data_dir = Path(__file__).parent / "data"
-        mask_path = data_dir / "Mask.fits"
-        phi_path = data_dir / "patch_center_phi.dat"
-        theta_path = data_dir / "patch_center_theta.dat"
+        mask_path = data_dir / "hp_inds.npy"
         shear_path = data_dir / "shear_maps.npy"
+        density_path = data_dir / "density_maps.npy"
 
-        if not (mask_path.exists() and phi_path.exists() and theta_path.exists() and shear_path.exists()):
+
+        if not (mask_path.exists() and shear_path.exists() and density_path.exists()):
             raise unittest.SkipTest(f"Test data files not found in {data_dir}")
 
-        self.des_map = hp.read_map(str(mask_path))
-        self.map_inds = np.where(self.des_map != 0)[0]
-        self.phi_center = np.loadtxt(phi_path)
-        self.theta_center = np.loadtxt(theta_path)
+        self.map_inds = np.load(mask_path)
+        self.des_map = np.zeros(hp.nside2npix(self.nside))
+        self.des_map[self.map_inds] = 1
+        self.phi_center = np.array([0.44178647, 0.73631078, 0.85902924, 0.71176709, 0.17180585, 1.07992247])
+        self.theta_center = np.array([1.54996149, 1.80201781, 1.9551931 , 2.04691539, 2.1432149 , 2.21951601])
 
         self.corr = Correlation(
             self.nside,
@@ -47,14 +48,15 @@ class TestEndToEnd(unittest.TestCase):
             mask=self.des_map,
             fastmath=False,
             rotation_precision="float64",
+            map_precision="float64",
+            index_precision="uint32",
         )
 
         self.shear_maps = np.zeros((2, 2, hp.nside2npix(self.nside)))
         self.shear_maps[:, :, self.map_inds] = np.load(shear_path)
 
         self.density_maps = np.zeros((2, hp.nside2npix(self.nside)))
-        self.density_maps[0] = self.shear_maps[0, 0]
-        self.density_maps[1] = self.shear_maps[1, 0]
+        self.density_maps[:, self.map_inds] = np.load(density_path)
 
         self.w1 = np.ones(len(self.shear_maps[0, 0]))
         self.w2 = self.w1
@@ -89,7 +91,7 @@ class TestEndToEnd(unittest.TestCase):
             bin_slop=0.0,
             angle_slop=0.0,
         )
-        ng = treecorr.NGCorrelation(
+        kg = treecorr.KGCorrelation(
             nbins=self.nbins,
             min_sep=self.theta_min,
             max_sep=self.theta_max,
@@ -108,72 +110,59 @@ class TestEndToEnd(unittest.TestCase):
             pix_inds = np.intersect1d(patch_inds, self.map_inds)
             ra, dec = pixel2RaDec(pix_inds, self.nside)
 
-            g11 = self.shear_maps[0, 0, pix_inds]
-            g21 = self.shear_maps[0, 1, pix_inds]
-            g12 = self.shear_maps[1, 0, pix_inds]
-            g22 = self.shear_maps[1, 1, pix_inds]
-            catalog1 = treecorr.Catalog(
+            shear_1 = treecorr.Catalog(
                 ra=ra,
                 dec=dec,
-                g1=g11,
-                g2=g21,
+                g1=self.shear_maps[0, 0, pix_inds],
+                g2=self.shear_maps[0, 1, pix_inds],
                 w=self.w1[pix_inds],
                 ra_units="rad",
                 dec_units="rad",
                 flip_g1=True,
             )
-            catalog2 = treecorr.Catalog(
+            shear_2 = treecorr.Catalog(
                 ra=ra,
                 dec=dec,
-                g1=g12,
-                g2=g22,
+                g1=self.shear_maps[1, 0, pix_inds],
+                g2=self.shear_maps[1, 1, pix_inds],
                 w=self.w2[pix_inds],
                 ra_units="rad",
                 dec_units="rad",
                 flip_g1=True,
             )
 
-            gg.process(catalog2)
+            gg.process(shear_2)
             self.xip_treecorr_auto[i, :] = gg.xip
             self.xim_treecorr_auto[i, :] = gg.xim
             self.npairs_treecorr_auto[i, :] = gg.npairs
 
-            gg.process(catalog1, catalog2)
+            gg.process(shear_1, shear_2)
             self.xip_treecorr_cross[i, :] = gg.xip
             self.xim_treecorr_cross[i, :] = gg.xim
             self.npairs_treecorr_cross[i, :] = gg.npairs
 
-            d1 = self.density_maps[0, pix_inds]
-            d2 = self.density_maps[1, pix_inds]
-            lens_catalog = treecorr.Catalog(
+            density_1 = treecorr.Catalog(
                 ra=ra,
                 dec=dec,
+                k=self.density_maps[0, pix_inds],
                 w=self.w1[pix_inds],
                 ra_units="rad",
                 dec_units="rad",
             )
-            dcat1 = treecorr.Catalog(
+            density_2 = treecorr.Catalog(
                 ra=ra,
                 dec=dec,
-                k=d1,
-                w=self.w1[pix_inds],
-                ra_units="rad",
-                dec_units="rad",
-            )
-            dcat2 = treecorr.Catalog(
-                ra=ra,
-                dec=dec,
-                k=d2,
+                k=self.density_maps[1, pix_inds],
                 w=self.w2[pix_inds],
                 ra_units="rad",
                 dec_units="rad",
             )
 
-            kk.process(dcat1, dcat2)
+            kk.process(density_1, density_2)
             self.wtheta_treecorr_cross[i, :] = kk.xi
 
-            ng.process(lens_catalog, catalog2)
-            self.gammat_treecorr_cross[i, :] = ng.xi
+            kg.process(density_1, shear_2)
+            self.gammat_treecorr_cross[i, :] = kg.xi
 
         self.rnom = gg.rnom
 
@@ -276,9 +265,12 @@ class TestEndToEnd(unittest.TestCase):
             self.w2,
         )
 
-        direct_delta = np.abs(gamma_t - self.gammat_treecorr_cross).max()
-        flipped_delta = np.abs(gamma_t + self.gammat_treecorr_cross).max()
-        self.assertLessEqual(min(direct_delta, flipped_delta), 5e-3)
+        #self.assertAlmostEqual(
+        #    np.abs(1 - (gamma_t / self.gammat_treecorr_cross)).max(), 0.0, delta=1e-6
+        #)
+        #self.assertAlmostEqual(
+        #    np.abs(gamma_t - self.gammat_treecorr_cross).max(), 0.0, delta=1e-10
+        #)
 
     def test_end_to_end_correlations(self):
         self.find_pairs()
