@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refactored tomographic galaxy-galaxy lensing (`vectorized_density_shear`) to use backend fused tomo kernels with explicit symmetric AB+BA permutation evaluation.
 - Enforced GC auto-bin handling to avoid redundant BA evaluation and preserve single-term normalization for `i == j`.
 - Enforced GGL symmetric normalization over both permutations for all bin pairs, including auto-bin pairs.
+- Updated scalar and tomographic GGL estimators to explicitly accumulate both spatial pair permutations (`i->j` and `j->i`) with correct source-side rotation (`exp2phi_dev[1]` / `exp2phi_dev[0]`), swapped-weight normalization, and TreeCorr-aligned tangential-shear sign convention.
 
 ### Added
 - New private helpers in `Correlation` for fused scalar tomography execution:

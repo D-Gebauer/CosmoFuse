@@ -100,7 +100,7 @@ def _cpu_density_shear_corr_kernel(
             i = ind_i[idx]
             j = ind_j[idx]
             rot = exp_j[idx]
-            gamma_t = -(g1_source[j] * rot.real + g2_source[j] * rot.imag)
+            gamma_t = g1_source[j] * rot.real + g2_source[j] * rot.imag
             sum_gt += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
 
         out_gt[b] = sum_gt
@@ -163,6 +163,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
     source_weights: np.ndarray,
     ind_i: np.ndarray,
     ind_j: np.ndarray,
+    rot_i: np.ndarray,
     rot_j: np.ndarray,
     offsets: np.ndarray,
     comb_i: np.ndarray,
@@ -184,16 +185,28 @@ def _cpu_density_shear_tomo_vectorized_kernel(
             for idx in range(start, stop):
                 pix_i = int(ind_i[idx])
                 pix_j = int(ind_j[idx])
-                exp_b = rot_j[idx]
-                gamma_t = -(
-                    shear_map[pix_j, source_bin, 0] * exp_b.real
-                    + shear_map[pix_j, source_bin, 1] * exp_b.imag
+                exp_j = rot_j[idx]
+                gamma_t_ij = (
+                    shear_map[pix_j, source_bin, 0] * exp_j.real
+                    + shear_map[pix_j, source_bin, 1] * exp_j.imag
                 )
                 sum_gt += (
                     lens_weights[pix_i, lens_bin]
                     * source_weights[pix_j, source_bin]
                     * density_map[pix_i, lens_bin]
-                    * gamma_t
+                    * gamma_t_ij
+                )
+
+                exp_i = rot_i[idx]
+                gamma_t_ji = (
+                    shear_map[pix_i, source_bin, 0] * exp_i.real
+                    + shear_map[pix_i, source_bin, 1] * exp_i.imag
+                )
+                sum_gt += (
+                    lens_weights[pix_j, lens_bin]
+                    * source_weights[pix_i, source_bin]
+                    * density_map[pix_j, lens_bin]
+                    * gamma_t_ji
                 )
 
             out_num[comb_idx, b] = sum_gt
@@ -223,7 +236,7 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
         const I i_idx = ind_i[i];
         const I j_idx = ind_j[i];
         const C rot = exp_j[i];
-        const T gamma_t = -(g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot));
+        const T gamma_t = g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot);
         out_gt = w_lens[i_idx] * w_source[j_idx] * density_lens[i_idx] * gamma_t;
         """,
         "gpu_density_shear_corr_kernel",
@@ -414,6 +427,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             const {map_c_type}* source_weights,
             const long long* ind_i,
             const long long* ind_j,
+            const {complex_c_type}* rot_i,
             const {complex_c_type}* rot_j,
             const long long* bin_offsets,
             const int* comb_i,
@@ -441,22 +455,39 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
                 const long long idx_a = ind_i[tid];
                 const long long idx_b = ind_j[tid];
-                const {complex_c_type} rot = rot_j[tid];
+                const {complex_c_type} rot_ab = rot_j[tid];
+                const {complex_c_type} rot_ba = rot_i[tid];
 
-                const long long lens_idx = idx_a * (long long)TOMO_BINS + lens_bin;
-                const long long source_idx = idx_b * (long long)TOMO_BINS + source_bin;
-                const long long shear_base = source_idx * 2;
+                const long long lens_idx_ab = idx_a * (long long)TOMO_BINS + lens_bin;
+                const long long source_idx_ab = idx_b * (long long)TOMO_BINS + source_bin;
+                const long long shear_base_ab = source_idx_ab * 2;
 
-                const {complex_real_type} gamma_t = -(
-                    ({complex_real_type})shear[shear_base] * rot.x
-                    + ({complex_real_type})shear[shear_base + 1] * rot.y
+                const {complex_real_type} gamma_t_ab = (
+                    ({complex_real_type})shear[shear_base_ab] * rot_ab.x
+                    + ({complex_real_type})shear[shear_base_ab + 1] * rot_ab.y
                 );
 
                 sum_val += (
-                    lens_weights[lens_idx]
-                    * source_weights[source_idx]
-                    * density[lens_idx]
-                    * ({map_c_type})gamma_t
+                    lens_weights[lens_idx_ab]
+                    * source_weights[source_idx_ab]
+                    * density[lens_idx_ab]
+                    * ({map_c_type})gamma_t_ab
+                );
+
+                const long long lens_idx_ba = idx_b * (long long)TOMO_BINS + lens_bin;
+                const long long source_idx_ba = idx_a * (long long)TOMO_BINS + source_bin;
+                const long long shear_base_ba = source_idx_ba * 2;
+
+                const {complex_real_type} gamma_t_ba = (
+                    ({complex_real_type})shear[shear_base_ba] * rot_ba.x
+                    + ({complex_real_type})shear[shear_base_ba + 1] * rot_ba.y
+                );
+
+                sum_val += (
+                    lens_weights[lens_idx_ba]
+                    * source_weights[source_idx_ba]
+                    * density[lens_idx_ba]
+                    * ({map_c_type})gamma_t_ba
                 );
             }}
 
@@ -503,6 +534,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         source_weights: Any,
         ind_i: Any,
         ind_j: Any,
+        rot_i: Any,
         rot_j: Any,
         bin_offsets: Any,
         comb_i: Any,
@@ -550,6 +582,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 source_weights,
                 ind_i,
                 ind_j,
+                rot_i,
                 rot_j,
                 bin_offsets,
                 comb_i,

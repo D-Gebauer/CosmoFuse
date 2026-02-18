@@ -1052,7 +1052,9 @@ class Correlation:
         w_source_dev = self.backend.to_device(w_source).astype(self.map_dtype, copy=False)
 
         if sumofweights is None:
-            sumofweights_dev = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
+            sum_ab = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
+            sum_ba = self._get_xipm_sumofweights(w_source_dev, w_lens_dev)
+            sumofweights_dev = sum_ab + sum_ba
         else:
             sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
 
@@ -1064,7 +1066,7 @@ class Correlation:
 
         if self.backend.name == "numpy":
             nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-            out_num = self.backend.zeros(nbins_total, dtype=self.map_dtype)
+            out_ab = self.backend.zeros(nbins_total, dtype=self.map_dtype)
             offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
             density_shear_kernel(
                 density_lens_dev,
@@ -1076,11 +1078,25 @@ class Correlation:
                 self.inds_dev[1],
                 self.exp2phi_dev[1],
                 offsets,
-                out_num,
+                out_ab,
             )
-            gamma_num = out_num
+
+            out_ba = self.backend.zeros(nbins_total, dtype=self.map_dtype)
+            density_shear_kernel(
+                density_lens_dev,
+                g1_source_dev,
+                g2_source_dev,
+                w_lens_dev,
+                w_source_dev,
+                self.inds_dev[1],
+                self.inds_dev[0],
+                self.exp2phi_dev[0],
+                offsets,
+                out_ba,
+            )
+            gamma_num = out_ab + out_ba
         else:
-            out_num = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
+            out_ab = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
             density_shear_kernel(
                 density_lens_dev,
                 g1_source_dev,
@@ -1090,9 +1106,22 @@ class Correlation:
                 self.inds_dev[0],
                 self.inds_dev[1],
                 self.exp2phi_dev[1],
-                out_num,
+                out_ab,
             )
-            gamma_num = self._reduce_pairs(out_num)
+
+            out_ba = self.backend.zeros(self.ntotpairs, dtype=self.map_dtype)
+            density_shear_kernel(
+                density_lens_dev,
+                g1_source_dev,
+                g2_source_dev,
+                w_lens_dev,
+                w_source_dev,
+                self.inds_dev[1],
+                self.inds_dev[0],
+                self.exp2phi_dev[0],
+                out_ba,
+            )
+            gamma_num = self._reduce_pairs(out_ab) + self._reduce_pairs(out_ba)
 
         gamma_t = self._normalize_scalar_pairs(gamma_num, sumofweights_dev)
         return (np.real(self.backend.to_numpy(gamma_t)),)
@@ -1831,21 +1860,18 @@ class Correlation:
         comb_i_base, comb_j_base, _auto_comb = self._get_tomo_combination_indices(
             nzbins, nzbin_combs
         )
-        comb_i_perm = module.ascontiguousarray(
-            module.stack((comb_i_base, comb_j_base), axis=1).reshape(2 * nzbin_combs)
-        )
-        comb_j_perm = module.ascontiguousarray(
-            module.stack((comb_j_base, comb_i_base), axis=1).reshape(2 * nzbin_combs)
-        )
+        comb_i = module.ascontiguousarray(comb_i_base)
+        comb_j = module.ascontiguousarray(comb_j_base)
 
         inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
         inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
         rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
 
-        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
+        out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
         if self.backend.name == "numpy":
             tomo_kernel(
                 density_soa,
@@ -1854,10 +1880,11 @@ class Correlation:
                 shear_w_soa,
                 np.ascontiguousarray(inds_i),
                 np.ascontiguousarray(inds_j),
+                np.ascontiguousarray(rot_i),
                 np.ascontiguousarray(rot_j),
                 np.asarray(bin_offsets, dtype=np.int64),
-                np.ascontiguousarray(comb_i_perm),
-                np.ascontiguousarray(comb_j_perm),
+                np.ascontiguousarray(comb_i),
+                np.ascontiguousarray(comb_j),
                 out_num,
             )
         else:
@@ -1868,10 +1895,11 @@ class Correlation:
                 shear_w_soa,
                 inds_i,
                 inds_j,
+                rot_i,
                 rot_j,
                 bin_offsets,
-                comb_i_perm,
-                comb_j_perm,
+                comb_i,
+                comb_j,
                 out_num,
             )
             if not launched:
@@ -1879,8 +1907,7 @@ class Correlation:
                     "Backend declined vectorized density-shear tomography kernel launch."
                 )
 
-        num_ab = out_num[0::2]
-        num_ba = out_num[1::2]
+        num_ab = out_num
 
         if sumofweights is None:
             comb_i_np = np.asarray(self.backend.to_numpy(comb_i_base), dtype=np.int64)
@@ -1894,7 +1921,7 @@ class Correlation:
                     density_w_dev[i][self.inds_dev[0]] * shear_w_dev[j][self.inds_dev[1]]
                 )
                 sum_ba[k] = self._reduce_pairs(
-                    density_w_dev[j][self.inds_dev[0]] * shear_w_dev[i][self.inds_dev[1]]
+                    density_w_dev[i][self.inds_dev[1]] * shear_w_dev[j][self.inds_dev[0]]
                 )
             sum_total = sum_ab + sum_ba
         else:
@@ -1909,7 +1936,7 @@ class Correlation:
             (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
         )
         for k in range(nzbin_combs):
-            out[k] = self._normalize_scalar_pairs(num_ab[k] + num_ba[k], sum_total[k])
+            out[k] = self._normalize_scalar_pairs(num_ab[k], sum_total[k])
         return out
 
     def vectorized_density_density(
@@ -1939,6 +1966,11 @@ class Correlation:
         shear_weights: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        """Compute tomographic density-shear correlation with directional Lens->Source ordering.
+
+        The first argument (`density_maps`) is always treated as the lens field and the
+        second argument (`shear_maps`) as the source shear field.
+        """
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
         wd_np = np.asarray(density_weights, dtype=self.map_dtype)
@@ -1946,7 +1978,7 @@ class Correlation:
         if density_np.shape[0] != shear_np.shape[0]:
             raise ValueError(
                 "vectorized_density_shear requires equal numbers of density and shear "
-                f"tomographic bins for symmetric AB+BA evaluation; got "
+                f"tomographic bins for directional Lens->Source evaluation; got "
                 f"{density_np.shape[0]} and {shear_np.shape[0]}."
             )
         if shear_np.ndim != 3 or shear_np.shape[1] != 2:

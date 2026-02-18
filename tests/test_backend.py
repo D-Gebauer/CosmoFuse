@@ -427,7 +427,7 @@ class TestBackend(unittest.TestCase):
             for idx in range(offsets[b], offsets[b + 1]):
                 i = ind_i[idx]
                 j = ind_j[idx]
-                gamma_t = -(g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag)
+                gamma_t = g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
                 expected[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
 
         np.testing.assert_allclose(out_gt, expected)
@@ -469,6 +469,7 @@ class TestBackend(unittest.TestCase):
         source_weights = np.array([[1.0, 1.5], [0.5, 2.0]], dtype=np.float64)
         ind_i = np.array([0], dtype=np.int64)
         ind_j = np.array([1], dtype=np.int64)
+        rot_i = np.array([0.8 - 0.6j], dtype=np.complex128)
         rot_j = np.array([0.6 + 0.8j], dtype=np.complex128)
         offsets = np.array([0, 1], dtype=np.int64)
         comb_i = np.array([0, 1], dtype=np.int32)
@@ -482,6 +483,7 @@ class TestBackend(unittest.TestCase):
             source_weights,
             ind_i,
             ind_j,
+            rot_i,
             rot_j,
             offsets,
             comb_i,
@@ -633,6 +635,7 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
             np.array([0], dtype=np.int32),
@@ -654,6 +657,7 @@ class TestBackend(unittest.TestCase):
             np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
@@ -679,6 +683,7 @@ class TestBackend(unittest.TestCase):
             np.zeros((1, 1), dtype=np.float32),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
@@ -712,6 +717,7 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
             np.array([0], dtype=np.int32),
@@ -719,7 +725,7 @@ class TestBackend(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(len(compiled_sources), 1)
-        self.assertNotIn("rot_i", compiled_sources[0][0])
+        self.assertIn("rot_i", compiled_sources[0][0])
         self.assertIn("rot_j", compiled_sources[0][0])
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
 
@@ -747,6 +753,7 @@ class TestBackend(unittest.TestCase):
             np.zeros((1, 2), dtype=np.float32),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
             np.zeros(1, dtype=np.complex64),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
@@ -778,6 +785,7 @@ class TestBackend(unittest.TestCase):
             np.zeros((1, 1), dtype=np.float64),
             np.zeros(1, dtype=np.int64),
             np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex128),
             np.zeros(1, dtype=np.complex128),
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),

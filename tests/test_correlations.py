@@ -1044,7 +1044,12 @@ class TestCorrelationCoverage(unittest.TestCase):
             w_source,
             sumofweights=1.0,
         )
-        expected = -(d_lens[0] * g1[1] + d_lens[1] * g1[2])
+        expected = (
+            d_lens[0] * g1[1]
+            + d_lens[1] * g1[2]
+            + d_lens[1] * g1[0]
+            + d_lens[2] * g1[1]
+        )
         self.assertAlmostEqual(gamma_t[0, 0], expected)
 
     def test_compute_density_shear_missing_kernel_raises(self):
@@ -1201,7 +1206,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(out[0], auto_00)
         np.testing.assert_allclose(out[2], auto_11)
 
-    def test_vectorized_density_shear_enforces_symmetric_ab_ba_sum(self):
+    def test_vectorized_density_shear_uses_directional_lens_source_pairs(self):
         corr = self._make_small_cpu_corr()
         density_maps = np.array(
             [
@@ -1236,32 +1241,17 @@ class TestCorrelationCoverage(unittest.TestCase):
                     corr.backend.to_device(shear_w[j]),
                 )
             ).reshape(corr.n_patches, corr.nbins)
-
-            if i == j:
-                expected = np.zeros_like(num_ab)
-                nonzero = sum_ab != 0
-                expected[nonzero] = num_ab[nonzero] / sum_ab[nonzero]
-            else:
-                (num_ba,) = corr.compute_density_shear(
-                    density_maps[j],
-                    shear_maps[i, 0],
-                    shear_maps[i, 1],
-                    density_w[j],
-                    shear_w[i],
-                    sumofweights=1.0,
+            sum_ba = corr.backend.to_numpy(
+                corr._get_xipm_sumofweights(
+                    corr.backend.to_device(shear_w[j]),
+                    corr.backend.to_device(density_w[i]),
                 )
-                sum_ba = corr.backend.to_numpy(
-                    corr._get_xipm_sumofweights(
-                        corr.backend.to_device(density_w[j]),
-                        corr.backend.to_device(shear_w[i]),
-                    )
-                ).reshape(corr.n_patches, corr.nbins)
-                expected = np.zeros_like(num_ab)
-                denom = sum_ab + sum_ba
-                nonzero = denom != 0
-                expected[nonzero] = (
-                    num_ab[nonzero] + num_ba[nonzero]
-                ) / denom[nonzero]
+            ).reshape(corr.n_patches, corr.nbins)
+
+            expected = np.zeros_like(num_ab)
+            sum_total = sum_ab + sum_ba
+            nonzero = sum_total != 0
+            expected[nonzero] = num_ab[nonzero] / sum_total[nonzero]
 
             np.testing.assert_allclose(out[k], expected)
 
@@ -1278,6 +1268,312 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_maps,
                 density_w,
                 shear_w,
+            )
+
+    def test_vectorized_density_shear_invalid_shear_shape_raises(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 3, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "shear_maps must have shape"):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+            )
+
+    def test_normalize_tomo_sumofweights_per_comb_branches(self):
+        corr = self._make_small_cpu_corr()
+        nzbin_combs = 3
+
+        out_scalar = corr._normalize_tomo_sumofweights_per_comb(2.0, nzbin_combs)
+        self.assertEqual(corr.backend.to_numpy(out_scalar).shape, (3, 1))
+
+        out_1d_combs = corr._normalize_tomo_sumofweights_per_comb(
+            np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            nzbin_combs,
+        )
+        self.assertEqual(corr.backend.to_numpy(out_1d_combs).shape, (3, 1))
+
+        out_1d_flat = corr._normalize_tomo_sumofweights_per_comb(
+            np.array([1.0, 2.0, 3.0], dtype=np.float64).reshape(-1),
+            nzbin_combs,
+        )
+        self.assertEqual(corr.backend.to_numpy(out_1d_flat).shape, (3, 1))
+
+        out_2d = corr._normalize_tomo_sumofweights_per_comb(
+            np.array([[1.0], [2.0], [3.0]], dtype=np.float64),
+            nzbin_combs,
+        )
+        self.assertEqual(corr.backend.to_numpy(out_2d).shape, (3, 1))
+
+        out_3d = corr._normalize_tomo_sumofweights_per_comb(
+            np.array([[[1.0]], [[2.0]], [[3.0]]], dtype=np.float64),
+            nzbin_combs,
+        )
+        self.assertEqual(corr.backend.to_numpy(out_3d).shape, (3, 1))
+
+        corr_nbins2 = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=2,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        out_single_flat = corr_nbins2._normalize_tomo_sumofweights_per_comb(
+            np.array([4.0, 5.0], dtype=np.float64),
+            1,
+        )
+        self.assertEqual(corr_nbins2.backend.to_numpy(out_single_flat).shape, (1, 2))
+
+        out_single_2d = corr_nbins2._normalize_tomo_sumofweights_per_comb(
+            np.array([[6.0, 7.0]], dtype=np.float64),
+            1,
+        )
+        self.assertEqual(corr_nbins2.backend.to_numpy(out_single_2d).shape, (1, 2))
+
+        corr_two_patches = Correlation(
+            nside=1,
+            phi_center=np.array([0.0, 1.0]),
+            theta_center=np.array([0.0, 0.5]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        out_flat_full = corr_two_patches._normalize_tomo_sumofweights_per_comb(
+            np.arange(6, dtype=np.float64),
+            3,
+        )
+        self.assertEqual(corr_two_patches.backend.to_numpy(out_flat_full).shape, (3, 2))
+
+        out_single_patchbin = corr_two_patches._normalize_tomo_sumofweights_per_comb(
+            np.array([[8.0], [9.0]], dtype=np.float64),
+            1,
+        )
+        self.assertEqual(corr_two_patches.backend.to_numpy(out_single_patchbin).shape, (1, 2))
+
+        with self.assertRaisesRegex(ValueError, "sumofweights must be scalar"):
+            corr_nbins2._normalize_tomo_sumofweights_per_comb(
+                np.ones((2, 2), dtype=np.float64),
+                1,
+            )
+
+    def test_normalize_tomo_sumofweights_directional_branches(self):
+        corr = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=2,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+
+        directional = np.array([[[1.0, 2.0]], [[3.0, 4.0]]], dtype=np.float64)
+        out_dir = corr._normalize_tomo_sumofweights_directional(directional, 1)
+        self.assertEqual(corr.backend.to_numpy(out_dir).shape, (2, 1, 2))
+
+        out_shared = corr._normalize_tomo_sumofweights_directional(5.0, 1)
+        shared_np = corr.backend.to_numpy(out_shared)
+        self.assertEqual(shared_np.shape, (2, 1, 2))
+        np.testing.assert_allclose(shared_np[0], shared_np[1])
+
+    def test_density_density_tomo_vectorized_prepare_and_missing_kernel(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        weights = np.ones((2, 12), dtype=np.float64)
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+
+        corr.inds_dev = None
+        with patch.object(corr, "prepare", wraps=corr.prepare) as spy_prepare:
+            out = corr._density_density_tomo_vectorized(
+                density_maps,
+                weights,
+                None,
+                nzbins,
+                nzbin_combs,
+            )
+            spy_prepare.assert_called_once()
+        self.assertEqual(out.shape, (nzbin_combs, corr.n_patches, corr.nbins))
+
+        corr.backend.kernel_density_density_tomo_vectorized = None
+        with self.assertRaisesRegex(RuntimeError, "density-density tomography kernel"):
+            corr._density_density_tomo_vectorized(
+                density_maps,
+                weights,
+                None,
+                nzbins,
+                nzbin_combs,
+            )
+
+    def test_density_density_tomo_vectorized_non_numpy_launch_paths(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        weights = np.ones((2, 12), dtype=np.float64)
+        nzbins = 2
+        nzbin_combs = int(binom(nzbins + 1, 2))
+
+        class FakeBackend:
+            name = "cupy"
+            module = np
+            add = np.add
+
+            @staticmethod
+            def to_device(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def to_numpy(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def zeros(shape, dtype):
+                return np.zeros(shape, dtype=dtype)
+
+            @staticmethod
+            def kernel_density_density_tomo_vectorized(*_args):
+                out_num = _args[-1]
+                out_num[:] = 2.0
+                return True
+
+        corr.backend = FakeBackend()
+        out = corr._density_density_tomo_vectorized(
+            density_maps,
+            weights,
+            np.ones((2, nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
+            nzbins,
+            nzbin_combs,
+        )
+        self.assertEqual(out.shape, (nzbin_combs, corr.n_patches, corr.nbins))
+
+        corr.backend.kernel_density_density_tomo_vectorized = staticmethod(lambda *_: False)
+        with self.assertRaisesRegex(RuntimeError, "declined vectorized density-density"):
+            corr._density_density_tomo_vectorized(
+                density_maps,
+                weights,
+                np.ones((2, nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
+                nzbins,
+                nzbin_combs,
+            )
+
+    def test_density_shear_tomo_vectorized_prepare_missing_and_non_numpy_paths(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+        nzbins = 2
+
+        corr.inds_dev = None
+        with patch.object(corr, "prepare", wraps=corr.prepare) as spy_prepare:
+            out = corr._density_shear_tomo_vectorized(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                None,
+                nzbins,
+            )
+            spy_prepare.assert_called_once()
+        self.assertEqual(out.shape, (3, corr.n_patches, corr.nbins))
+
+        corr.backend.kernel_density_shear_tomo_vectorized = None
+        with self.assertRaisesRegex(RuntimeError, "density-shear tomography kernel"):
+            corr._density_shear_tomo_vectorized(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                None,
+                nzbins,
+            )
+
+        class FakeBackend:
+            name = "cupy"
+            module = np
+            add = np.add
+
+            @staticmethod
+            def to_device(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def to_numpy(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def zeros(shape, dtype):
+                return np.zeros(shape, dtype=dtype)
+
+            @staticmethod
+            def kernel_density_shear_tomo_vectorized(*_args):
+                out_num = _args[-1]
+                out_num[:] = 3.0
+                return True
+
+        corr = self._make_small_cpu_corr()
+        corr.backend = FakeBackend()
+        out_dir = corr._density_shear_tomo_vectorized(
+            density_maps,
+            shear_maps,
+            density_w,
+            shear_w,
+            np.ones((2, 3, corr.n_patches, corr.nbins), dtype=np.float64),
+            nzbins,
+        )
+        self.assertEqual(out_dir.shape, (3, corr.n_patches, corr.nbins))
+
+        out_per_comb = corr._density_shear_tomo_vectorized(
+            density_maps,
+            shear_maps,
+            density_w,
+            shear_w,
+            np.ones(3, dtype=np.float64),
+            nzbins,
+        )
+        self.assertEqual(out_per_comb.shape, (3, corr.n_patches, corr.nbins))
+
+        corr.backend.kernel_density_shear_tomo_vectorized = staticmethod(lambda *_: False)
+        with self.assertRaisesRegex(RuntimeError, "declined vectorized density-shear"):
+            corr._density_shear_tomo_vectorized(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                None,
+                nzbins,
+            )
+
+    def test_get_full_tomo_sumofweights_validation_errors(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        w = np.ones((2, 12), dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "at least two dimensions"):
+            corr.get_full_tomo(
+                shear_maps,
+                w,
+                sumofweights=np.array([1.0], dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "first dimensions"):
+            corr.get_full_tomo(
+                shear_maps,
+                w,
+                sumofweights=np.ones((1, 3, 1), dtype=np.float64),
             )
 
     def test_get_3x2pt_tomo_raises_when_no_maps(self):
@@ -1488,7 +1784,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                     w_l[ind_i]
                     * w_s[ind_j]
                     * d_l[ind_i]
-                    * (-(g1_s[ind_j] * exp_j.real + g2_s[ind_j] * exp_j.imag))
+                    * (g1_s[ind_j] * exp_j.real + g2_s[ind_j] * exp_j.imag)
                 )
 
         corr.backend = FakeBackend()

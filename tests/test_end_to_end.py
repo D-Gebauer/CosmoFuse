@@ -265,12 +265,12 @@ class TestEndToEnd(unittest.TestCase):
             self.w2,
         )
 
-        #self.assertAlmostEqual(
-        #    np.abs(1 - (gamma_t / self.gammat_treecorr_cross)).max(), 0.0, delta=1e-6
-        #)
-        #self.assertAlmostEqual(
-        #    np.abs(gamma_t - self.gammat_treecorr_cross).max(), 0.0, delta=1e-10
-        #)
+        self.assertAlmostEqual(
+            np.abs(1 - (gamma_t / self.gammat_treecorr_cross)).max(), 0.0, delta=1e-6
+        )
+        self.assertAlmostEqual(
+            np.abs(gamma_t - self.gammat_treecorr_cross).max(), 0.0, delta=1e-10
+        )
 
     def test_end_to_end_correlations(self):
         self.find_pairs()
