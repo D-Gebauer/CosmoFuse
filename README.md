@@ -10,9 +10,27 @@ A package for efficiently measuring integrated 3-point correlation functions on 
 
 The integrated 3-point correlation function probes squeezed configurations of the bispectrum without the computational expense of the full 3-point correlation function.
 
+## i3PCF Notation (Halder et al. 2023)
+
+- $g$: galaxy density / aperture number-count field at the center
+- $a$: aperture mass field at the center
+- $+$ / $-$: shear 2PCFs, $\xi_+$ and $\xi_-$, on the annulus
+- $t$: tangential shear $\gamma_t$ on the annulus
+
+Supported i3PCFs (counting $\pm$ separately):
+
+- $\zeta_{g,+}$
+- $\zeta_{g,-}$
+- $\zeta_{a,+}$
+- $\zeta_{a,-}$
+- $\zeta_{g,g}$
+- $\zeta_{a,g}$
+- $\zeta_{g,t}$
+- $\zeta_{a,t}$
+
 ### 1. Cosmic Shear ($\zeta_\pm$)
 
-The shear i3PCF is calculated as the covariance between the aperture mass $M_{ap}$ and the shear 2PCFs $\xi_\pm$:
+The shear i3PCF is calculated as the correlation between the aperture mass $M_{ap}$ and the shear 2PCFs $\xi_\pm$:
 
 $$ \zeta_{\pm} = \langle M_{ap} \xi_{\pm} \rangle $$
 
@@ -26,7 +44,7 @@ $$ \xi_+ = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2^*}}{\sum_{\text{pairs}}{w_1
 
 ### 2. Galaxy Clustering ($\zeta_{clust}$)
 
-The clustering i3PCF is the covariance between aperture number counts $N_{ap}$ and angular clustering $w(\theta)$:
+The clustering i3PCF is the correlation between aperture number counts $N_{ap}$ and angular clustering $w(\theta)$:
 
 $$ \zeta_{clust} = \langle N_{ap} w(\theta) \rangle $$
 
@@ -108,9 +126,9 @@ The package supports 3 main probes: Cosmic Shear, Galaxy Clustering, and Galaxy-
 
 | Probe | Aperture Quantity | 2-Point Correlation | Inputs |
 | :--- | :--- | :--- | :--- |
-| **Shear** | Aperture Mass ($M_{ap}$) | Shear 2PCF ($\xi_\pm$) | Shear maps ($g_1, g_2$), Weights ($w$) |
-| **Clustering** | Aperture Count ($N_{ap}$) | Angular Clustering ($w(\theta)$) | Density maps ($\delta$ or counts), Weights ($w$) |
-| **GGL** | Aperture Count ($N_{ap}$) | Tangential Shear ($\gamma_t$) | Lens density + Source shear |
+| **Shear** | Aperture Mass ($M_a$) | Shear 2PCF ($\xi_\pm$) | Shear maps ($g_1, g_2$), Weights ($w$) |
+| **Clustering** | Aperture Count ($M_g$) | Angular Clustering ($\xi_g$) | Density maps ($\delta$ or counts), Weights ($w$) |
+| **GGL** | Aperture Count ($M_g$) | Tangential Shear ($\xi_t$) | Lens density + Source shear |
 
 #### 1. Single Map Pair (Patch-Level)
 
@@ -119,25 +137,25 @@ Calculate quantities for a single pair of maps (e.g. one tomographic bin pair).
 **Cosmic Shear**:
 ```python
 # Aperture Mass
-M_ap = correlation.get_aperture_shear(g1, g2, w)
+M_a = correlation.get_aperture_shear(g1, g2, w)
 # Shear 2PCF
-xip, xim = correlation.compute_shear_shear(g1_a, g2_a, g1_b, g2_b, w_a, w_b)
+xi_p, xi_m = correlation.compute_shear_shear(g1_a, g2_a, g1_b, g2_b, w_a, w_b)
 ```
 
 **Galaxy Clustering**:
 ```python
 # Aperture Number Count
-N_ap = correlation.get_aperture_density(delta, w)
+M_g = correlation.get_aperture_density(delta, w)
 # Angular Clustering
-wtheta, = correlation.compute_density_density(delta_a, delta_b, w_a, w_b)
+xi_g, = correlation.compute_density_density(delta_a, delta_b, w_a, w_b)
 ```
 
 **Galaxy-Galaxy Lensing**:
 ```python
 # Aperture Number Count (Lenses)
-N_ap = correlation.get_aperture_density(delta_lens, w_lens)
+M_g = correlation.get_aperture_density(delta_lens, w_lens)
 # Tangential Shear
-gammat, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_lens, w_source)
+xi_t, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_lens, w_source)
 ```
 
 #### 2. Full Tomography (3x2pt)
@@ -148,40 +166,40 @@ Calculate all correlations for all requested tomographic bin combinations at onc
 
 *Cosmic Shear*:
 ```python
-# Returns: xip, xim
-xip, xim = correlation.vectorized_shear_shear(shear_maps, weights)
+# Returns: xi_p, xi_m
+xi_p, xi_m = correlation.vectorized_shear_shear(shear_maps, weights)
 
 # Full shear tomography (includes aperture mass)
-M_ap, xip, xim = correlation.get_full_tomo_shear(shear_maps, weights)
+M_a, xi_p, xi_m = correlation.get_full_tomo_shear(shear_maps, weights)
 ```
 
 *Galaxy Clustering*:
 ```python
-# Returns: wtheta
-wtheta = correlation.vectorized_density_density(density_maps, weights)
+# Returns: xi_g
+xi_g = correlation.vectorized_density_density(density_maps, weights)
 
 # Full clustering tomography (includes aperture counts)
-N_ap, wtheta = correlation.get_full_tomo_density(density_maps, weights)
+M_g, xi_g = correlation.get_full_tomo_density(density_maps, weights)
 ```
 
 *Galaxy-Galaxy Lensing*:
 ```python
-# Returns: gammat (Lens->Source combinations)
-gammat = correlation.vectorized_density_shear(
+# Returns: xi_t (Lens->Source combinations)
+xi_t = correlation.vectorized_density_shear(
     density_maps, shear_maps, density_weights, shear_weights
 )
 
-# Full GGL helper; by default returns only gammat
-gammat = correlation.get_full_tomo_ggl(
+# Full GGL helper; by default returns only xi_t
+xi_t = correlation.get_full_tomo_ggl(
     density_maps, shear_maps, density_weights, shear_weights
 )
 
-# Optional extras: also return N_ap and/or M_ap
-gammat, N_ap = correlation.get_full_tomo_ggl(
+# Optional extras: also return M_g and/or M_a
+xi_t, M_g = correlation.get_full_tomo_ggl(
     density_maps, shear_maps, density_weights, shear_weights,
     return_N_ap=True,
 )
-gammat, N_ap, M_ap = correlation.get_full_tomo_ggl(
+xi_t, M_g, M_a = correlation.get_full_tomo_ggl(
     density_maps, shear_maps, density_weights, shear_weights,
     return_N_ap=True,
     return_M_ap=True,
@@ -195,7 +213,7 @@ gammat, N_ap, M_ap = correlation.get_full_tomo_ggl(
 # density_maps: [nzbins_d, npix] or None
 # weights:      dict of weights or None
 
-M_ap, N_ap, xip, xim, wtheta, gammat = correlation.get_3x2pt_tomo(
+M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
     shear_maps=shear_maps,
     density_maps=density_maps,
     weights={"shear": shear_w, "density": density_w},
@@ -204,60 +222,42 @@ M_ap, N_ap, xip, xim, wtheta, gammat = correlation.get_3x2pt_tomo(
 
 ## Calculating i3PCFs
 
-The integrated 3-point correlation functions can be calculated from the aperture masses/counts and 2PCFs using `CosmoFuse.correlation_helpers`.
-
-### Shear i3PCF ($\zeta_\pm$)
-
-Covariance between Aperture Mass ($M_{ap}$) and Shear 2PCF ($\xi_\pm$).
+The 8 i3PCFs can be computed with `CosmoFuse.correlation_helpers`:
 
 ```python
-from CosmoFuse.correlation_helpers import zeta_shear
+from CosmoFuse.correlation_helpers import (
+    zeta_g_plus, zeta_g_minus, zeta_a_plus, zeta_a_minus,
+    zeta_g_g, zeta_a_g, zeta_g_t, zeta_a_t,
+)
 
-# M_ap shape: (nmaps, nzbins, npatches)
-# xip/xim shape: (nmaps, n_correlations, npatches, nbins)
-zetap, zetam = zeta_shear(M_ap, xip, xim)
+# Central fields (nmaps, nzbins, npatches)
+# M_g: galaxy-density-like center field
+# M_a: aperture-mass center field
+
+# Annulus fields (nmaps, n_correlations, npatches, nbins)
+# xi_p: xi_plus, xi_m: xi_minus, xi_g: galaxy auto-correlation, xi_t: tangential shear
+
+zg_plus = zeta_g_plus(M_g, xi_p)
+zg_minus = zeta_g_minus(M_g, xi_m)
+za_plus = zeta_a_plus(M_a, xi_p)
+za_minus = zeta_a_minus(M_a, xi_m)
+zg_g = zeta_g_g(M_g, xi_g)
+za_g = zeta_a_g(M_a, xi_g)
+zg_t = zeta_g_t(M_g, xi_t)
+za_t = zeta_a_t(M_a, xi_t)
 ```
 
-### Clustering i3PCF ($\zeta_{clust}$)
-
-Covariance between Aperture Number Count ($N_{ap}$) and Angular Clustering ($w(\theta)$).
-
-```python
-from CosmoFuse.correlation_helpers import zeta_clust
-
-# N_ap shape: (nmaps, nzbins, npatches)
-# w shape: (nmaps, n_correlations, npatches, nbins)
-zeta_c = zeta_clust(N_ap, w)
-```
-
-### GGL i3PCF ($\zeta_{ggl}$)
-
-Covariance between Aperture Number Count ($N_{ap}$) and GGL Shear ($\gamma_t$).
-
-```python
-from CosmoFuse.correlation_helpers import zeta_ggl
-
-# N_ap shape: (nmaps, n_lens_bins, npatches)
-# gammat shape: (nmaps, n_ggl_pairs, npatches, nbins)
-zeta_g = zeta_ggl(N_ap, gammat, lens_bins=nzbins_l, source_bins=nzbins_s)
-```
-
-### Unified Calculation
-
-You can also calculate all available i3PCFs at once:
+Unified helper:
 
 ```python
 from CosmoFuse.correlation_helpers import calculate_all_zetas
 
 results = calculate_all_zetas(
-    M_ap=M_ap, xip=xip, xim=xim,
-    N_ap=N_ap, w=w,
-    gammat=gammat, lens_bins=nzbins_l, source_bins=nzbins_s
+    M_g=M_g,
+    M_a=M_a,
+    xi_p=xi_p,
+    xi_m=xi_m,
+    xi_g=xi_g,
+    xi_t=xi_t,
 )
-
-# Access results
-zetap = results.get('zetap')
-zetam = results.get('zetam')
-zeta_c = results.get('zeta_clust')
-zeta_g = results.get('zeta_ggl')
 ```

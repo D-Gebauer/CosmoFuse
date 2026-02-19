@@ -40,235 +40,145 @@ def _get_pair_index(nbins: int, i: int, j: int) -> int:
     return idx
 
 
-def zeta_shear(
-    M_ap: np.ndarray, xip: np.ndarray, xim: np.ndarray
+def _validate_and_cast_fields(
+    central_field: np.ndarray,
+    annulus_field: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Calculate the i3PCF from aperture mass and local 2PCF.
+    central = np.asarray(central_field)
+    annulus = np.asarray(annulus_field)
 
-    Calculates the integrated 3-point correlation function (i3PCF) which is the
-    covariance between the aperture mass M_ap in one bin and the 2-point correlation
-    function xi+/- in two other bins.
+    if central.ndim != 3:
+        raise ValueError(
+            "central_field must have shape (nmaps, nzbins, n_patches); "
+            f"got {central.shape}"
+        )
+    if annulus.ndim != 4:
+        raise ValueError(
+            "annulus_field must have shape (nmaps, n_correlations, n_patches, nbins); "
+            f"got {annulus.shape}"
+        )
 
-    Args:
-        M_ap (np.ndarray): Aperture mass, shape:(nmaps, n_zbins, n_patches)
-        xip (np.ndarray): Shear 2PCF, shape:(nmaps, n_correlations, n_patches, nbins)
-        xim (np.ndarray): Shear 2PCF, shape:(nmaps, n_correlations, n_patches, nbins)
+    if central.shape[0] != annulus.shape[0]:
+        raise ValueError(
+            "central_field and annulus_field must have the same number of maps; "
+            f"got {central.shape[0]} and {annulus.shape[0]}"
+        )
+    if central.shape[2] != annulus.shape[2]:
+        raise ValueError(
+            "central_field and annulus_field must share n_patches; "
+            f"got {central.shape[2]} and {annulus.shape[2]}"
+        )
 
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: The i3PCF zetap & zetam.
-                                       Shape: (nmaps, n_zbin_combinations, nbins)
-    """
-    nmaps = M_ap.shape[0]
-    nzbins = M_ap.shape[1]
-    nbins = xip.shape[3]
-    
-    # Generate all combinations of (z1, z2, z3)
-    # z1 is for M_ap, (z2, z3) is for xi
-    zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
-    n_zeta_combs = len(zeta_combs)
+    nzbins = central.shape[1]
+    expected_pairs = nzbins * (nzbins + 1) // 2
+    if annulus.shape[1] != expected_pairs:
+        raise ValueError(
+            "annulus_field has incompatible number of tomographic pairs; "
+            f"expected {expected_pairs} for {nzbins} bins, got {annulus.shape[1]}"
+        )
 
-    zetap = np.zeros((nmaps, n_zeta_combs, nbins))
-    zetam = np.zeros((nmaps, n_zeta_combs, nbins))
-
-    for k, (z1, z2, z3) in enumerate(zeta_combs):
-        # Find index for the pair (z2, z3) in the correlation vector
-        pair_idx = _get_pair_index(nzbins, z2, z3)
-        
-        # Calculate covariance: <A * B> - <A><B>
-        # A = M_ap[:, z1, :]
-        # B = xi[:, pair_idx, :]
-        
-        mean_Map = np.mean(M_ap[:, z1, :], axis=1) # (nmaps,)
-        mean_xip = np.mean(xip[:, pair_idx], axis=1) # (nmaps, nbins)
-        mean_xim = np.mean(xim[:, pair_idx], axis=1) # (nmaps, nbins)
-        
-        term1_p = np.mean(M_ap[:, z1, :, None] * xip[:, pair_idx], axis=1)
-        term1_m = np.mean(M_ap[:, z1, :, None] * xim[:, pair_idx], axis=1)
-        
-        zetap[:, k, :] = term1_p - mean_Map[:, None] * mean_xip
-        zetam[:, k, :] = term1_m - mean_Map[:, None] * mean_xim
-
-    return zetap, zetam
+    return central, annulus
 
 
-def zeta_clust(
-    N_ap: np.ndarray, w: np.ndarray
+def _zeta_from_fields(
+    central_field: np.ndarray,
+    annulus_field: np.ndarray,
 ) -> np.ndarray:
-    """Calculate the Clustering i3PCF.
-    
-    Covariance between Aperture Number Count (N_ap) and Angular Clustering (w).
-
-    Args:
-        N_ap (np.ndarray): Aperture number count, shape:(nmaps, n_zbins, n_patches)
-        w (np.ndarray): Angular clustering, shape:(nmaps, n_correlations, n_patches, nbins)
-
-    Returns:
-        np.ndarray: The clustering i3PCF. Shape: (nmaps, n_zbin_combinations, nbins)
-    """
-    nmaps = N_ap.shape[0]
-    nzbins = N_ap.shape[1]
-    nbins = w.shape[3]
-    
-    # Generate all combinations of (z1, z2, z3)
+    """Compute i3PCF covariance between a central field and annular 2PCF field."""
+    central, annulus = _validate_and_cast_fields(central_field, annulus_field)
+    nmaps, nzbins, _ = central.shape
+    nbins = annulus.shape[3]
     zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
-    n_zeta_combs = len(zeta_combs)
 
-    zeta_c = np.zeros((nmaps, n_zeta_combs, nbins))
+    out = np.zeros(
+        (nmaps, len(zeta_combs), nbins),
+        dtype=np.result_type(central.dtype, annulus.dtype),
+    )
 
-    for k, (z1, z2, z3) in enumerate(zeta_combs):
+    for k, (z_center, z2, z3) in enumerate(zeta_combs):
         pair_idx = _get_pair_index(nzbins, z2, z3)
-        
-        mean_Nap = np.mean(N_ap[:, z1, :], axis=1)
-        mean_w = np.mean(w[:, pair_idx], axis=1)
-        
-        term1 = np.mean(N_ap[:, z1, :, None] * w[:, pair_idx], axis=1)
-        
-        zeta_c[:, k, :] = term1 - mean_Nap[:, None] * mean_w
+        center_vals = central[:, z_center, :]
+        annulus_vals = annulus[:, pair_idx, :, :]
 
-    return zeta_c
+        mean_center = np.mean(center_vals, axis=1)
+        mean_annulus = np.mean(annulus_vals, axis=1)
+        mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+
+        out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
+
+    return out
 
 
-def zeta_ggl(
-    N_ap: np.ndarray, 
-    gammat: np.ndarray, 
-    lens_bins: int,
-    source_bins: int
-) -> np.ndarray:
-    """Calculate the Galaxy-Galaxy Lensing i3PCF.
-    
-    Covariance between Aperture Number Count (N_ap) and GGL Shear (gamma_t).
+def zeta_g_plus(M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+    """g at center, xi+ at annulus."""
+    return _zeta_from_fields(M_g, xi_p)
 
-    Args:
-        N_ap (np.ndarray): Aperture number count (lenses), shape:(nmaps, n_lens_bins, n_patches)
-        gammat (np.ndarray): GGL Shear, shape:(nmaps, n_ggl_pairs, n_patches, nbins)
-        lens_bins (int): Number of lens bins
-        source_bins (int): Number of source bins
 
-    Returns:
-        np.ndarray: The GGL i3PCF. Shape: (nmaps, n_combinations, nbins)
-                    Output combinations are all (z_lens_Map, z_lens_GGL, z_source_GGL)
-                    where z_lens_GGL <= z_source_GGL typically, but we iterate available pairs.
-    """
-    nmaps = N_ap.shape[0]
-    nbins = gammat.shape[3]
-    
-    # GGL pairs are typically (lens, source) combinations.
-    # Assuming gammat is ordered as:
-    # (L0, S0), (L0, S1), ..., (L0, Sn), (L1, S1), ..., (Ln, Sn)
-    # i.e., Loop Lens i: Loop Source j >= i
-    # We need to reconstruct this mapping or assume inputs match a specific convention.
-    
-    # Let's iterate over ALL valid triples (z1, z2, z3) where:
-    # z1 is index in N_ap (lens bin)
-    # (z2, z3) corresponds to a GGL pair index.
-    # z2 is lens bin for gammat, z3 is source bin for gammat.
-    
-    # First, let's map pair (z2, z3) to flat index.
-    # We assume standard Upper Triangular ordering for pairs if lens_bins == source_bins
-    # OR if they are different, we need to know the exact storage convention.
-    # Assuming standard CosmoFuse/CosmoLike convention: lens < source usually, or lens <= source.
-    # Here we assume the input `gammat` contains pairs generated by:
-    # for i in range(lens_bins): for j in range(source_bins): (maybe with j>=i condition?)
-    
-    # To keep it generic to the likely usage in CosmoFuse (based on correlations.py):
-    # It likely computes all requested pairs.
-    # Let's assume (Lens, Source) pairs are stored in the same order as `_get_pair_index` 
-    # if lens_bins == source_bins, or a full rectangle if not.
-    # Given the previous context, let's assume `_get_pair_index` logic applies 
-    # (upper triangular) for lens <= source.
-    
-    # We will generate (z1, z2, z3) where:
-    # z1 in range(lens_bins)
-    # z2 in range(lens_bins)
-    # z3 in range(source_bins)
-    # AND z2 <= z3 (to match typical GGL storage)
-    
-    zeta_combinations = []
-    pair_indices = []
-    
-    current_pair_idx = 0
-    # Assuming stored as: for i in 0..lens: for j in 0..source: if j >= i: ...
-    # This matches `_get_pair_index` if lens_bins == source_bins.
-    # If lens_bins != source_bins, `_get_pair_index` might not be correct if it assumes square symmetric matrix.
-    # But typically GGL uses the same bins for lenses and sources in 3x2pt, or distinct.
-    # If distinct, the ordering is usually full rectangle? 
-    # Let's proceed with the assumption of upper triangular (z2 <= z3) 
-    # matching the correlation_helpers.py context.
-    
-    idx_map = {}
-    k = 0
-    for i in range(lens_bins):
-        start_j = i # assume Source >= Lens
-        for j in range(start_j, source_bins):
-            idx_map[(i, j)] = k
-            k += 1
-            
-    # Triples: (Map_Bin, GGL_Lens_Bin, GGL_Source_Bin)
-    results = []
-    
-    zetag = np.zeros((nmaps, lens_bins * k, nbins)) # approximate size, refined below
-    
-    out_idx = 0
-    for z1 in range(lens_bins):
-        for z2 in range(lens_bins):
-            for z3 in range(source_bins):
-                if (z2, z3) in idx_map:
-                    pair_idx = idx_map[(z2, z3)]
-                    
-                    mean_Nap = np.mean(N_ap[:, z1, :], axis=1)
-                    mean_gammat = np.mean(gammat[:, pair_idx], axis=1)
-                    
-                    term1 = np.mean(N_ap[:, z1, :, None] * gammat[:, pair_idx], axis=1)
-                    
-                    zetag[:, out_idx, :] = term1 - mean_Nap[:, None] * mean_gammat
-                    out_idx += 1
-                    
-    return zetag[: , :out_idx, :]
+def zeta_g_minus(M_g: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+    """g at center, xi- at annulus."""
+    return _zeta_from_fields(M_g, xi_m)
+
+
+def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+    """a at center, xi+ at annulus."""
+    return _zeta_from_fields(M_a, xi_p)
+
+
+def zeta_a_minus(M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+    """a at center, xi- at annulus."""
+    return _zeta_from_fields(M_a, xi_m)
+
+
+def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+    """g at center, galaxy auto-correlation at annulus."""
+    return _zeta_from_fields(M_g, xi_g)
+
+
+def zeta_a_g(M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+    """a at center, galaxy auto-correlation at annulus."""
+    return _zeta_from_fields(M_a, xi_g)
+
+
+def zeta_g_t(M_g: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+    """g at center, tangential shear gamma_t at annulus."""
+    return _zeta_from_fields(M_g, xi_t)
+
+
+def zeta_a_t(M_a: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+    """a at center, tangential shear gamma_t at annulus."""
+    return _zeta_from_fields(M_a, xi_t)
 
 
 def calculate_all_zetas(
-    M_ap: Optional[np.ndarray] = None,
-    xip: Optional[np.ndarray] = None,
-    xim: Optional[np.ndarray] = None,
-    N_ap: Optional[np.ndarray] = None,
-    w: Optional[np.ndarray] = None,
-    gammat: Optional[np.ndarray] = None,
-    lens_bins: Optional[int] = None,
-    source_bins: Optional[int] = None,
+    M_g: Optional[np.ndarray] = None,
+    M_a: Optional[np.ndarray] = None,
+    xi_p: Optional[np.ndarray] = None,
+    xi_m: Optional[np.ndarray] = None,
+    xi_g: Optional[np.ndarray] = None,
+    xi_t: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
-    """Calculate all integrated 3-point correlation functions (i3PCFs).
+    """Calculate all supported i3PCFs in Halder et al. notation.
 
-    Args:
-        M_ap: Aperture mass (for zeta_shear).
-        xip: Shear 2PCF + (for zeta_shear).
-        xim: Shear 2PCF - (for zeta_shear).
-        N_ap: Aperture number count (for zeta_clust and zeta_ggl).
-        w: Angular clustering (for zeta_clust).
-        gammat: GGL Shear (for zeta_ggl).
-        lens_bins: Number of lens bins (for zeta_ggl).
-        source_bins: Number of source bins (for zeta_ggl).
-
-    Returns:
-        Dict[str, np.ndarray]: Dictionary containing computed zetas keys:
-            - 'zetap'
-            - 'zetam'
-            - 'zeta_clust'
-            - 'zeta_ggl'
-            If inputs for a specific zeta are missing, that key will not be present.
+    Keys in the returned dictionary are exactly the implemented helper names.
     """
-    results = {}
+    results: Dict[str, np.ndarray] = {}
 
-    if M_ap is not None and xip is not None and xim is not None:
-        zp, zm = zeta_shear(M_ap, xip, xim)
-        results['zetap'] = zp
-        results['zetam'] = zm
-
-    if N_ap is not None and w is not None:
-        zc = zeta_clust(N_ap, w)
-        results['zeta_clust'] = zc
-
-    if N_ap is not None and gammat is not None and lens_bins is not None and source_bins is not None:
-        zg = zeta_ggl(N_ap, gammat, lens_bins, source_bins)
-        results['zeta_ggl'] = zg
+    if M_g is not None and xi_p is not None:
+        results["zeta_g_plus"] = zeta_g_plus(M_g, xi_p)
+    if M_g is not None and xi_m is not None:
+        results["zeta_g_minus"] = zeta_g_minus(M_g, xi_m)
+    if M_a is not None and xi_p is not None:
+        results["zeta_a_plus"] = zeta_a_plus(M_a, xi_p)
+    if M_a is not None and xi_m is not None:
+        results["zeta_a_minus"] = zeta_a_minus(M_a, xi_m)
+    if M_g is not None and xi_g is not None:
+        results["zeta_g_g"] = zeta_g_g(M_g, xi_g)
+    if M_a is not None and xi_g is not None:
+        results["zeta_a_g"] = zeta_a_g(M_a, xi_g)
+    if M_g is not None and xi_t is not None:
+        results["zeta_g_t"] = zeta_g_t(M_g, xi_t)
+    if M_a is not None and xi_t is not None:
+        results["zeta_a_t"] = zeta_a_t(M_a, xi_t)
 
     return results
+

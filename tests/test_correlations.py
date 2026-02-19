@@ -15,6 +15,16 @@ from scipy.special import binom
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 import CosmoFuse.correlations as correlations_module
+from CosmoFuse.correlation_helpers import (
+    zeta_a_g as helper_zeta_a_g,
+    zeta_a_minus as helper_zeta_a_minus,
+    zeta_a_plus as helper_zeta_a_plus,
+    zeta_a_t as helper_zeta_a_t,
+    zeta_g_g as helper_zeta_g_g,
+    zeta_g_minus as helper_zeta_g_minus,
+    zeta_g_plus as helper_zeta_g_plus,
+    zeta_g_t as helper_zeta_g_t,
+)
 from CosmoFuse.correlations import Correlation
 from CosmoFuse.utils import pixel2RaDec
 
@@ -2804,6 +2814,87 @@ class TestCorrelationCoverage(unittest.TestCase):
         with patch.object(self.corr, "prepare", wraps=self.corr.prepare) as spy_prepare:
             self.corr.vectorized_shear_shear(shear_maps, w)
             spy_prepare.assert_called_once()
+
+    def test_i3pcf_wrapper_methods_match_helpers(self):
+        corr = self._make_small_cpu_corr()
+        rng = np.random.default_rng(123)
+
+        nmaps, nzbins, npatches, nbins = 2, 2, 4, 3
+        npairs = nzbins * (nzbins + 1) // 2
+        M_g = rng.normal(size=(nmaps, nzbins, npatches))
+        M_a = rng.normal(size=(nmaps, nzbins, npatches))
+        xi_p = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_m = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_g = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_t = rng.normal(size=(nmaps, npairs, npatches, nbins))
+
+        np.testing.assert_allclose(
+            corr.zeta_g_plus(M_g, xi_p),
+            helper_zeta_g_plus(M_g, xi_p),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_g_minus(M_g, xi_m),
+            helper_zeta_g_minus(M_g, xi_m),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_a_plus(M_a, xi_p),
+            helper_zeta_a_plus(M_a, xi_p),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_a_minus(M_a, xi_m),
+            helper_zeta_a_minus(M_a, xi_m),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_g_g(M_g, xi_g),
+            helper_zeta_g_g(M_g, xi_g),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_a_g(M_a, xi_g),
+            helper_zeta_a_g(M_a, xi_g),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_g_t(M_g, xi_t),
+            helper_zeta_g_t(M_g, xi_t),
+        )
+        np.testing.assert_allclose(
+            corr.zeta_a_t(M_a, xi_t),
+            helper_zeta_a_t(M_a, xi_t),
+        )
+
+    def test_calculate_all_zetas_api_uses_explicit_center_annulus_names(self):
+        corr = self._make_small_cpu_corr()
+        rng = np.random.default_rng(456)
+
+        nmaps, nzbins, npatches, nbins = 2, 2, 4, 3
+        npairs = nzbins * (nzbins + 1) // 2
+        M_g = rng.normal(size=(nmaps, nzbins, npatches))
+        M_a = rng.normal(size=(nmaps, nzbins, npatches))
+        xi_p = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_m = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_g = rng.normal(size=(nmaps, npairs, npatches, nbins))
+        xi_t = rng.normal(size=(nmaps, npairs, npatches, nbins))
+
+        all_zetas = corr.calculate_all_zetas(
+            M_g=M_g,
+            M_a=M_a,
+            xi_p=xi_p,
+            xi_m=xi_m,
+            xi_g=xi_g,
+            xi_t=xi_t,
+        )
+        self.assertEqual(
+            set(all_zetas.keys()),
+            {
+                "zeta_g_plus",
+                "zeta_g_minus",
+                "zeta_a_plus",
+                "zeta_a_minus",
+                "zeta_g_g",
+                "zeta_a_g",
+                "zeta_g_t",
+                "zeta_a_t",
+            },
+        )
 
 
 if __name__ == "__main__":

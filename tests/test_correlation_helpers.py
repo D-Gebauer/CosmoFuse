@@ -1,6 +1,17 @@
 import numpy as np
 import pytest
-from CosmoFuse.correlation_helpers import zeta_shear, zeta_clust, zeta_ggl, _get_pair_index, calculate_all_zetas
+from CosmoFuse.correlation_helpers import (
+    _get_pair_index,
+    calculate_all_zetas,
+    zeta_a_g,
+    zeta_a_minus,
+    zeta_a_plus,
+    zeta_a_t,
+    zeta_g_g,
+    zeta_g_minus,
+    zeta_g_plus,
+    zeta_g_t,
+)
 
 def test_get_pair_index():
     # nbins = 3
@@ -13,95 +24,96 @@ def test_get_pair_index():
     assert _get_pair_index(3, 1, 2) == 4
     assert _get_pair_index(3, 2, 2) == 5
 
-def test_zeta_shear_shape_and_logic():
+
+def _reference_zeta(center, annulus):
+    nmaps, nzbins, _ = center.shape
+    nbins = annulus.shape[3]
+    out = np.zeros((nmaps, int((nzbins + 2) * (nzbins + 1) * nzbins / 6), nbins))
+    k = 0
+    for z1 in range(nzbins):
+        for z2 in range(z1, nzbins):
+            for z3 in range(z2, nzbins):
+                pair_idx = _get_pair_index(nzbins, z2, z3)
+                c = center[:, z1, :]
+                a = annulus[:, pair_idx, :, :]
+                out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(
+                    c, axis=1
+                )[:, None] * np.mean(a, axis=1)
+                k += 1
+    return out
+
+
+def test_all_8_zeta_variants_match_reference():
     nmaps = 2
     nzbins = 2
-    npatches = 10
+    npatches = 9
     nbins = 5
-    
-    # 2 bins: pairs are (0,0), (0,1), (1,1) -> 3 pairs
-    npairs = 3
-    
-    M_ap = np.random.randn(nmaps, nzbins, npatches)
-    xip = np.random.randn(nmaps, npairs, npatches, nbins)
-    xim = np.random.randn(nmaps, npairs, npatches, nbins)
-    
-    zetap, zetam = zeta_shear(M_ap, xip, xim)
-    
-    # Combinations of 3 from 2 bins: (0,0,0), (0,0,1), (0,1,1), (1,1,1) -> 4 combs 
-    assert zetap.shape == (nmaps, 4, nbins)
-    assert zetam.shape == (nmaps, 4, nbins)
+    npairs = nzbins * (nzbins + 1) // 2
 
-def test_zeta_clust_shape():
-    nmaps = 2
-    nzbins = 2
-    npatches = 10
-    nbins = 5
-    npairs = 3 # (0,0), (0,1), (1,1)
-    
-    N_ap = np.random.randn(nmaps, nzbins, npatches)
-    w = np.random.randn(nmaps, npairs, npatches, nbins)
-    
-    zeta_c = zeta_clust(N_ap, w)
-    
-    # 4 combs for 2 bins
-    assert zeta_c.shape == (nmaps, 4, nbins)
+    rng = np.random.default_rng(0)
+    M_g = rng.normal(size=(nmaps, nzbins, npatches))
+    M_a = rng.normal(size=(nmaps, nzbins, npatches))
+    xi_p = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_m = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_g = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_t = rng.normal(size=(nmaps, npairs, npatches, nbins))
 
-def test_zeta_ggl_shape():
-    nmaps = 2
-    lens_bins = 2
-    source_bins = 2
-    npatches = 10
-    nbins = 5
-    
-    # GGL pairs:
-    # L0S0, L0S1, L1S1 -> 3 pairs (if L<=S)
-    nggl_pairs = 3 
-    
-    N_ap = np.random.randn(nmaps, lens_bins, npatches)
-    gammat = np.random.randn(nmaps, nggl_pairs, npatches, nbins)
-    
-    zetag = zeta_ggl(N_ap, gammat, lens_bins, source_bins)
-    
-    # Output combs:
-    # L0, (L0,S0) -> 0,0
-    # L0, (L0,S1) -> 0,1
-    # L0, (L1,S1) -> 0,2
-    # L1, (L0,S0) -> 1,0
-    # L1, (L0,S1) -> 1,1
-    # L1, (L1,S1) -> 1,2
-    # Total 2 * 3 = 6 combinations
-    
-    assert zetag.shape == (nmaps, 6, nbins)
+    expectations = {
+        "zeta_g_plus": (zeta_g_plus(M_g, xi_p), _reference_zeta(M_g, xi_p)),
+        "zeta_g_minus": (zeta_g_minus(M_g, xi_m), _reference_zeta(M_g, xi_m)),
+        "zeta_a_plus": (zeta_a_plus(M_a, xi_p), _reference_zeta(M_a, xi_p)),
+        "zeta_a_minus": (zeta_a_minus(M_a, xi_m), _reference_zeta(M_a, xi_m)),
+        "zeta_g_g": (zeta_g_g(M_g, xi_g), _reference_zeta(M_g, xi_g)),
+        "zeta_a_g": (zeta_a_g(M_a, xi_g), _reference_zeta(M_a, xi_g)),
+        "zeta_g_t": (zeta_g_t(M_g, xi_t), _reference_zeta(M_g, xi_t)),
+        "zeta_a_t": (zeta_a_t(M_a, xi_t), _reference_zeta(M_a, xi_t)),
+    }
+
+    for measured, expected in expectations.values():
+        assert measured.shape == (nmaps, 4, nbins)
+        np.testing.assert_allclose(measured, expected)
 
 def test_calculate_all_zetas():
     nmaps = 2
     nzbins = 2
     npatches = 10
     nbins = 5
-    npairs = 3
-    nggl_pairs = 3
-    
-    M_ap = np.random.randn(nmaps, nzbins, npatches)
-    xip = np.random.randn(nmaps, npairs, npatches, nbins)
-    xim = np.random.randn(nmaps, npairs, npatches, nbins)
-    N_ap = np.random.randn(nmaps, nzbins, npatches)
-    w = np.random.randn(nmaps, npairs, npatches, nbins)
-    gammat = np.random.randn(nmaps, nggl_pairs, npatches, nbins)
-    
-    # Test partial inputs (only shear)
-    res = calculate_all_zetas(M_ap=M_ap, xip=xip, xim=xim)
-    assert 'zetap' in res
-    assert 'zetam' in res
-    assert 'zeta_clust' not in res
-    
-    # Test all inputs
-    res_all = calculate_all_zetas(
-        M_ap=M_ap, xip=xip, xim=xim,
-        N_ap=N_ap, w=w,
-        gammat=gammat, lens_bins=nzbins, source_bins=nzbins
+    npairs = nzbins * (nzbins + 1) // 2
+
+    rng = np.random.default_rng(1)
+    g = rng.normal(size=(nmaps, nzbins, npatches))
+    a = rng.normal(size=(nmaps, nzbins, npatches))
+    xi_p = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_m = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_g = rng.normal(size=(nmaps, npairs, npatches, nbins))
+    xi_t = rng.normal(size=(nmaps, npairs, npatches, nbins))
+
+    partial = calculate_all_zetas(M_g=g, xi_p=xi_p, xi_m=xi_m)
+    assert set(partial.keys()) == {"zeta_g_plus", "zeta_g_minus"}
+
+    full = calculate_all_zetas(
+        M_g=g,
+        M_a=a,
+        xi_p=xi_p,
+        xi_m=xi_m,
+        xi_g=xi_g,
+        xi_t=xi_t,
     )
-    assert 'zetap' in res_all
-    assert 'zeta_clust' in res_all
-    assert 'zeta_ggl' in res_all
+    assert set(full.keys()) == {
+        "zeta_g_plus",
+        "zeta_g_minus",
+        "zeta_a_plus",
+        "zeta_a_minus",
+        "zeta_g_g",
+        "zeta_a_g",
+        "zeta_g_t",
+        "zeta_a_t",
+    }
+
+
+def test_shape_validation_raises_value_error():
+    M_g = np.zeros((2, 2, 4))
+    bad_annulus = np.zeros((2, 2, 5, 3))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, bad_annulus)
 

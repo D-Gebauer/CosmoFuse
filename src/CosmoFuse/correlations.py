@@ -11,7 +11,18 @@ from scipy.special import binom
 from tqdm import trange
 
 from .backend import get_backend
-from .correlation_helpers import Q_T
+from .correlation_helpers import (
+    Q_T,
+    calculate_all_zetas as _calculate_all_zetas_helper,
+    zeta_a_g as _zeta_a_g_helper,
+    zeta_a_minus as _zeta_a_minus_helper,
+    zeta_a_plus as _zeta_a_plus_helper,
+    zeta_a_t as _zeta_a_t_helper,
+    zeta_g_g as _zeta_g_g_helper,
+    zeta_g_minus as _zeta_g_minus_helper,
+    zeta_g_plus as _zeta_g_plus_helper,
+    zeta_g_t as _zeta_g_t_helper,
+)
 from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
@@ -654,7 +665,7 @@ class Correlation:
             [],
         )
 
-        for i in trange(self.n_patches, desc="M_ap data", unit=" patches"):
+        for i in trange(self.n_patches, desc="M_a data", unit=" patches"):
             Q_cos, Q_sin, Q_val, Q_inds, Q_patch_area = self.__get_pairs_M_a_helper__(
                 i
             )
@@ -1811,8 +1822,8 @@ class Correlation:
                 "Tomographic fused-reduction kernel unavailable for this backend."
             )
 
-        xip, xim = vectorized_xipm
-        return np.real(self.backend.to_numpy(xip)), np.real(self.backend.to_numpy(xim))
+        xi_p, xi_m = vectorized_xipm
+        return np.real(self.backend.to_numpy(xi_p)), np.real(self.backend.to_numpy(xi_m))
 
     def _compute_tomo_aperture_shear(
         self,
@@ -1831,14 +1842,14 @@ class Correlation:
         if flip_g2:
             g2_fac = -1
 
-        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        M_a = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
         for i in range(nzbins):
-            M_ap[i] = self.get_aperture_shear(
+            M_a[i] = self.get_aperture_shear(
                 g1_fac * shear_maps_np[i, 0],
                 g2_fac * shear_maps_np[i, 1],
                 w_np[i],
             )
-        return M_ap
+        return M_a
 
     def _compute_tomo_aperture_density(
         self,
@@ -1848,10 +1859,10 @@ class Correlation:
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
 
-        N_ap = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
+        M_g = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
         for i in range(density_np.shape[0]):
-            N_ap[i] = self.get_aperture_density(density_np[i], w_np[i])
-        return N_ap
+            M_g[i] = self.get_aperture_density(density_np[i], w_np[i])
+        return M_g
 
     def get_full_tomo_shear(
         self,
@@ -1861,23 +1872,23 @@ class Correlation:
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute full shear tomography outputs: M_ap, xi+, xi-."""
+        """Compute full shear tomography outputs: M_a, xi_p, xi_m."""
         shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
-        M_ap = self._compute_tomo_aperture_shear(
+        M_a = self._compute_tomo_aperture_shear(
             shear_maps_np,
             w_np,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
         )
-        xip, xim = self.vectorized_shear_shear(
+        xi_p, xi_m = self.vectorized_shear_shear(
             shear_maps_np,
             w_np,
             sumofweights=sumofweights,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
         )
-        return M_ap, xip, xim
+        return M_a, xi_p, xi_m
 
     def get_full_tomo_density(
         self,
@@ -1885,16 +1896,16 @@ class Correlation:
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute full density tomography outputs: N_ap, w(theta)."""
+        """Compute full density tomography outputs: M_g, xi_g."""
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
-        N_ap = self._compute_tomo_aperture_density(density_np, w_np)
-        wtheta = self.vectorized_density_density(
+        M_g = self._compute_tomo_aperture_density(density_np, w_np)
+        xi_g = self.vectorized_density_density(
             density_np,
             w_np,
             sumofweights=sumofweights,
         )
-        return N_ap, wtheta
+        return M_g, xi_g
 
     def get_full_tomo_ggl(
         self,
@@ -1915,17 +1926,17 @@ class Correlation:
         """Compute full GGL tomography output.
 
         Returns:
-            - ``gammat`` by default.
-            - ``(gammat, N_ap)`` if ``return_N_ap=True``.
-            - ``(gammat, M_ap)`` if ``return_M_ap=True``.
-            - ``(gammat, N_ap, M_ap)`` if both flags are ``True``.
+            - ``xi_t`` by default.
+            - ``(xi_t, M_g)`` if ``return_N_ap=True``.
+            - ``(xi_t, M_a)`` if ``return_M_ap=True``.
+            - ``(xi_t, M_g, M_a)`` if both flags are ``True``.
         """
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
         density_w_np = np.asarray(density_weights, dtype=self.map_dtype)
         shear_w_np = np.asarray(shear_weights, dtype=self.map_dtype)
 
-        gammat = self.vectorized_density_shear(
+        xi_t = self.vectorized_density_shear(
             density_np,
             shear_np,
             density_w_np,
@@ -1934,9 +1945,9 @@ class Correlation:
         )
 
         if not return_N_ap and not return_M_ap:
-            return gammat
+            return xi_t
 
-        outputs: List[np.ndarray] = [gammat]
+        outputs: List[np.ndarray] = [xi_t]
         if return_N_ap:
             outputs.append(self._compute_tomo_aperture_density(density_np, density_w_np))
         if return_M_ap:
@@ -2219,6 +2230,57 @@ class Correlation:
         )
         return np.real(self.backend.to_numpy(gammat))
 
+    def zeta_g_plus(self, M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+        """Compute zeta_g_plus with g at center and xi+ on annulus."""
+        return _zeta_g_plus_helper(M_g, xi_p)
+
+    def zeta_g_minus(self, M_g: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+        """Compute zeta_g_minus with g at center and xi- on annulus."""
+        return _zeta_g_minus_helper(M_g, xi_m)
+
+    def zeta_a_plus(self, M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+        """Compute zeta_a_plus with a at center and xi+ on annulus."""
+        return _zeta_a_plus_helper(M_a, xi_p)
+
+    def zeta_a_minus(self, M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+        """Compute zeta_a_minus with a at center and xi- on annulus."""
+        return _zeta_a_minus_helper(M_a, xi_m)
+
+    def zeta_g_g(self, M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+        """Compute zeta_g_g with g at center and galaxy auto-correlation on annulus."""
+        return _zeta_g_g_helper(M_g, xi_g)
+
+    def zeta_a_g(self, M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+        """Compute zeta_a_g with a at center and galaxy auto-correlation on annulus."""
+        return _zeta_a_g_helper(M_a, xi_g)
+
+    def zeta_g_t(self, M_g: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+        """Compute zeta_g_t with g at center and tangential shear on annulus."""
+        return _zeta_g_t_helper(M_g, xi_t)
+
+    def zeta_a_t(self, M_a: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+        """Compute zeta_a_t with a at center and tangential shear on annulus."""
+        return _zeta_a_t_helper(M_a, xi_t)
+
+    def calculate_all_zetas(
+        self,
+        M_g: Optional[np.ndarray] = None,
+        M_a: Optional[np.ndarray] = None,
+        xi_p: Optional[np.ndarray] = None,
+        xi_m: Optional[np.ndarray] = None,
+        xi_g: Optional[np.ndarray] = None,
+        xi_t: Optional[np.ndarray] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Calculate all supported i3PCFs with explicit center/annulus naming."""
+        return _calculate_all_zetas_helper(
+            M_g=M_g,
+            M_a=M_a,
+            xi_p=xi_p,
+            xi_m=xi_m,
+            xi_g=xi_g,
+            xi_t=xi_t,
+        )
+
     def get_3x2pt_tomo(
         self,
         shear_maps: Optional[np.ndarray] = None,
@@ -2273,30 +2335,30 @@ class Correlation:
             if shear_w is None:
                 shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
             shear_w = np.asarray(shear_w, dtype=self.map_dtype)
-            M_ap, xip, xim = self.get_full_tomo_shear(shear_np, shear_w)
+            M_a, xi_p, xi_m = self.get_full_tomo_shear(shear_np, shear_w)
         else:
-            M_ap = None
-            xip = None
-            xim = None
+            M_a = None
+            xi_p = None
+            xi_m = None
 
         if density_np is not None:
             if density_w is None:
                 density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
             density_w = np.asarray(density_w, dtype=self.map_dtype)
-            N_ap, wtheta = self.get_full_tomo_density(density_np, density_w)
+            M_g, xi_g = self.get_full_tomo_density(density_np, density_w)
         else:
-            N_ap = None
-            wtheta = None
+            M_g = None
+            xi_g = None
 
         if density_np is not None and shear_np is not None:
-            gammat = self.vectorized_density_shear(
+            xi_t = self.vectorized_density_shear(
                 density_np,
                 shear_np,
                 density_w,
                 shear_w,
             )
         else:
-            gammat = None
+            xi_t = None
 
-        return M_ap, N_ap, xip, xim, wtheta, gammat
+        return M_a, M_g, xi_p, xi_m, xi_g, xi_t
 
