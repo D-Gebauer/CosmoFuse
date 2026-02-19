@@ -5,7 +5,12 @@ This package provides tools for calculating integrated 3-point correlation funct
 on GPU/CPU, with support for shear measurements and aperture mass calculations.
 """
 
-from .correlation_helpers import zeta
+from .correlation_helpers import (
+    calculate_all_zetas,
+    zeta_shear,
+    zeta_clust,
+    zeta_ggl,
+)
 from .correlations import Correlation
 from .utils import pixel2RaDec
 
@@ -15,6 +20,9 @@ __email__ = "git@gebauer.ai"
 
 __all__ = [
     "Correlation",
-    "zeta",
+    "calculate_all_zetas",
+    "zeta_shear",
+    "zeta_clust",
+    "zeta_ggl",
     "pixel2RaDec",
 ]
