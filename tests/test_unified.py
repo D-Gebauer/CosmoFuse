@@ -195,7 +195,8 @@ class TestUnifiedCorrelation(unittest.TestCase):
         shear_maps = np.ones((2, 2, npix), dtype=np.float64)
         w = np.ones((2, npix), dtype=np.float64)
 
-        M_ap, xip, xim = corr.vectorized_shear_shear(shear_maps, w)
+        xip, xim = corr.vectorized_shear_shear(shear_maps, w)
+        M_ap, _xip_full, _xim_full = corr.get_full_tomo_shear(shear_maps, w)
 
         self.assertEqual(M_ap.dtype, np.float32)
         self.assertEqual(xip.dtype, np.float32)

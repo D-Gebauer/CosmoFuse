@@ -1739,8 +1739,8 @@ class Correlation:
         sumofweights: Optional[np.ndarray] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute M_ap, xi+, and xi- for full tomography.
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute tomographic shear 2PCFs xi+/xi-.
 
         If ``sumofweights`` is provided explicitly, weight fingerprint/cache
         checks are bypassed.
@@ -1797,14 +1797,6 @@ class Correlation:
         if flip_g2:
             g2_fac = -1
 
-        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
-        for i in range(nzbins):
-            M_ap[i] = self.get_aperture_shear(
-                g1_fac * shear_maps_np[i, 0],
-                g2_fac * shear_maps_np[i, 1],
-                w_np[i],
-            )
-
         vectorized_xipm = self._xipm_tomo_vectorized(
             shear_maps_dev,
             w_dev,
@@ -1820,7 +1812,144 @@ class Correlation:
             )
 
         xip, xim = vectorized_xipm
-        return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
+        return np.real(self.backend.to_numpy(xip)), np.real(self.backend.to_numpy(xim))
+
+    def _compute_tomo_aperture_shear(
+        self,
+        shear_maps: np.ndarray,
+        w: np.ndarray,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> np.ndarray:
+        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        nzbins = shear_maps_np.shape[0]
+
+        g1_fac, g2_fac = 1, 1
+        if flip_g1:
+            g1_fac = -1
+        if flip_g2:
+            g2_fac = -1
+
+        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        for i in range(nzbins):
+            M_ap[i] = self.get_aperture_shear(
+                g1_fac * shear_maps_np[i, 0],
+                g2_fac * shear_maps_np[i, 1],
+                w_np[i],
+            )
+        return M_ap
+
+    def _compute_tomo_aperture_density(
+        self,
+        density_maps: np.ndarray,
+        w: np.ndarray,
+    ) -> np.ndarray:
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+
+        N_ap = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
+        for i in range(density_np.shape[0]):
+            N_ap[i] = self.get_aperture_density(density_np[i], w_np[i])
+        return N_ap
+
+    def get_full_tomo_shear(
+        self,
+        shear_maps: np.ndarray,
+        w: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute full shear tomography outputs: M_ap, xi+, xi-."""
+        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        M_ap = self._compute_tomo_aperture_shear(
+            shear_maps_np,
+            w_np,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
+        )
+        xip, xim = self.vectorized_shear_shear(
+            shear_maps_np,
+            w_np,
+            sumofweights=sumofweights,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
+        )
+        return M_ap, xip, xim
+
+    def get_full_tomo_density(
+        self,
+        density_maps: np.ndarray,
+        w: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute full density tomography outputs: N_ap, w(theta)."""
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        N_ap = self._compute_tomo_aperture_density(density_np, w_np)
+        wtheta = self.vectorized_density_density(
+            density_np,
+            w_np,
+            sumofweights=sumofweights,
+        )
+        return N_ap, wtheta
+
+    def get_full_tomo_ggl(
+        self,
+        density_maps: np.ndarray,
+        shear_maps: np.ndarray,
+        density_weights: np.ndarray,
+        shear_weights: np.ndarray,
+        sumofweights: Optional[np.ndarray] = None,
+        return_N_ap: bool = False,
+        return_M_ap: bool = False,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> Union[
+        np.ndarray,
+        Tuple[np.ndarray, np.ndarray],
+        Tuple[np.ndarray, np.ndarray, np.ndarray],
+    ]:
+        """Compute full GGL tomography output.
+
+        Returns:
+            - ``gammat`` by default.
+            - ``(gammat, N_ap)`` if ``return_N_ap=True``.
+            - ``(gammat, M_ap)`` if ``return_M_ap=True``.
+            - ``(gammat, N_ap, M_ap)`` if both flags are ``True``.
+        """
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        density_w_np = np.asarray(density_weights, dtype=self.map_dtype)
+        shear_w_np = np.asarray(shear_weights, dtype=self.map_dtype)
+
+        gammat = self.vectorized_density_shear(
+            density_np,
+            shear_np,
+            density_w_np,
+            shear_w_np,
+            sumofweights=sumofweights,
+        )
+
+        if not return_N_ap and not return_M_ap:
+            return gammat
+
+        outputs: List[np.ndarray] = [gammat]
+        if return_N_ap:
+            outputs.append(self._compute_tomo_aperture_density(density_np, density_w_np))
+        if return_M_ap:
+            outputs.append(
+                self._compute_tomo_aperture_shear(
+                    shear_np,
+                    shear_w_np,
+                    flip_g1=flip_g1,
+                    flip_g2=flip_g2,
+                )
+            )
+
+        return tuple(outputs)
 
     def _density_density_tomo_vectorized(
         self,
@@ -2101,6 +2230,7 @@ class Correlation:
         Optional[np.ndarray],
         Optional[np.ndarray],
         Optional[np.ndarray],
+        Optional[np.ndarray],
     ]:
         if shear_maps is None and density_maps is None:
             raise ValueError("At least one of shear_maps or density_maps must be provided.")
@@ -2143,20 +2273,17 @@ class Correlation:
             if shear_w is None:
                 shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
             shear_w = np.asarray(shear_w, dtype=self.map_dtype)
-            M_ap, xip, _xim = self.vectorized_shear_shear(shear_np, shear_w)
-            xipm = xip
+            M_ap, xip, xim = self.get_full_tomo_shear(shear_np, shear_w)
         else:
             M_ap = None
-            xipm = None
+            xip = None
+            xim = None
 
         if density_np is not None:
             if density_w is None:
                 density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
             density_w = np.asarray(density_w, dtype=self.map_dtype)
-            N_ap = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
-            for i in range(density_np.shape[0]):
-                N_ap[i] = self.get_aperture_density(density_np[i], density_w[i])
-            wtheta = self.vectorized_density_density(density_np, density_w)
+            N_ap, wtheta = self.get_full_tomo_density(density_np, density_w)
         else:
             N_ap = None
             wtheta = None
@@ -2171,5 +2298,5 @@ class Correlation:
         else:
             gammat = None
 
-        return M_ap, N_ap, xipm, wtheta, gammat
+        return M_ap, N_ap, xip, xim, wtheta, gammat
 

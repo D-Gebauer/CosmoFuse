@@ -148,14 +148,20 @@ Calculate all correlations for all requested tomographic bin combinations at onc
 
 *Cosmic Shear*:
 ```python
-# Returns: M_ap, xip, xim
-M_ap, xip, xim = correlation.vectorized_shear_shear(shear_maps, weights)
+# Returns: xip, xim
+xip, xim = correlation.vectorized_shear_shear(shear_maps, weights)
+
+# Full shear tomography (includes aperture mass)
+M_ap, xip, xim = correlation.get_full_tomo_shear(shear_maps, weights)
 ```
 
 *Galaxy Clustering*:
 ```python
 # Returns: wtheta
 wtheta = correlation.vectorized_density_density(density_maps, weights)
+
+# Full clustering tomography (includes aperture counts)
+N_ap, wtheta = correlation.get_full_tomo_density(density_maps, weights)
 ```
 
 *Galaxy-Galaxy Lensing*:
@@ -163,6 +169,22 @@ wtheta = correlation.vectorized_density_density(density_maps, weights)
 # Returns: gammat (Lens->Source combinations)
 gammat = correlation.vectorized_density_shear(
     density_maps, shear_maps, density_weights, shear_weights
+)
+
+# Full GGL helper; by default returns only gammat
+gammat = correlation.get_full_tomo_ggl(
+    density_maps, shear_maps, density_weights, shear_weights
+)
+
+# Optional extras: also return N_ap and/or M_ap
+gammat, N_ap = correlation.get_full_tomo_ggl(
+    density_maps, shear_maps, density_weights, shear_weights,
+    return_N_ap=True,
+)
+gammat, N_ap, M_ap = correlation.get_full_tomo_ggl(
+    density_maps, shear_maps, density_weights, shear_weights,
+    return_N_ap=True,
+    return_M_ap=True,
 )
 ```
 
@@ -173,7 +195,7 @@ gammat = correlation.vectorized_density_shear(
 # density_maps: [nzbins_d, npix] or None
 # weights:      dict of weights or None
 
-M_ap, N_ap, xipm, wtheta, gammat = correlation.get_3x2pt_tomo(
+M_ap, N_ap, xip, xim, wtheta, gammat = correlation.get_3x2pt_tomo(
     shear_maps=shear_maps,
     density_maps=density_maps,
     weights={"shear": shear_w, "density": density_w},
