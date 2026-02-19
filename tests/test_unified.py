@@ -73,7 +73,7 @@ class TestUnifiedCorrelation(unittest.TestCase):
         with self.assertRaises(ValueError):
             corr._normalize_xipm_sumofweights(np.ones(3))
 
-    def test_get_full_tomo_sumofweights_validation(self):
+    def test_vectorized_shear_shear_sumofweights_validation(self):
         corr = Correlation(
             nside=self.nside,
             phi_center=self.phi_center,
@@ -99,10 +99,10 @@ class TestUnifiedCorrelation(unittest.TestCase):
         w = np.ones((1, npix), dtype=np.float64)
 
         with self.assertRaises(ValueError):
-            corr.get_full_tomo(shear_maps, w, sumofweights=1.0)
+            corr.vectorized_shear_shear(shear_maps, w, sumofweights=1.0)
 
         with self.assertRaises(ValueError):
-            corr.get_full_tomo(shear_maps, w, sumofweights=np.ones((1, 1, 2)))
+            corr.vectorized_shear_shear(shear_maps, w, sumofweights=np.ones((1, 1, 2)))
 
     def test_prepare_on_demand_paths(self):
         corr = Correlation(
@@ -195,7 +195,7 @@ class TestUnifiedCorrelation(unittest.TestCase):
         shear_maps = np.ones((2, 2, npix), dtype=np.float64)
         w = np.ones((2, npix), dtype=np.float64)
 
-        M_ap, xip, xim = corr.get_full_tomo(shear_maps, w)
+        M_ap, xip, xim = corr.vectorized_shear_shear(shear_maps, w)
 
         self.assertEqual(M_ap.dtype, np.float32)
         self.assertEqual(xip.dtype, np.float32)

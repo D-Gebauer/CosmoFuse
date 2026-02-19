@@ -149,7 +149,7 @@ Calculate all correlations for all requested tomographic bin combinations at onc
 *Cosmic Shear*:
 ```python
 # Returns: M_ap, xip, xim
-M_ap, xip, xim = correlation.get_full_tomo(shear_maps, weights)
+M_ap, xip, xim = correlation.vectorized_shear_shear(shear_maps, weights)
 ```
 
 *Galaxy Clustering*:

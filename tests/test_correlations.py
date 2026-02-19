@@ -340,6 +340,92 @@ class TestCorrelation(unittest.TestCase):
 
         self.assertEqual(len(outputs), 7)
 
+    def test_compute_pairs_numba_pyfunc_r2_c1_zero_fallback(self):
+        """Trigger fallback branch where R2_C1 == 0 and default exp(2i phi1) is used."""
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.0, 0.0], dtype=np.float64)
+        dec = np.array([np.pi / 2, 0.0], dtype=np.float64)
+        binedges = np.array([0.1, 1.0, 2.0], dtype=np.float64)
+        kernel_fn = getattr(
+            correlations_module._compute_pairs_numba,
+            "py_func",
+            correlations_module._compute_pairs_numba,
+        )
+        original_cos = correlations_module.np.cos
+
+        def fake_cos(x):
+            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
+                out = original_cos(x).copy()
+                out[np.isclose(x, np.pi / 2)] = 0.0
+                return out
+            if np.isscalar(x) and np.isclose(x, np.pi / 2):
+                return 0.0
+            return original_cos(x)
+
+        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
+            (
+                inds_a,
+                inds_b,
+                _bin_indices,
+                exp2phi1_real,
+                exp2phi1_imag,
+                _exp2phi2_real,
+                _exp2phi2_imag,
+            ) = kernel_fn(
+                patch_inds,
+                ra,
+                dec,
+                binedges,
+            )
+
+        self.assertEqual(inds_a.size, 1)
+        self.assertEqual(inds_b.size, 1)
+        self.assertEqual(exp2phi1_real[0], -1.0)
+        self.assertEqual(exp2phi1_imag[0], 0.0)
+
+    def test_compute_pairs_numba_pyfunc_r2_c2_zero_fallback(self):
+        """Trigger fallback branch where R2_C2 == 0 and default exp(2i phi2) is used."""
+        patch_inds = np.array([0, 1], dtype=np.uint32)
+        ra = np.array([0.0, 0.0], dtype=np.float64)
+        dec = np.array([0.0, np.pi / 2], dtype=np.float64)
+        binedges = np.array([0.1, 1.0, 2.0], dtype=np.float64)
+        kernel_fn = getattr(
+            correlations_module._compute_pairs_numba,
+            "py_func",
+            correlations_module._compute_pairs_numba,
+        )
+        original_cos = correlations_module.np.cos
+
+        def fake_cos(x):
+            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
+                out = original_cos(x).copy()
+                out[np.isclose(x, np.pi / 2)] = 0.0
+                return out
+            if np.isscalar(x) and np.isclose(x, np.pi / 2):
+                return 0.0
+            return original_cos(x)
+
+        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
+            (
+                inds_a,
+                inds_b,
+                _bin_indices,
+                _exp2phi1_real,
+                _exp2phi1_imag,
+                exp2phi2_real,
+                exp2phi2_imag,
+            ) = kernel_fn(
+                patch_inds,
+                ra,
+                dec,
+                binedges,
+            )
+
+        self.assertEqual(inds_a.size, 1)
+        self.assertEqual(inds_b.size, 1)
+        self.assertEqual(exp2phi2_real[0], -1.0)
+        self.assertEqual(exp2phi2_imag[0], 0.0)
+
 
 class TestCorrelationCalculations(unittest.TestCase):
     """Test the Correlation class calculation methods."""
@@ -584,8 +670,8 @@ class TestCorrelationCalculations(unittest.TestCase):
                 np.testing.assert_allclose(self.corr.Q_val[i], new_corr.Q_val[i])
                 np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
                 
-    def test_prepare_and_get_full_tomo(self):
-        """Test prepare and get_full_tomo methods."""
+    def test_prepare_and_vectorized_shear_shear(self):
+        """Test prepare and vectorized_shear_shear methods."""
         # Calculate pairs first
         with patch('healpy.query_disc') as mock_query_disc, \
              patch('CosmoFuse.correlations.pixel2RaDec') as mock_pixel2RaDec:
@@ -615,7 +701,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.ones((nzbins, self.npix))
 
-        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w)
+        M_ap, xip, xim = self.corr.vectorized_shear_shear(shear_maps, w)
 
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
@@ -911,7 +997,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
         np.testing.assert_allclose(reduced, expected)
 
-    def test_get_full_tomo_prefers_vectorized_path_when_available(self):
+    def test_vectorized_shear_shear_prefers_vectorized_path_when_available(self):
         self._setup_mock_pairs()
 
         nzbins = 2
@@ -937,7 +1023,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_xipm_cross",
             side_effect=AssertionError("_xipm_cross should not be called"),
         ):
-            _, xip, xim = self.corr.get_full_tomo(shear_maps, w)
+            _, xip, xim = self.corr.vectorized_shear_shear(shear_maps, w)
 
         spy_vectorized.assert_called_once()
         np.testing.assert_allclose(xip, xip_mock)
@@ -1099,15 +1185,24 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(normalized.shape, (corr.n_patches, corr.nbins))
         self.assertAlmostEqual(normalized[0, 0], 0.5)
 
-    def test_vectorized_shear_shear_delegates_to_full_tomo(self):
+    def test_vectorized_shear_shear_returns_full_tomo_outputs(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
+        M_ap = np.full((2, corr.n_patches), 4.0, dtype=np.float64)
         xip = np.full((3, corr.n_patches, corr.nbins), 1.5, dtype=np.float64)
         xim = np.full((3, corr.n_patches, corr.nbins), 2.5, dtype=np.float64)
 
-        with patch.object(corr, "get_full_tomo", return_value=(np.zeros((2, 1)), xip, xim)) as spy:
-            out_xip, out_xim = corr.vectorized_shear_shear(
+        with patch.object(
+            corr,
+            "_xipm_tomo_vectorized",
+            return_value=(corr.backend.to_device(xip), corr.backend.to_device(xim)),
+        ) as spy_vectorized, patch.object(
+            corr,
+            "get_aperture_shear",
+            side_effect=[M_ap[0], M_ap[1]],
+        ):
+            out_M_ap, out_xip, out_xim = corr.vectorized_shear_shear(
                 shear_maps,
                 w,
                 sumofweights=np.ones((2, 3, corr.n_patches * corr.nbins), dtype=np.float64),
@@ -1115,7 +1210,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 flip_g2=False,
             )
 
-        spy.assert_called_once()
+        spy_vectorized.assert_called_once()
+        np.testing.assert_allclose(out_M_ap, M_ap)
         np.testing.assert_allclose(out_xip, xip)
         np.testing.assert_allclose(out_xim, xim)
 
@@ -1557,20 +1653,20 @@ class TestCorrelationCoverage(unittest.TestCase):
                 nzbins,
             )
 
-    def test_get_full_tomo_sumofweights_validation_errors(self):
+    def test_vectorized_shear_shear_sumofweights_validation_errors(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
 
         with self.assertRaisesRegex(ValueError, "at least two dimensions"):
-            corr.get_full_tomo(
+            corr.vectorized_shear_shear(
                 shear_maps,
                 w,
                 sumofweights=np.array([1.0], dtype=np.float64),
             )
 
         with self.assertRaisesRegex(ValueError, "first dimensions"):
-            corr.get_full_tomo(
+            corr.vectorized_shear_shear(
                 shear_maps,
                 w,
                 sumofweights=np.ones((1, 3, 1), dtype=np.float64),
@@ -1589,7 +1685,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo",
+            "vectorized_shear_shear",
             return_value=(
                 np.full((1, corr.n_patches), 1.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
@@ -1633,7 +1729,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo",
+            "vectorized_shear_shear",
             return_value=(
                 np.full((2, corr.n_patches), 1.0, dtype=np.float64),
                 np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
@@ -1693,7 +1789,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo",
+            "vectorized_shear_shear",
             return_value=(
                 np.full((1, corr.n_patches), 1.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
@@ -1727,7 +1823,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo",
+            "vectorized_shear_shear",
             return_value=(
                 np.full((1, corr.n_patches), 1.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
@@ -1974,17 +2070,17 @@ class TestCorrelationCoverage(unittest.TestCase):
                 1,
             )
 
-    def test_get_full_tomo_raises_when_vectorized_unavailable(self):
+    def test_vectorized_shear_shear_raises_when_vectorized_unavailable(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
 
         with patch.object(corr, "_xipm_tomo_vectorized", return_value=None):
             with self.assertRaises(RuntimeError):
-                corr.get_full_tomo(shear_maps, w)
+                corr.vectorized_shear_shear(shear_maps, w)
 
-    def test_get_full_tomo_fused_cpu_assignments(self):
-        """CPU get_full_tomo should use vectorized tomography, not legacy cross kernel."""
+    def test_vectorized_shear_shear_fused_cpu_assignments(self):
+        """CPU vectorized_shear_shear should use vectorized tomography, not legacy cross kernel."""
         corr = Correlation(
             nside=1,
             phi_center=np.array([0.0]),
@@ -2054,7 +2150,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         corr.backend.xipm_cross_corr_kernel = fused_kernel
 
-        _, xip, xim = corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
+        _, xip, xim = corr.vectorized_shear_shear(shear_maps, w, sumofweights=sumofweights)
 
         self.assertFalse(called["value"])
 
@@ -2080,8 +2176,8 @@ class TestCorrelationCoverage(unittest.TestCase):
         mock_calculate_pairs_2PCF.assert_called_once_with()
         mock_prepare.assert_called_once_with()
 
-    def test_get_full_tomo(self):
-        """Test the get_full_tomo method."""
+    def test_vectorized_shear_shear(self):
+        """Test the vectorized_shear_shear method."""
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         
@@ -2089,14 +2185,14 @@ class TestCorrelationCoverage(unittest.TestCase):
         w = np.random.rand(nzbins, self.npix)
         self._setup_mock_pairs()
         
-        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w)
+        M_ap, xip, xim = self.corr.vectorized_shear_shear(shear_maps, w)
 
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
         # Test with flips
-        M_ap_f, xip_f, xim_f = self.corr.get_full_tomo(
+        M_ap_f, xip_f, xim_f = self.corr.vectorized_shear_shear(
             shear_maps, w, flip_g1=True, flip_g2=True
         )
         self.assertTrue(np.allclose(M_ap, -M_ap_f))
@@ -2117,8 +2213,8 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIsNone(self.corr.Q_inds_flat)
         self.assertIsNone(self.corr.Q_offsets)
 
-    def test_get_full_tomo_missing_fused_kernel(self):
-        """get_full_tomo should not depend on legacy fused cross kernel."""
+    def test_vectorized_shear_shear_missing_fused_kernel(self):
+        """vectorized_shear_shear should not depend on legacy fused cross kernel."""
         corr = Correlation(
             nside=1,
             phi_center=np.array([0.0]),
@@ -2147,7 +2243,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
 
-        _, xip, xim = corr.get_full_tomo(shear_maps, w)
+        _, xip, xim = corr.vectorized_shear_shear(shear_maps, w)
         self.assertEqual(xip.shape, (3, corr.n_patches, corr.nbins))
         self.assertEqual(xim.shape, (3, corr.n_patches, corr.nbins))
 
@@ -2538,7 +2634,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             finally:
                 sys.modules.pop("cupy", None)
                 sys.modules.pop(module_name, None)
-    def test_get_full_tomo_same_w_reuses_cache(self):
+    def test_vectorized_shear_shear_same_w_reuses_cache(self):
         nzbins = 2
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.random.rand(nzbins, self.npix)
@@ -2549,11 +2645,11 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_tomo_sumofweights",
             wraps=self.corr._compute_tomo_sumofweights,
         ) as spy_compute:
-            self.corr.get_full_tomo(shear_maps, w)
-            self.corr.get_full_tomo(shear_maps, w)
+            self.corr.vectorized_shear_shear(shear_maps, w)
+            self.corr.vectorized_shear_shear(shear_maps, w)
             self.assertEqual(spy_compute.call_count, 1)
 
-    def test_get_full_tomo_changed_w_recomputes(self):
+    def test_vectorized_shear_shear_changed_w_recomputes(self):
         nzbins = 2
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.random.rand(nzbins, self.npix)
@@ -2566,11 +2662,11 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_tomo_sumofweights",
             wraps=self.corr._compute_tomo_sumofweights,
         ) as spy_compute:
-            self.corr.get_full_tomo(shear_maps, w)
-            self.corr.get_full_tomo(shear_maps, w_changed)
+            self.corr.vectorized_shear_shear(shear_maps, w)
+            self.corr.vectorized_shear_shear(shear_maps, w_changed)
             self.assertEqual(spy_compute.call_count, 2)
 
-    def test_get_full_tomo_explicit_sumofweights_still_accepted(self):
+    def test_vectorized_shear_shear_explicit_sumofweights_still_accepted(self):
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         shear_maps = np.random.rand(nzbins, 2, self.npix)
@@ -2578,12 +2674,12 @@ class TestCorrelationCoverage(unittest.TestCase):
         sumofweights = np.ones((2, nzbin_combs))
         self._setup_mock_pairs()
 
-        M_ap, xip, xim = self.corr.get_full_tomo(shear_maps, w, sumofweights=sumofweights)
+        M_ap, xip, xim = self.corr.vectorized_shear_shear(shear_maps, w, sumofweights=sumofweights)
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
-    def test_get_full_tomo_explicit_sumofweights_skips_fingerprint_checks(self):
+    def test_vectorized_shear_shear_explicit_sumofweights_skips_fingerprint_checks(self):
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         shear_maps = np.random.rand(nzbins, 2, self.npix)
@@ -2601,7 +2697,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_fingerprint_weights",
             side_effect=AssertionError("fingerprint should be skipped"),
         ):
-            M_ap, xip, xim = self.corr.get_full_tomo(
+            M_ap, xip, xim = self.corr.vectorized_shear_shear(
                 shear_maps, w, sumofweights=explicit_sum
             )
 
@@ -2612,8 +2708,8 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(self.corr._tomo_sumofweights_cache_w_fingerprint, ("sentinel",))
         self.assertEqual(self.corr._tomo_sumofweights_cache_prepare_version, -1)
 
-    def test_get_full_tomo_prepares(self):
-        """Test that get_full_tomo calls prepare if needed."""
+    def test_vectorized_shear_shear_prepares(self):
+        """Test that vectorized_shear_shear calls prepare if needed."""
         self.corr.bins = [np.array([1, 0], dtype=np.uint32)]
         self.corr.pair_inds = [np.zeros((2, 1), dtype=np.uint32)]
         self.corr.pair_exp2phi = [np.zeros((2, 1), dtype=np.complex128)]
@@ -2626,7 +2722,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         shear_maps = np.random.rand(1, 2, self.npix)
         w = np.ones((1, self.npix))
         with patch.object(self.corr, "prepare", wraps=self.corr.prepare) as spy_prepare:
-            self.corr.get_full_tomo(shear_maps, w)
+            self.corr.vectorized_shear_shear(shear_maps, w)
             spy_prepare.assert_called_once()
 
 

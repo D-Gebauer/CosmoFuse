@@ -196,7 +196,7 @@ class TestEndToEnd(unittest.TestCase):
         self._ensure_mock_maperture_pairs()
         shear_maps = self.shear_maps[1:2]
         w = np.stack((self.w1,), axis=0)
-        _, xip_full, xim_full = self.corr.get_full_tomo(
+        _, xip_full, xim_full = self.corr.vectorized_shear_shear(
             shear_maps,
             w,
             flip_g1=True,
@@ -220,7 +220,7 @@ class TestEndToEnd(unittest.TestCase):
     def get_cross_correlation(self):
         self._ensure_mock_maperture_pairs()
         w = np.stack((self.w1, self.w2), axis=0)
-        _, xip_full, xim_full = self.corr.get_full_tomo(
+        _, xip_full, xim_full = self.corr.vectorized_shear_shear(
             self.shear_maps,
             w,
             flip_g1=True,

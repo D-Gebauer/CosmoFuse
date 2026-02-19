@@ -1739,15 +1739,88 @@ class Correlation:
         sumofweights: Optional[np.ndarray] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        _, xip, xim = self.get_full_tomo(
-            shear_maps,
-            w,
-            sumofweights=sumofweights,
-            flip_g1=flip_g1,
-            flip_g2=flip_g2,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute M_ap, xi+, and xi- for full tomography.
+
+        If ``sumofweights`` is provided explicitly, weight fingerprint/cache
+        checks are bypassed.
+        """
+        if self.inds_dev is None:
+            self.prepare()
+
+        nzbins = shear_maps.shape[0]
+        nzbin_combs = int(binom(nzbins + 1, 2))
+
+        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        shear_maps_dev = self.backend.to_device(shear_maps_np)
+        w_dev = self.backend.to_device(w_np)
+
+        if sumofweights is None:
+            w_fingerprint = self._fingerprint_weights(w_np)
+            cache = self._tomo_sumofweights_cache
+            cache_is_valid = (
+                cache is not None
+                and self._tomo_sumofweights_cache_w_fingerprint == w_fingerprint
+                and self._tomo_sumofweights_cache_prepare_version
+                == self._prepare_version
+                and len(cache.shape) >= 2
+                and cache.shape[0] == 2
+                and cache.shape[1] == nzbin_combs
+            )
+            if cache_is_valid:
+                sumofweights_dev = cache
+            else:
+                sumofweights_dev = self._compute_tomo_sumofweights(
+                    w_dev, nzbins, nzbin_combs
+                )
+                self._tomo_sumofweights_cache = sumofweights_dev
+                self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
+                self._tomo_sumofweights_cache_prepare_version = self._prepare_version
+        else:
+            sumofweights_np = np.asarray(sumofweights, dtype=self.map_dtype)
+            if sumofweights_np.ndim < 2:
+                raise ValueError(
+                    "sumofweights must have at least two dimensions with "
+                    "shape (2, nzbin_combs, ...)"
+                )
+            if sumofweights_np.shape[0] != 2 or sumofweights_np.shape[1] != nzbin_combs:
+                raise ValueError(
+                    f"sumofweights must have first dimensions (2, {nzbin_combs}); "
+                    f"got {sumofweights_np.shape}"
+                )
+            sumofweights_dev = self.backend.to_device(sumofweights_np)
+
+        g1_fac, g2_fac = 1, 1
+        if flip_g1:
+            g1_fac = -1
+        if flip_g2:
+            g2_fac = -1
+
+        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        for i in range(nzbins):
+            M_ap[i] = self.get_aperture_shear(
+                g1_fac * shear_maps_np[i, 0],
+                g2_fac * shear_maps_np[i, 1],
+                w_np[i],
+            )
+
+        vectorized_xipm = self._xipm_tomo_vectorized(
+            shear_maps_dev,
+            w_dev,
+            sumofweights_dev,
+            nzbins,
+            nzbin_combs,
+            g1_fac,
+            g2_fac,
         )
-        return xip, xim
+        if vectorized_xipm is None:
+            raise RuntimeError(
+                "Tomographic fused-reduction kernel unavailable for this backend."
+            )
+
+        xip, xim = vectorized_xipm
+        return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
 
     def _density_density_tomo_vectorized(
         self,
@@ -2070,7 +2143,7 @@ class Correlation:
             if shear_w is None:
                 shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
             shear_w = np.asarray(shear_w, dtype=self.map_dtype)
-            M_ap, xip, _xim = self.get_full_tomo(shear_np, shear_w)
+            M_ap, xip, _xim = self.vectorized_shear_shear(shear_np, shear_w)
             xipm = xip
         else:
             M_ap = None
@@ -2100,92 +2173,3 @@ class Correlation:
 
         return M_ap, N_ap, xipm, wtheta, gammat
 
-    def get_full_tomo(
-        self,
-        shear_maps: np.ndarray,
-        w: np.ndarray,
-        sumofweights: Optional[np.ndarray] = None,
-        flip_g1: bool = False,
-        flip_g2: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute M_ap, xi+, and xi- for full tomography.
-
-        If ``sumofweights`` is provided explicitly, weight fingerprint/cache
-        checks are bypassed.
-        """
-        if self.inds_dev is None:
-            self.prepare()
-
-        nzbins = shear_maps.shape[0]
-        nzbin_combs = int(binom(nzbins + 1, 2))
-
-        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
-        shear_maps_dev = self.backend.to_device(shear_maps_np)
-        w_dev = self.backend.to_device(w_np)
-
-        if sumofweights is None:
-            w_fingerprint = self._fingerprint_weights(w_np)
-            cache = self._tomo_sumofweights_cache
-            cache_is_valid = (
-                cache is not None
-                and self._tomo_sumofweights_cache_w_fingerprint == w_fingerprint
-                and self._tomo_sumofweights_cache_prepare_version
-                == self._prepare_version
-                and len(cache.shape) >= 2
-                and cache.shape[0] == 2
-                and cache.shape[1] == nzbin_combs
-            )
-            if cache_is_valid:
-                sumofweights_dev = cache
-            else:
-                sumofweights_dev = self._compute_tomo_sumofweights(
-                    w_dev, nzbins, nzbin_combs
-                )
-                self._tomo_sumofweights_cache = sumofweights_dev
-                self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
-                self._tomo_sumofweights_cache_prepare_version = self._prepare_version
-        else:
-            sumofweights_np = np.asarray(sumofweights, dtype=self.map_dtype)
-            if sumofweights_np.ndim < 2:
-                raise ValueError(
-                    "sumofweights must have at least two dimensions with "
-                    "shape (2, nzbin_combs, ...)"
-                )
-            if sumofweights_np.shape[0] != 2 or sumofweights_np.shape[1] != nzbin_combs:
-                raise ValueError(
-                    f"sumofweights must have first dimensions (2, {nzbin_combs}); "
-                    f"got {sumofweights_np.shape}"
-                )
-            sumofweights_dev = self.backend.to_device(sumofweights_np)
-
-        g1_fac, g2_fac = 1, 1
-        if flip_g1:
-            g1_fac = -1
-        if flip_g2:
-            g2_fac = -1
-
-        M_ap = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
-        for i in range(nzbins):
-            M_ap[i] = self.get_aperture_shear(
-                g1_fac * shear_maps_np[i, 0],
-                g2_fac * shear_maps_np[i, 1],
-                w_np[i],
-            )
-
-        vectorized_xipm = self._xipm_tomo_vectorized(
-            shear_maps_dev,
-            w_dev,
-            sumofweights_dev,
-            nzbins,
-            nzbin_combs,
-            g1_fac,
-            g2_fac,
-        )
-        if vectorized_xipm is None:
-            raise RuntimeError(
-                "Tomographic fused-reduction kernel unavailable for this backend."
-            )
-
-        xip, xim = vectorized_xipm
-        return M_ap, self.backend.to_numpy(xip), self.backend.to_numpy(xim)
