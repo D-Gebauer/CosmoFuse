@@ -10,61 +10,43 @@ A package for efficiently measuring integrated 3-point correlation functions on 
 
 The integrated 3-point correlation function probes squeezed configurations of the bispectrum without the computational expense of the full 3-point correlation function.
 
-## i3PCF Notation (Halder et al. 2023)
+### 1. Cosmic Shear ($\zeta_{a,+}$ and $\zeta_{a,-}$)
 
-- $g$: galaxy density / aperture number-count field at the center
-- $a$: aperture mass field at the center
-- $+$ / $-$: shear 2PCFs, $\xi_+$ and $\xi_-$, on the annulus
-- $t$: tangential shear $\gamma_t$ on the annulus
+The shear i3PCFs are calculated as correlations between central aperture mass $M_a$ and annular shear 2PCFs $\xi_\pm$:
 
-Supported i3PCFs (counting $\pm$ separately):
-
-- $\zeta_{g,+}$
-- $\zeta_{g,-}$
-- $\zeta_{a,+}$
-- $\zeta_{a,-}$
-- $\zeta_{g,g}$
-- $\zeta_{a,g}$
-- $\zeta_{g,t}$
-- $\zeta_{a,t}$
-
-### 1. Cosmic Shear ($\zeta_\pm$)
-
-The shear i3PCF is calculated as the correlation between the aperture mass $M_{ap}$ and the shear 2PCFs $\xi_\pm$:
-
-$$ \zeta_{\pm} = \langle M_{ap} \xi_{\pm} \rangle $$
+$$ \zeta_{a,+} = \langle M_a \, \xi_+ \rangle, \quad \zeta_{a,-} = \langle M_a \, \xi_- \rangle $$
 
 On a pixelated map, the aperture mass is calculated as:
 
-$$ M_{ap} = \frac{A \sum_{\text{p}}{w_p g_t Q_p}}{\sum_{\text{p}}{w_p}} $$
+$$ M_a = \frac{A \sum_{\text{p}}{w_p g_t Q_p}}{\sum_{\text{p}}{w_p}} $$
 
 where $g_t$ is the tangential shear. The shear 2PCFs are calculated as:
 
 $$ \xi_+ = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2^*}}{\sum_{\text{pairs}}{w_1 w_2}}, \quad \xi_- = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
 
-### 2. Galaxy Clustering ($\zeta_{clust}$)
+### 2. Galaxy Clustering ($\zeta_{g,g}$)
 
-The clustering i3PCF is the correlation between aperture number counts $N_{ap}$ and angular clustering $w(\theta)$:
+The clustering i3PCF is the correlation between central aperture count $M_g$ and annular galaxy auto-correlation $\xi_g$:
 
-$$ \zeta_{clust} = \langle N_{ap} w(\theta) \rangle $$
+$$ \zeta_{g,g} = \langle M_g \, \xi_g \rangle $$
 
 The aperture number count is given by:
 
-$$ N_{ap} = \frac{A \sum_{\text{p}}{w_p \delta_g Q_p}}{\sum_{\text{p}}{w_p}} $$
+$$ M_g = \frac{A \sum_{\text{p}}{w_p \delta_g Q_p}}{\sum_{\text{p}}{w_p}} $$
 
-where $\delta_g$ is the galaxy overdensity (or counts). The angular clustering is:
+where $\delta_g$ is the galaxy overdensity (or counts). The annular galaxy auto-correlation is:
 
-$$ w(\theta) = \frac{\sum_{\text{pairs}}{w_1 w_2 \delta_1 \delta_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
+$$ \xi_g = \frac{\sum_{\text{pairs}}{w_1 w_2 \delta_1 \delta_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
 
-### 3. Galaxy-Galaxy Lensing ($\zeta_{ggl}$)
+### 3. Galaxy-Galaxy Lensing ($\zeta_{g,t}$)
 
-The GGL i3PCF couples aperture number counts (lenses) with tangential shear (sources):
+The GGL i3PCF couples central aperture count (lenses) with annular tangential shear (sources):
 
-$$ \zeta_{ggl} = \langle N_{ap} \gamma_t(\theta) \rangle $$
+$$ \zeta_{g,t} = \langle M_g \, \xi_t \rangle $$
 
-where $N_{ap}$ is calculated on the lens map as above. The tangential shear is:
+where $M_g$ is calculated on the lens map as above. The tangential shear estimator is:
 
-$$ \gamma_t(\theta) = \frac{\sum_{\text{pairs}}{w_l w_s \delta_l g_{s,t}}}{\sum_{\text{pairs}}{w_l w_s}} $$
+$$ \xi_t = \frac{\sum_{\text{pairs}}{w_l w_s \delta_l g_{s,t}}}{\sum_{\text{pairs}}{w_l w_s}} $$
 
 where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential shear relative to the lens.
 
