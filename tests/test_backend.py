@@ -918,6 +918,51 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(rawkernel_calls["count"], 1)
         self.assertEqual(len(launches), 2)
 
+    def test_cupy_tomo_vectorized_kernel_complex128(self):
+        class FakeKernel:
+            def __call__(self, _grid, _block, _args):
+                return None
+
+        class FakeModule:
+            float32 = np.float32
+            complex64 = np.complex64
+            # complex128 needs to be present for checks, though not used in fake
+            complex128 = np.complex128
+
+            @staticmethod
+            def RawKernel(source, kernel_name, options=None):
+                return FakeKernel()
+
+        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
+        
+        # Inputs with complex128 (default python complex is complex128)
+        rot_i = np.zeros(1, dtype=np.complex128)
+        rot_j = np.zeros(1, dtype=np.complex128)
+        
+        # Other inputs (types matter for map_c_type logic but here focused on suffix logic)
+        shear = np.zeros((1, 1, 2), dtype=np.float64)
+        weights = np.zeros((1, 1), dtype=np.float64)
+        ind_i = np.zeros(1, dtype=np.int64)
+        ind_j = np.zeros(1, dtype=np.int64)
+        bin_offsets = np.array([0, 1], dtype=np.int64)
+        comb_i = np.array([0], dtype=np.int32)
+        comb_j = np.array([0], dtype=np.int32)
+        out_num = np.zeros((2, 1), dtype=np.float64)
+
+        ok = kernel(
+            shear,
+            weights,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            bin_offsets,
+            comb_i,
+            comb_j,
+            out_num,
+        )
+        self.assertTrue(ok)
+
     def test_cupy_tomo_vectorized_kernel_templates_exact_bin_count(self):
         compiled_sources = []
 

@@ -78,8 +78,13 @@ def _compute_pairs_impl(
     sin_dec = np.sin(dec)
     cos_dec = np.cos(dec)
 
-    bin_min = binedges[0]
-    bin_max = binedges[binedges.size - 1]
+    # Precompute cosine of bin edges
+    # cos is a decreasing function on [0, pi], so we must reverse the order
+    # if we want increasing cosine thresholds, or handle checks carefully.
+    # binedges are sorted increasing theta -> decreasing cos_theta.
+    cos_binedges = np.cos(binedges)
+    cos_max = cos_binedges[0]  # corresponding to theta_min (largest cos)
+    cos_min = cos_binedges[binedges.size - 1]  # corresponding to theta_max (smallest cos)
 
     for i in prange(npts - 1):
         rai = ra[i]
@@ -88,18 +93,19 @@ def _compute_pairs_impl(
         count_i = 0
         for j in range(i + 1, npts):
             cos_theta = sdi * sin_dec[j] + cdi * cos_dec[j] * np.cos(rai - ra[j])
-            if cos_theta > 1.0:
-                cos_theta = 1.0
-            elif cos_theta < -1.0:
-                cos_theta = -1.0
-            theta = np.arccos(cos_theta)
-
-            if theta <= bin_min or theta >= bin_max:
+            
+            # Check range using cosine values
+            # theta <= bin_min <=> cos_theta >= cos_max
+            # theta >= bin_max <=> cos_theta <= cos_min
+            if cos_theta >= cos_max or cos_theta <= cos_min:
                 continue
 
             valid = False
             for b in range(binedges.size - 1):
-                if theta > binedges[b] and theta < binedges[b + 1]:
+                # binedges[b] < theta < binedges[b+1]
+                # cos(binedges[b]) > cos_theta > cos(binedges[b+1])
+                # cos_binedges[b] > cos_theta > cos_binedges[b+1]
+                if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
                     valid = True
                     break
             if not valid:
@@ -141,23 +147,20 @@ def _compute_pairs_impl(
 
             dra = raj - rai
             cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
-            if cos_theta > 1.0:
-                cos_theta = 1.0
-            elif cos_theta < -1.0:
-                cos_theta = -1.0
-            theta = np.arccos(cos_theta)
-
-            if theta <= bin_min or theta >= bin_max:
+            
+            # Range check with cosines
+            if cos_theta >= cos_max or cos_theta <= cos_min:
                 continue
 
             bin_idx = -1
             for b in range(binedges.size - 1):
-                if theta > binedges[b] and theta < binedges[b + 1]:
+                if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
                     bin_idx = b
                     break
             if bin_idx < 0:
                 continue
 
+            # Compute C1 sine and cosine terms (unnormalized)
             sinC1 = x1 * y2 - x2 * y1
             dsq_AC1 = x1 * x1 + y1 * y1 + (z1 - 1.0) * (z1 - 1.0)
             dx12 = x1 - x2
@@ -166,21 +169,37 @@ def _compute_pairs_impl(
             dsq_BC1 = dx12 * dx12 + dy12 * dy12 + dz12 * dz12
             dsq_AB1 = x2 * x2 + y2 * y2 + (z2 - 1.0) * (z2 - 1.0)
             cosC1 = 0.5 * (dsq_AC1 + dsq_BC1 - dsq_AB1 - 0.5 * dsq_AC1 * dsq_BC1)
-            C1 = np.arctan2(sinC1, cosC1)
-            theta1 = 0.5 * np.pi - C1
+            
+            # Compute cos(2*theta1) and sin(2*theta1) directly
+            # theta1 = pi/2 - C1 => 2*theta1 = pi - 2*C1
+            # c1 = cos(2*theta1) = -cos(2*C1) = -(cos^2 C1 - sin^2 C1) = sin^2 C1 - cos^2 C1
+            # s1 = sin(2*theta1) = sin(2*C1) = 2*sinC1*cosC1
+            # Using unnormalized vectors:
+            R2_C1 = sinC1 * sinC1 + cosC1 * cosC1
+            if R2_C1 > 0:
+                inv_R2_C1 = 1.0 / R2_C1
+                c1 = (sinC1 * sinC1 - cosC1 * cosC1) * inv_R2_C1
+                s1 = (2.0 * sinC1 * cosC1) * inv_R2_C1
+            else:
+                c1 = -1.0 # implies theta1 = pi/2 (C1=0)
+                s1 = 0.0
 
+            # Compute C2 sine and cosine terms (unnormalized)
             sinC2 = x2 * y1 - x1 * y2
             dsq_AC2 = dsq_AB1
             dsq_BC2 = dsq_BC1
             dsq_AB2 = dsq_AC1
             cosC2 = 0.5 * (dsq_AC2 + dsq_BC2 - dsq_AB2 - 0.5 * dsq_AC2 * dsq_BC2)
-            C2 = np.arctan2(sinC2, cosC2)
-            theta2 = 0.5 * np.pi - C2
-
-            c1 = np.cos(2.0 * theta1)
-            s1 = np.sin(2.0 * theta1)
-            c2 = np.cos(2.0 * theta2)
-            s2 = np.sin(2.0 * theta2)
+            
+            # Compute cos(2*theta2) and sin(2*theta2) directly
+            R2_C2 = sinC2 * sinC2 + cosC2 * cosC2
+            if R2_C2 > 0:
+                inv_R2_C2 = 1.0 / R2_C2
+                c2 = (sinC2 * sinC2 - cosC2 * cosC2) * inv_R2_C2
+                s2 = (2.0 * sinC2 * cosC2) * inv_R2_C2
+            else:
+                c2 = -1.0
+                s2 = 0.0
 
             inds_a[out_idx] = patch_inds[i]
             inds_b[out_idx] = patch_inds[j]

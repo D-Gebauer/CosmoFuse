@@ -10,6 +10,46 @@ logger = logging.getLogger(__name__)
 _CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
 _MAX_VECTOR_TOMO_BINS = 64
 
+_COMMON_CUDA_SOURCE = """
+#define BLOCK_SIZE 256
+
+template<typename T>
+__device__ inline T block_reduce_sum(T val) {
+    __shared__ T shared[BLOCK_SIZE];
+    int lane = threadIdx.x;
+    shared[lane] = val;
+    __syncthreads();
+
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            shared[lane] += shared[lane + stride];
+        }
+        __syncthreads();
+    }
+    return shared[0];
+}
+
+template<typename T>
+__device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
+    __shared__ T s1[BLOCK_SIZE];
+    __shared__ T s2[BLOCK_SIZE];
+    int lane = threadIdx.x;
+    s1[lane] = val1;
+    s2[lane] = val2;
+    __syncthreads();
+
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            s1[lane] += s1[lane + stride];
+            s2[lane] += s2[lane + stride];
+        }
+        __syncthreads();
+    }
+    *out1 = s1[0];
+    *out2 = s2[0];
+}
+"""
+
 
 @njit(fastmath=True, parallel=True)
 def _cpu_aperture_density_kernel(
@@ -254,9 +294,10 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_fused_tomo_reduce_dd_{map_c_type}_{nzbins}"
-        source = f"""
+        source = (
+            _COMMON_CUDA_SOURCE
+            + f"""
         #define TOMO_BINS {nzbins}
-        #define BLOCK_SIZE 256
 
         extern "C" __global__
         void {kernel_name}(
@@ -314,24 +355,16 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
                 );
             }}
 
-            __shared__ {map_c_type} s_sum[BLOCK_SIZE];
-            s_sum[lane] = sum_val;
-            __syncthreads();
-
-            for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {{
-                if (lane < stride) {{
-                    s_sum[lane] += s_sum[lane + stride];
-                }}
-                __syncthreads();
-            }}
+            sum_val = block_reduce_sum(sum_val);
 
             if (lane == 0) {{
                 const long long out_idx =
                     ((long long)comb_ori) * nbins_total + bin_flat;
-                out_num[out_idx] = s_sum[0];
+                out_num[out_idx] = sum_val;
             }}
         }}
         """
+        )
 
         try:
             kernel = module.RawKernel(
@@ -414,10 +447,11 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_{nzbins}"
-        source = f"""
+        source = (
+            _COMMON_CUDA_SOURCE
+            + f"""
         #include <cuComplex.h>
         #define TOMO_BINS {nzbins}
-        #define BLOCK_SIZE 256
 
         extern "C" __global__
         void {kernel_name}(
@@ -491,24 +525,16 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 );
             }}
 
-            __shared__ {map_c_type} s_sum[BLOCK_SIZE];
-            s_sum[lane] = sum_val;
-            __syncthreads();
-
-            for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {{
-                if (lane < stride) {{
-                    s_sum[lane] += s_sum[lane + stride];
-                }}
-                __syncthreads();
-            }}
+            sum_val = block_reduce_sum(sum_val);
 
             if (lane == 0) {{
                 const long long out_idx =
                     ((long long)comb_idx) * nbins_total + bin_flat;
-                out_num[out_idx] = s_sum[0];
+                out_num[out_idx] = sum_val;
             }}
         }}
         """
+        )
 
         try:
             kernel = module.RawKernel(
@@ -967,10 +993,11 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_fused_tomo_reduce_xipm_{map_c_type}_{suffix}_{nzbins}"
-        source = f"""
+        source = (
+            _COMMON_CUDA_SOURCE
+            + f"""
         #include <cuComplex.h>
         #define TOMO_BINS {nzbins}
-        #define BLOCK_SIZE 256
 
         extern "C" __global__
         void {kernel_name}(
@@ -1006,8 +1033,8 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             const long long start = bin_offsets[bin_flat];
             const long long stop = bin_offsets[bin_flat + 1];
 
-            {complex_real_type} sum_p = ({complex_real_type})0.0;
-            {complex_real_type} sum_m = ({complex_real_type})0.0;
+            {map_c_type} sum_p = ({map_c_type})0.0;
+            {map_c_type} sum_m = ({map_c_type})0.0;
 
             for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
                 const long long idx_a = ind_i[tid];
@@ -1015,69 +1042,43 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
                 const {complex_c_type} exp_a = rot_i[tid];
                 const {complex_c_type} exp_b = rot_j[tid];
 
-                const long long base_a_i = (idx_a * (long long)TOMO_BINS + i) * 2;
-                const long long base_b_j = (idx_b * (long long)TOMO_BINS + j) * 2;
-
-                const {complex_c_type} g_a_i = {make_complex}(
-                    ({complex_real_type})shear[base_a_i],
-                    ({complex_real_type})shear[base_a_i + 1]
-                );
-                const {complex_c_type} g_b_j = {make_complex}(
-                    ({complex_real_type})shear[base_b_j],
-                    ({complex_real_type})shear[base_b_j + 1]
-                );
-
-                {complex_c_type} term_a = {cmul_fn}(g_a_i, exp_a);
-                {complex_c_type} term_b = {cmul_fn}(g_b_j, exp_b);
-                {map_c_type} w_pair =
-                    weights[idx_a * (long long)TOMO_BINS + i]
-                    * weights[idx_b * (long long)TOMO_BINS + j];
-
+                int ai = i;
+                int bj = j;
                 if (use_ba && i != j) {{
-                    const long long base_b_i = (idx_b * (long long)TOMO_BINS + i) * 2;
-                    const long long base_a_j = (idx_a * (long long)TOMO_BINS + j) * 2;
-                    const {complex_c_type} g_b_i = {make_complex}(
-                        ({complex_real_type})shear[base_b_i],
-                        ({complex_real_type})shear[base_b_i + 1]
-                    );
-                    const {complex_c_type} g_a_j = {make_complex}(
-                        ({complex_real_type})shear[base_a_j],
-                        ({complex_real_type})shear[base_a_j + 1]
-                    );
-                    term_a = {cmul_fn}(g_a_j, exp_a);
-                    term_b = {cmul_fn}(g_b_i, exp_b);
-                    w_pair =
-                        weights[idx_a * (long long)TOMO_BINS + j]
-                        * weights[idx_b * (long long)TOMO_BINS + i];
+                    ai = j;
+                    bj = i;
                 }}
 
-                const {complex_c_type} weight_c = {make_complex}(
-                    ({complex_real_type})w_pair,
-                    ({complex_real_type})0.0
+                const long long idx_a_bin = idx_a * (long long)TOMO_BINS + ai;
+                const long long idx_b_bin = idx_b * (long long)TOMO_BINS + bj;
+                const long long base_a = idx_a_bin * 2;
+                const long long base_b = idx_b_bin * 2;
+
+                const {complex_c_type} g_a = {make_complex}(
+                    ({complex_real_type})shear[base_a],
+                    ({complex_real_type})shear[base_a + 1]
                 );
-                const {complex_c_type} val_p = {cmul_fn}(
-                    weight_c,
-                    {cmul_fn}(term_b, {conj_fn}(term_a))
+                const {complex_c_type} g_b = {make_complex}(
+                    ({complex_real_type})shear[base_b],
+                    ({complex_real_type})shear[base_b + 1]
                 );
-                const {complex_c_type} val_m = {cmul_fn}(weight_c, {cmul_fn}(term_b, term_a));
-                sum_p += {real_fn}(val_p);
-                sum_m += {real_fn}(val_m);
+
+                {complex_c_type} term_a = {cmul_fn}(g_a, exp_a);
+                {complex_c_type} term_b = {cmul_fn}(g_b, exp_b);
+
+                {map_c_type} w_pair = 
+                    weights[idx_a_bin] * weights[idx_b_bin];
+
+                const {complex_real_type} a_R = term_a.x;
+                const {complex_real_type} a_I = term_a.y;
+                const {complex_real_type} b_R = term_b.x;
+                const {complex_real_type} b_I = term_b.y;
+
+                sum_p += ({complex_real_type})w_pair * (b_R * a_R + b_I * a_I);
+                sum_m += ({complex_real_type})w_pair * (b_R * a_R - b_I * a_I);
             }}
 
-            __shared__ {complex_real_type} s_p[BLOCK_SIZE];
-            __shared__ {complex_real_type} s_m[BLOCK_SIZE];
-
-            s_p[lane] = sum_p;
-            s_m[lane] = sum_m;
-            __syncthreads();
-
-            for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {{
-                if (lane < stride) {{
-                    s_p[lane] += s_p[lane + stride];
-                    s_m[lane] += s_m[lane + stride];
-                }}
-                __syncthreads();
-            }}
+            block_reduce_sum_pair(sum_p, sum_m, &sum_p, &sum_m);
 
             if (lane == 0) {{
                 const long long out_p_idx =
@@ -1085,11 +1086,12 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
                 const long long out_m_idx =
                     ((long long)(2 * ncomb + comb_ori)) * nbins_total + bin_flat;
 
-                out_num[out_p_idx] = ({map_c_type})s_p[0];
-                out_num[out_m_idx] = ({map_c_type})s_m[0];
+                out_num[out_p_idx] = ({map_c_type})sum_p;
+                out_num[out_m_idx] = ({map_c_type})sum_m;
             }}
         }}
         """
+        )
 
         try:
             kernel = module.RawKernel(
