@@ -432,26 +432,31 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
 
 
 def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str, int], Any] = {}
+    kernel_cache: dict[tuple[str, str, int, int], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
         complex_real_type: str,
         suffix: str,
-        nzbins: int,
+        nlens_bins: int,
+        nsource_bins: int,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nzbins)
+        key = (map_c_type, suffix, nlens_bins, nsource_bins)
         cached = kernel_cache.get(key)
         if cached is not None:
             return cached
 
-        kernel_name = f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_{nzbins}"
+        kernel_name = (
+            f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_"
+            f"{nlens_bins}_{nsource_bins}"
+        )
         source = (
             _COMMON_CUDA_SOURCE
             + f"""
         #include <cuComplex.h>
-        #define TOMO_BINS {nzbins}
+        #define LENS_TOMO_BINS {nlens_bins}
+        #define SOURCE_TOMO_BINS {nsource_bins}
 
         extern "C" __global__
         void {kernel_name}(
@@ -492,8 +497,8 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 const {complex_c_type} rot_ab = rot_j[tid];
                 const {complex_c_type} rot_ba = rot_i[tid];
 
-                const long long lens_idx_ab = idx_a * (long long)TOMO_BINS + lens_bin;
-                const long long source_idx_ab = idx_b * (long long)TOMO_BINS + source_bin;
+                const long long lens_idx_ab = idx_a * (long long)LENS_TOMO_BINS + lens_bin;
+                const long long source_idx_ab = idx_b * (long long)SOURCE_TOMO_BINS + source_bin;
                 const long long shear_base_ab = source_idx_ab * 2;
 
                 const {complex_real_type} gamma_t_ab = (
@@ -508,8 +513,8 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                     * ({map_c_type})gamma_t_ab
                 );
 
-                const long long lens_idx_ba = idx_b * (long long)TOMO_BINS + lens_bin;
-                const long long source_idx_ba = idx_a * (long long)TOMO_BINS + source_bin;
+                const long long lens_idx_ba = idx_b * (long long)LENS_TOMO_BINS + lens_bin;
+                const long long source_idx_ba = idx_a * (long long)SOURCE_TOMO_BINS + source_bin;
                 const long long shear_base_ba = source_idx_ba * 2;
 
                 const {complex_real_type} gamma_t_ba = (
@@ -544,8 +549,9 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             )
         except Exception as exc:
             logger.warning(
-                "Vectorized density-shear RawKernel compilation failed for %d bins; using legacy path: %s",
-                nzbins,
+                "Vectorized density-shear RawKernel compilation failed for lens/source bins (%d, %d); using legacy path: %s",
+                nlens_bins,
+                nsource_bins,
                 exc,
             )
             return None
@@ -567,8 +573,9 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         comb_j: Any,
         out_num: Any,
     ) -> bool:
-        nzbins = int(density_map.shape[1])
-        if nzbins > _MAX_VECTOR_TOMO_BINS:
+        nlens_bins = int(density_map.shape[1])
+        nsource_bins = int(shear_map.shape[1])
+        if nlens_bins > _MAX_VECTOR_TOMO_BINS or nsource_bins > _MAX_VECTOR_TOMO_BINS:
             return False
         if getattr(module, "RawKernel", None) is None:
             return False
@@ -588,7 +595,8 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             complex_c_type,
             complex_real_type,
             suffix,
-            nzbins,
+            nlens_bins,
+            nsource_bins,
         )
         if raw_kernel is None:
             return False

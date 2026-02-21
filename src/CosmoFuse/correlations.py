@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
 import healpy as hp
@@ -493,6 +493,111 @@ class Correlation:
         cached_tuple = (comb_i_dev, comb_j_dev, auto_comb_np)
         self._tomo_combination_cache[nzbins] = cached_tuple
         return cached_tuple
+
+    def _get_tomo_cross_combination_indices(
+        self, nlens_bins: int, nsource_bins: int
+    ) -> Tuple[Any, Any]:
+        cache_key = ("cross", nlens_bins, nsource_bins)
+        cached = self._tomo_combination_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        ncomb = nlens_bins * nsource_bins
+        comb_i_np = np.zeros(ncomb, dtype=np.int32)
+        comb_j_np = np.zeros(ncomb, dtype=np.int32)
+        comb_idx = 0
+        for i in range(nlens_bins):
+            for j in range(nsource_bins):
+                comb_i_np[comb_idx] = i
+                comb_j_np[comb_idx] = j
+                comb_idx += 1
+
+        module = self.backend.module
+        comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
+        comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
+        cached_tuple = (comb_i_dev, comb_j_dev)
+        self._tomo_combination_cache[cache_key] = cached_tuple
+        return cached_tuple
+
+    def _get_selected_tomo_density_combination_indices(
+        self,
+        nzbins: int,
+        gc_auto_correlations_only: bool = False,
+    ) -> Tuple[Any, Any, np.ndarray, int]:
+        cache_key = ("density", nzbins, bool(gc_auto_correlations_only))
+        cached = self._tomo_combination_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if gc_auto_correlations_only:
+            ncomb = nzbins
+            comb_i_np = np.arange(nzbins, dtype=np.int32)
+            comb_j_np = np.arange(nzbins, dtype=np.int32)
+            auto_comb_np = np.ones(ncomb, dtype=bool)
+        else:
+            ncomb = int(binom(nzbins + 1, 2))
+            comb_i_np = np.zeros(ncomb, dtype=np.int32)
+            comb_j_np = np.zeros(ncomb, dtype=np.int32)
+            auto_comb_np = np.zeros(ncomb, dtype=bool)
+            comb_idx = 0
+            for i in range(nzbins):
+                for j in range(i, nzbins):
+                    comb_i_np[comb_idx] = i
+                    comb_j_np[comb_idx] = j
+                    auto_comb_np[comb_idx] = i == j
+                    comb_idx += 1
+
+        module = self.backend.module
+        comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
+        comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
+        cached_tuple = (comb_i_dev, comb_j_dev, auto_comb_np, ncomb)
+        self._tomo_combination_cache[cache_key] = cached_tuple
+        return cached_tuple
+
+    def _get_selected_tomo_cross_combination_indices(
+        self,
+        nlens_bins: int,
+        nsource_bins: int,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+    ) -> Tuple[Any, Any, int]:
+        if ggl_bin_combinations is None:
+            comb_i, comb_j = self._get_tomo_cross_combination_indices(
+                nlens_bins, nsource_bins
+            )
+            return comb_i, comb_j, int(nlens_bins * nsource_bins)
+
+        combinations = list(ggl_bin_combinations)
+        ncomb = len(combinations)
+        comb_i_np = np.empty(ncomb, dtype=np.int32)
+        comb_j_np = np.empty(ncomb, dtype=np.int32)
+
+        for idx, pair in enumerate(combinations):
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise ValueError(
+                    "ggl_bin_combinations must be an iterable of (lens_bin, source_bin) pairs."
+                )
+
+            lens_bin = int(pair[0])
+            source_bin = int(pair[1])
+
+            if lens_bin < 0 or lens_bin >= nlens_bins:
+                raise ValueError(
+                    f"Lens tomographic bin index {lens_bin} out of bounds for "
+                    f"{nlens_bins} lens bins."
+                )
+            if source_bin < 0 or source_bin >= nsource_bins:
+                raise ValueError(
+                    f"Source tomographic bin index {source_bin} out of bounds for "
+                    f"{nsource_bins} source bins."
+                )
+
+            comb_i_np[idx] = lens_bin
+            comb_j_np[idx] = source_bin
+
+        module = self.backend.module
+        comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
+        comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
+        return comb_i_dev, comb_j_dev, ncomb
 
     def get_pairs_patch(
         self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
@@ -1911,6 +2016,7 @@ class Correlation:
         density_maps: np.ndarray,
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        gc_auto_correlations_only: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute full density tomography outputs: M_g, xi_g."""
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
@@ -1920,6 +2026,7 @@ class Correlation:
             density_np,
             w_np,
             sumofweights=sumofweights,
+            gc_auto_correlations_only=gc_auto_correlations_only,
         )
         return M_g, xi_g
 
@@ -1930,6 +2037,7 @@ class Correlation:
         density_weights: np.ndarray,
         shear_weights: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
         return_N_ap: bool = False,
         return_M_ap: bool = False,
         flip_g1: bool = False,
@@ -1962,6 +2070,7 @@ class Correlation:
             density_w_np,
             shear_w_np,
             sumofweights=sumofweights,
+            ggl_bin_combinations=ggl_bin_combinations,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
         )
@@ -1990,7 +2099,7 @@ class Correlation:
         weights: np.ndarray,
         sumofweights: Optional[np.ndarray],
         nzbins: int,
-        nzbin_combs: int,
+        gc_auto_correlations_only: bool = False,
     ) -> Any:
         if self.inds_dev is None:
             self.prepare()
@@ -2011,14 +2120,42 @@ class Correlation:
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         w_soa = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
 
+        comb_i, comb_j, auto_comb, nzbin_combs = (
+            self._get_selected_tomo_density_combination_indices(
+                nzbins,
+                gc_auto_correlations_only=gc_auto_correlations_only,
+            )
+        )
+
         if sumofweights is None:
-            sumofweights_dev = self._compute_tomo_sumofweights(w_dev, nzbins, nzbin_combs)
+            if gc_auto_correlations_only:
+                sumofweights_dev = self.backend.zeros(
+                    (2, nzbin_combs, nbins_total), dtype=map_backend_dtype
+                )
+                comb_i_np = np.asarray(self.backend.to_numpy(comb_i), dtype=np.int64)
+                comb_j_np = np.asarray(self.backend.to_numpy(comb_j), dtype=np.int64)
+                for k in range(nzbin_combs):
+                    i = int(comb_i_np[k])
+                    j = int(comb_j_np[k])
+                    sum_ij = self._reduce_pairs(
+                        w_dev[i][self.inds_dev[0]] * w_dev[j][self.inds_dev[1]]
+                    )
+                    sumofweights_dev[0, k] = sum_ij
+                    if i == j:
+                        sumofweights_dev[1, k] = sum_ij
+                    else:
+                        sumofweights_dev[1, k] = self._reduce_pairs(
+                            w_dev[j][self.inds_dev[0]] * w_dev[i][self.inds_dev[1]]
+                        )
+            else:
+                sumofweights_dev = self._compute_tomo_sumofweights(
+                    w_dev, nzbins, nzbin_combs
+                )
         else:
             sumofweights_dev = self._normalize_tomo_sumofweights_directional(
                 sumofweights, nzbin_combs
             )
 
-        comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(nzbins, nzbin_combs)
         inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
         inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
         bin_offsets = module.ascontiguousarray(
@@ -2085,7 +2222,9 @@ class Correlation:
         density_w: np.ndarray,
         shear_w: np.ndarray,
         sumofweights: Optional[np.ndarray],
-        nzbins: int,
+        nlens_bins: int,
+        nsource_bins: int,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
     ) -> Any:
         if self.inds_dev is None:
             self.prepare()
@@ -2099,7 +2238,6 @@ class Correlation:
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
         nbins_total = self.n_patches * self.nbins
-        nzbin_combs = int(binom(nzbins + 1, 2))
 
         density_dev = self.backend.to_device(density_maps).astype(self.map_dtype, copy=False)
         shear_dev = self.backend.to_device(shear_maps).astype(self.map_dtype, copy=False)
@@ -2111,8 +2249,12 @@ class Correlation:
         density_w_soa = module.ascontiguousarray(module.transpose(density_w_dev, (1, 0)))
         shear_w_soa = module.ascontiguousarray(module.transpose(shear_w_dev, (1, 0)))
 
-        comb_i_base, comb_j_base, _auto_comb = self._get_tomo_combination_indices(
-            nzbins, nzbin_combs
+        comb_i_base, comb_j_base, nzbin_combs = (
+            self._get_selected_tomo_cross_combination_indices(
+                nlens_bins,
+                nsource_bins,
+                ggl_bin_combinations=ggl_bin_combinations,
+            )
         )
         comb_i = module.ascontiguousarray(comb_i_base)
         comb_j = module.ascontiguousarray(comb_j_base)
@@ -2198,17 +2340,23 @@ class Correlation:
         density_maps: np.ndarray,
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        gc_auto_correlations_only: bool = False,
     ) -> np.ndarray:
+        """Compute tomographic galaxy clustering w(theta).
+
+        By default, computes upper-triangular tomographic pairs including cross-bin
+        terms. If ``gc_auto_correlations_only=True``, computes only auto-correlations
+        ``(i, i)`` for each tomographic bin.
+        """
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
         nzbins = density_np.shape[0]
-        nzbin_combs = int(binom(nzbins + 1, 2))
         wtheta = self._density_density_tomo_vectorized(
             density_np,
             w_np,
             sumofweights,
             nzbins,
-            nzbin_combs,
+            gc_auto_correlations_only,
         )
         return np.real(self.backend.to_numpy(wtheta))
 
@@ -2219,6 +2367,7 @@ class Correlation:
         density_weights: np.ndarray,
         shear_weights: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> np.ndarray:
@@ -2227,6 +2376,11 @@ class Correlation:
         The first argument (`density_maps`) is always treated as the lens field and the
         second argument (`shear_maps`) as the source shear field.
 
+        Computes all cartesian tomographic combinations `(lens_bin, source_bin)` in
+        row-major order: `(0,0), (0,1), ..., (0, n_source-1), (1,0), ...`.
+        If ``ggl_bin_combinations`` is provided, only those pairs are computed
+        and returned in the provided order.
+
         ``flip_g1`` and ``flip_g2`` mirror TreeCorr's ``Catalog(..., flip_g1=...)``
         and ``flip_g2`` behavior for source shears.
         """
@@ -2234,16 +2388,35 @@ class Correlation:
         shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
         wd_np = np.asarray(density_weights, dtype=self.map_dtype)
         ws_np = np.asarray(shear_weights, dtype=self.map_dtype)
-        if density_np.shape[0] != shear_np.shape[0]:
+        if density_np.ndim != 2:
             raise ValueError(
-                "vectorized_density_shear requires equal numbers of density and shear "
-                f"tomographic bins for directional Lens->Source evaluation; got "
-                f"{density_np.shape[0]} and {shear_np.shape[0]}."
+                "density_maps must have shape (n_lens_bins, npix); "
+                f"got {density_np.shape}"
             )
         if shear_np.ndim != 3 or shear_np.shape[1] != 2:
             raise ValueError(
                 "shear_maps must have shape (nzbins, 2, npix); "
                 f"got {shear_np.shape}"
+            )
+        if wd_np.shape != density_np.shape:
+            raise ValueError(
+                "density_weights must match density_maps shape; "
+                f"got {wd_np.shape} and {density_np.shape}"
+            )
+        if ws_np.ndim != 2:
+            raise ValueError(
+                "shear_weights must have shape (n_source_bins, npix); "
+                f"got {ws_np.shape}"
+            )
+        if ws_np.shape[0] != shear_np.shape[0] or ws_np.shape[1] != shear_np.shape[2]:
+            raise ValueError(
+                "shear_weights must match shear_maps tomography/pixel dimensions; "
+                f"got {ws_np.shape} and {shear_np.shape}"
+            )
+        if density_np.shape[1] != shear_np.shape[2]:
+            raise ValueError(
+                "density_maps and shear_maps must have the same number of pixels; "
+                f"got {density_np.shape[1]} and {shear_np.shape[2]}"
             )
 
         if flip_g1 or flip_g2:
@@ -2253,14 +2426,17 @@ class Correlation:
             if flip_g2:
                 shear_np[:, 1] *= -1
 
-        nzbins = density_np.shape[0]
+        nlens_bins = density_np.shape[0]
+        nsource_bins = shear_np.shape[0]
         gammat = self._density_shear_tomo_vectorized(
             density_np,
             shear_np,
             wd_np,
             ws_np,
             sumofweights,
-            nzbins,
+            nlens_bins,
+            nsource_bins,
+            ggl_bin_combinations=ggl_bin_combinations,
         )
         return np.real(self.backend.to_numpy(gammat))
 
@@ -2320,6 +2496,8 @@ class Correlation:
         shear_maps: Optional[np.ndarray] = None,
         density_maps: Optional[np.ndarray] = None,
         weights: Optional[Any] = None,
+        gc_auto_correlations_only: bool = False,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> Tuple[
@@ -2386,7 +2564,11 @@ class Correlation:
             if density_w is None:
                 density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
             density_w = np.asarray(density_w, dtype=self.map_dtype)
-            M_g, xi_g = self.get_full_tomo_density(density_np, density_w)
+            M_g, xi_g = self.get_full_tomo_density(
+                density_np,
+                density_w,
+                gc_auto_correlations_only=gc_auto_correlations_only,
+            )
         else:
             M_g = None
             xi_g = None
@@ -2397,6 +2579,7 @@ class Correlation:
                 shear_np,
                 density_w,
                 shear_w,
+                ggl_bin_combinations=ggl_bin_combinations,
                 flip_g1=flip_g1,
                 flip_g2=flip_g2,
             )
