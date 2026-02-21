@@ -1390,6 +1390,44 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(out_both[1], N_ap_mock)
         np.testing.assert_allclose(out_both[2], M_ap_mock)
 
+    def test_get_full_tomo_ggl_forwards_flip_flags(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        gammat_mock = np.full((3, corr.n_patches, corr.nbins), 8.0, dtype=np.float64)
+        M_ap_mock = np.full((2, corr.n_patches), 5.0, dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=gammat_mock,
+        ) as spy_gammat, patch.object(
+            corr,
+            "_compute_tomo_aperture_shear",
+            return_value=M_ap_mock,
+        ) as spy_map:
+            out = corr.get_full_tomo_ggl(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                return_M_ap=True,
+                flip_g1=True,
+                flip_g2=True,
+            )
+
+        np.testing.assert_allclose(out[0], gammat_mock)
+        np.testing.assert_allclose(out[1], M_ap_mock)
+        spy_gammat.assert_called_once()
+        self.assertTrue(spy_gammat.call_args.kwargs["flip_g1"])
+        self.assertTrue(spy_gammat.call_args.kwargs["flip_g2"])
+        spy_map.assert_called_once()
+        self.assertTrue(spy_map.call_args.kwargs["flip_g1"])
+        self.assertTrue(spy_map.call_args.kwargs["flip_g2"])
+
     def test_vectorized_density_shear_uses_directional_lens_source_pairs(self):
         corr = self._make_small_cpu_corr()
         density_maps = np.array(
@@ -1438,6 +1476,46 @@ class TestCorrelationCoverage(unittest.TestCase):
             expected[nonzero] = num_ab[nonzero] / sum_total[nonzero]
 
             np.testing.assert_allclose(out[k], expected)
+
+    def test_vectorized_density_shear_flip_flags_apply_to_shear_components(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
+        shear_maps[:, 0] = 2.0
+        shear_maps[:, 1] = -3.0
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        captured = {}
+
+        def _fake_density_shear_tomo(
+            density_arg,
+            shear_arg,
+            density_w_arg,
+            shear_w_arg,
+            sumofweights_arg,
+            nzbins_arg,
+        ):
+            captured["shear"] = np.array(shear_arg, copy=True)
+            return np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "_density_shear_tomo_vectorized",
+            side_effect=_fake_density_shear_tomo,
+        ):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                flip_g1=True,
+                flip_g2=True,
+            )
+
+        self.assertIn("shear", captured)
+        np.testing.assert_allclose(captured["shear"][:, 0], -2.0)
+        np.testing.assert_allclose(captured["shear"][:, 1], 3.0)
 
     def test_vectorized_density_shear_requires_matching_tomo_bins(self):
         corr = self._make_small_cpu_corr()
@@ -1871,6 +1949,48 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_maps=density_maps,
                 weights=np.ones((3, 12), dtype=np.float64),
             )
+
+    def test_get_3x2pt_tomo_forwards_flip_flags_to_wl_and_ggl(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.full((2, 12), 2.0, dtype=np.float64)
+        density_w = np.full((2, 12), 3.0, dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "get_full_tomo_shear",
+            return_value=(
+                np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ) as spy_full, patch.object(
+            corr,
+            "get_full_tomo_density",
+            return_value=(
+                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+            ),
+        ), patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((3, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        ) as spy_ds:
+            _ = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights={"shear": shear_w, "density": density_w},
+                flip_g1=True,
+                flip_g2=True,
+            )
+
+        spy_full.assert_called_once()
+        self.assertTrue(spy_full.call_args.kwargs["flip_g1"])
+        self.assertTrue(spy_full.call_args.kwargs["flip_g2"])
+        spy_ds.assert_called_once()
+        self.assertTrue(spy_ds.call_args.kwargs["flip_g1"])
+        self.assertTrue(spy_ds.call_args.kwargs["flip_g2"])
 
     def test_get_3x2pt_tomo_both_maps_with_default_weights_none(self):
         corr = self._make_small_cpu_corr()

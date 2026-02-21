@@ -1925,6 +1925,10 @@ class Correlation:
     ]:
         """Compute full GGL tomography output.
 
+        The ``flip_g1``/``flip_g2`` flags follow TreeCorr's sign convention,
+        i.e. they multiply source shear components by ``-1`` before evaluating
+        tangential shear.
+
         Returns:
             - ``xi_t`` by default.
             - ``(xi_t, M_g)`` if ``return_N_ap=True``.
@@ -1942,6 +1946,8 @@ class Correlation:
             density_w_np,
             shear_w_np,
             sumofweights=sumofweights,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
         )
 
         if not return_N_ap and not return_M_ap:
@@ -2197,11 +2203,16 @@ class Correlation:
         density_weights: np.ndarray,
         shear_weights: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
     ) -> np.ndarray:
         """Compute tomographic density-shear correlation with directional Lens->Source ordering.
 
         The first argument (`density_maps`) is always treated as the lens field and the
         second argument (`shear_maps`) as the source shear field.
+
+        ``flip_g1`` and ``flip_g2`` mirror TreeCorr's ``Catalog(..., flip_g1=...)``
+        and ``flip_g2`` behavior for source shears.
         """
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
@@ -2218,6 +2229,13 @@ class Correlation:
                 "shear_maps must have shape (nzbins, 2, npix); "
                 f"got {shear_np.shape}"
             )
+
+        if flip_g1 or flip_g2:
+            shear_np = shear_np.copy()
+            if flip_g1:
+                shear_np[:, 0] *= -1
+            if flip_g2:
+                shear_np[:, 1] *= -1
 
         nzbins = density_np.shape[0]
         gammat = self._density_shear_tomo_vectorized(
@@ -2286,6 +2304,8 @@ class Correlation:
         shear_maps: Optional[np.ndarray] = None,
         density_maps: Optional[np.ndarray] = None,
         weights: Optional[Any] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
     ) -> Tuple[
         Optional[np.ndarray],
         Optional[np.ndarray],
@@ -2335,7 +2355,12 @@ class Correlation:
             if shear_w is None:
                 shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
             shear_w = np.asarray(shear_w, dtype=self.map_dtype)
-            M_a, xi_p, xi_m = self.get_full_tomo_shear(shear_np, shear_w)
+            M_a, xi_p, xi_m = self.get_full_tomo_shear(
+                shear_np,
+                shear_w,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+            )
         else:
             M_a = None
             xi_p = None
@@ -2356,6 +2381,8 @@ class Correlation:
                 shear_np,
                 density_w,
                 shear_w,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
             )
         else:
             xi_t = None
