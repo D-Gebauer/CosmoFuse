@@ -77,6 +77,36 @@ def _cpu_aperture_density_kernel(
         out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wdelta_q / sum_w
 
 
+@njit(fastmath=True, parallel=True)
+def _cpu_aperture_shear_kernel(
+    Q_inds: np.ndarray,
+    Q_cos: np.ndarray,
+    Q_sin: np.ndarray,
+    Q_val: np.ndarray,
+    Q_offsets: np.ndarray,
+    g1: np.ndarray,
+    g2: np.ndarray,
+    weights: np.ndarray,
+    Q_patch_area: np.ndarray,
+    out_aperture: np.ndarray,
+) -> None:
+    n_patches = Q_offsets.shape[0] - 1
+    zero = g1[0] * 0.0
+
+    for patch_idx in prange(n_patches):
+        start = Q_offsets[patch_idx]
+        stop = Q_offsets[patch_idx + 1]
+        sum_w = zero
+        sum_wgt_q = zero
+        for i in range(start, stop):
+            pix_idx = Q_inds[i]
+            weight = weights[pix_idx]
+            gt = -g1[pix_idx] * Q_cos[i] - g2[pix_idx] * Q_sin[i]
+            sum_w += weight
+            sum_wgt_q += weight * gt * Q_val[i]
+        out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wgt_q / sum_w
+
+
 def _build_cupy_aperture_density_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw I Q_inds, raw T Q_val, raw T map_values, raw T weights",
@@ -88,6 +118,23 @@ def _build_cupy_aperture_density_kernel(module: Any) -> Any:
         out_den = w;
         """,
         "gpu_aperture_density_kernel",
+        options=_CUPY_FASTMATH_OPTIONS,
+    )
+
+
+def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
+    return module.ElementwiseKernel(
+        "raw I Q_inds, raw T Q_cos, raw T Q_sin, raw T Q_val,"
+        " raw T g1, raw T g2, raw T weights",
+        "T out_num, T out_den",
+        """
+        const I idx = Q_inds[i];
+        const T w = weights[idx];
+        const T gt = -g1[idx] * Q_cos[i] - g2[idx] * Q_sin[i];
+        out_num = w * gt * Q_val[i];
+        out_den = w;
+        """,
+        "gpu_aperture_shear_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
     )
 
@@ -1263,6 +1310,7 @@ class Backend:
         xipm_auto_corr_kernel: Optional[Any] = None,
         xipm_tomo_vectorized_kernel: Optional[Any] = None,
         aperture_density_kernel: Optional[Any] = None,
+        aperture_shear_kernel: Optional[Any] = None,
         kernel_density_density: Optional[Any] = None,
         kernel_density_shear: Optional[Any] = None,
         kernel_density_density_tomo_vectorized: Optional[Any] = None,
@@ -1275,6 +1323,7 @@ class Backend:
         self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
         self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
         self.aperture_density_kernel = aperture_density_kernel
+        self.aperture_shear_kernel = aperture_shear_kernel
         self.kernel_density_density = kernel_density_density
         self.kernel_density_shear = kernel_density_shear
         self.kernel_density_density_tomo_vectorized = (
@@ -1361,6 +1410,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             xipm_auto_corr_kernel=_cpu_xipm_auto_corr_kernel,
             xipm_tomo_vectorized_kernel=_cpu_vectorized_tomo_kernel,
             aperture_density_kernel=_cpu_aperture_density_kernel,
+            aperture_shear_kernel=_cpu_aperture_shear_kernel,
             kernel_density_density=_cpu_density_density_corr_kernel,
             kernel_density_shear=_cpu_density_shear_corr_kernel,
             kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,
@@ -1382,6 +1432,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 xipm_auto_corr_kernel=_build_cupy_xipm_auto_corr_kernel(cupy),
                 xipm_tomo_vectorized_kernel=_build_cupy_tomo_vectorized_kernel(cupy),
                 aperture_density_kernel=_build_cupy_aperture_density_kernel(cupy),
+                aperture_shear_kernel=_build_cupy_aperture_shear_kernel(cupy),
                 kernel_density_density=_build_cupy_density_density_corr_kernel(cupy),
                 kernel_density_shear=_build_cupy_density_shear_corr_kernel(cupy),
                 kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(cupy),

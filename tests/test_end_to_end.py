@@ -272,6 +272,101 @@ class TestEndToEnd(unittest.TestCase):
             np.abs(gamma_t - self.gammat_treecorr_cross).max(), 0.0, delta=1e-10
         )
 
+    @staticmethod
+    def _q_t_numpy(theta: np.ndarray, theta_q_arcmin: float) -> np.ndarray:
+        theta_q = np.radians(theta_q_arcmin / 60)
+        return theta**2 / (4 * np.pi * theta_q**4) * np.exp(-(theta**2) / (2 * theta_q**2))
+
+    def _get_aperture_patch_data(self, patch_idx: int):
+        vec = hp.ang2vec(self.theta_center[patch_idx], self.phi_center[patch_idx])
+        pix_center = hp.ang2pix(
+            self.nside,
+            self.theta_center[patch_idx],
+            self.phi_center[patch_idx],
+        )
+        patch_inds = hp.query_disc(
+            self.nside,
+            vec=vec,
+            radius=np.radians(5 * self.corr.theta_Q / 60),
+        )
+        qpix_inds = np.intersect1d(patch_inds, self.map_inds)
+        qpix_inds = qpix_inds[qpix_inds != pix_center]
+
+        center_ra, center_dec = pixel2RaDec([pix_center], self.nside)
+        q_ra, q_dec = pixel2RaDec(qpix_inds, self.nside)
+        q_patch_area = hp.nside2pixarea(self.nside) * qpix_inds.size
+
+        return (
+            qpix_inds,
+            q_ra,
+            q_dec,
+            float(center_ra[0]),
+            float(center_dec[0]),
+            q_patch_area,
+        )
+
+    def _reference_maperture_shear_numpy(self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m_a = np.zeros(self.corr.n_patches, dtype=np.float64)
+
+        for patch_idx in range(self.corr.n_patches):
+            qpix_inds, q_ra, q_dec, center_ra, center_dec, q_patch_area = (
+                self._get_aperture_patch_data(patch_idx)
+            )
+
+            cos_vartheta = (
+                np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(q_dec)
+                + np.sin(center_dec) * np.sin(q_dec)
+            )
+            cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
+            vartheta = np.arccos(cos_vartheta)
+
+            sin_vartheta = np.sqrt(np.clip(1 - cos_vartheta**2, 0.0, None))
+            cos_phi = np.ones_like(sin_vartheta)
+            sin_phi = np.zeros_like(sin_vartheta)
+            valid = sin_vartheta > 0
+            cos_phi[valid] = (
+                np.sin(q_ra[valid] - center_ra)
+                * np.cos(q_dec[valid])
+                / sin_vartheta[valid]
+            )
+            sin_phi[valid] = (
+                np.cos(q_dec[valid]) * np.sin(center_dec)
+                - np.sin(q_dec[valid]) * np.cos(center_dec) * np.cos(q_ra[valid] - center_ra)
+            ) / sin_vartheta[valid]
+
+            cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
+            sin_2phi = 2 * sin_phi * cos_phi
+            gt = -g1[qpix_inds] * cos_2phi - g2[qpix_inds] * sin_2phi
+            q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
+
+            m_a[patch_idx] = q_patch_area * np.sum(w[qpix_inds] * gt * q_vals) / np.sum(w[qpix_inds])
+
+        return m_a
+
+    def _reference_maperture_density_numpy(self, density: np.ndarray, w: np.ndarray) -> np.ndarray:
+        m_g = np.zeros(self.corr.n_patches, dtype=np.float64)
+
+        for patch_idx in range(self.corr.n_patches):
+            qpix_inds, q_ra, q_dec, center_ra, center_dec, q_patch_area = (
+                self._get_aperture_patch_data(patch_idx)
+            )
+
+            cos_vartheta = (
+                np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(q_dec)
+                + np.sin(center_dec) * np.sin(q_dec)
+            )
+            cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
+            vartheta = np.arccos(cos_vartheta)
+            q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
+
+            m_g[patch_idx] = (
+                q_patch_area
+                * np.sum(w[qpix_inds] * density[qpix_inds] * q_vals)
+                / np.sum(w[qpix_inds])
+            )
+
+        return m_g
+
     def test_end_to_end_wl_correlations(self):
         self.find_pairs()
         self.get_auto_correlation()
@@ -284,6 +379,29 @@ class TestEndToEnd(unittest.TestCase):
     def test_end_to_end_ggl_correlation(self):
         self.find_pairs()
         self.get_ggl_correlation()
+
+    def test_end_to_end_maperture_shear_matches_pure_numpy(self):
+        self.corr.calculate_pairs_M_a()
+
+        g1 = self.shear_maps[1, 0]
+        g2 = self.shear_maps[1, 1]
+        w = self.w2
+
+        m_a_ref = self._reference_maperture_shear_numpy(g1, g2, w)
+        m_a_corr = self.corr.get_aperture_shear(g1, g2, w)
+
+        np.testing.assert_allclose(m_a_corr, m_a_ref, rtol=1e-8, atol=1e-10)
+
+    def test_end_to_end_maperture_density_matches_pure_numpy(self):
+        self.corr.calculate_pairs_M_a()
+
+        density = self.density_maps[1]
+        w = self.w2
+
+        m_g_ref = self._reference_maperture_density_numpy(density, w)
+        m_g_corr = self.corr.get_aperture_density(density, w)
+
+        np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
 
 
 if __name__ == "__main__":

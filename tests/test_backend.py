@@ -12,6 +12,7 @@ from CosmoFuse.backend import (
     Backend,
     _MAX_VECTOR_TOMO_BINS,
     _cpu_aperture_density_kernel,
+    _cpu_aperture_shear_kernel,
     _build_cupy_density_density_tomo_vectorized_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
     _build_cupy_tomo_vectorized_kernel,
@@ -74,12 +75,13 @@ class TestBackend(unittest.TestCase):
             MagicMock(),
             MagicMock(),
             MagicMock(),
+            MagicMock(),
         ]
 
         backend = get_backend(0)
 
         self.assertEqual(backend.name, "cupy")
-        self.assertEqual(cupy.ElementwiseKernel.call_count, 5)
+        self.assertEqual(cupy.ElementwiseKernel.call_count, 6)
         for call in cupy.ElementwiseKernel.call_args_list:
             self.assertEqual(call.kwargs.get("options"), ("--use_fast_math",))
 
@@ -336,6 +338,7 @@ class TestBackend(unittest.TestCase):
     def test_cpu_backend_exposes_tomo_vectorized_kernel(self):
         backend = get_backend("cpu")
         self.assertIsNotNone(backend.xipm_tomo_vectorized_kernel)
+        self.assertIsNotNone(backend.aperture_shear_kernel)
         self.assertIsNotNone(backend.kernel_density_density)
         self.assertIsNotNone(backend.kernel_density_shear)
         self.assertIsNotNone(backend.kernel_density_density_tomo_vectorized)
@@ -522,6 +525,45 @@ class TestBackend(unittest.TestCase):
             + (weights[1] * map_values[1] * Q_val[1])
         ) / (weights[0] + weights[1])
         expected1 = 2.0 * (weights[2] * map_values[2] * Q_val[2]) / weights[2]
+        np.testing.assert_allclose(out, np.array([expected0, expected1]))
+
+    def test_cpu_aperture_shear_kernel(self):
+        Q_inds = np.array([0, 1, 2], dtype=np.int64)
+        Q_cos = np.array([0.6, -0.2, 0.3], dtype=np.float64)
+        Q_sin = np.array([0.8, 0.4, -0.5], dtype=np.float64)
+        Q_val = np.array([0.2, 0.3, 0.5], dtype=np.float64)
+        Q_offsets = np.array([0, 2, 3], dtype=np.int64)
+        g1 = np.array([1.0, 2.0, 4.0], dtype=np.float64)
+        g2 = np.array([0.5, -1.0, 0.25], dtype=np.float64)
+        weights = np.array([1.0, 0.5, 2.0], dtype=np.float64)
+        Q_patch_area = np.array([1.0, 2.0], dtype=np.float64)
+        out = np.zeros(2, dtype=np.float64)
+
+        _cpu_aperture_shear_kernel(
+            Q_inds,
+            Q_cos,
+            Q_sin,
+            Q_val,
+            Q_offsets,
+            g1,
+            g2,
+            weights,
+            Q_patch_area,
+            out,
+        )
+
+        gt0 = -g1[Q_inds[:2]] * Q_cos[:2] - g2[Q_inds[:2]] * Q_sin[:2]
+        expected0 = (
+            Q_patch_area[0]
+            * np.sum(weights[Q_inds[:2]] * gt0 * Q_val[:2])
+            / np.sum(weights[Q_inds[:2]])
+        )
+        gt1 = -g1[Q_inds[2:]] * Q_cos[2:] - g2[Q_inds[2:]] * Q_sin[2:]
+        expected1 = (
+            Q_patch_area[1]
+            * np.sum(weights[Q_inds[2:]] * gt1 * Q_val[2:])
+            / np.sum(weights[Q_inds[2:]])
+        )
         np.testing.assert_allclose(out, np.array([expected0, expected1]))
 
     def test_cupy_density_density_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):

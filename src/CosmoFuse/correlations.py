@@ -981,17 +981,54 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> np.ndarray:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
-        return self.aperture_shear_all_patches(
-            self.Q_inds_flat,
-            self.Q_cos_flat,
-            self.Q_sin_flat,
-            self.Q_val_flat,
-            self.Q_offsets,
-            g1,
-            g2,
-            w,
-            self.Q_patch_area_flat,
-        )
+        g1_np = np.asarray(g1, dtype=self.map_dtype)
+        g2_np = np.asarray(g2, dtype=self.map_dtype)
+        w_np = np.asarray(w, dtype=self.map_dtype)
+        kernel = getattr(self.backend, "aperture_shear_kernel", None)
+        if kernel is None:
+            raise RuntimeError(
+                "Backend does not provide an aperture-shear kernel; use a supported backend."
+            )
+
+        if self.backend.name == "numpy":
+            aperture_shear = np.zeros(self.n_patches, dtype=self.map_dtype)
+            kernel(
+                self.Q_inds_flat,
+                self.Q_cos_flat,
+                self.Q_sin_flat,
+                self.Q_val_flat,
+                self.Q_offsets,
+                g1_np,
+                g2_np,
+                w_np,
+                self.Q_patch_area_flat,
+                aperture_shear,
+            )
+            return aperture_shear
+
+        module = self.backend.module
+        backend_dtype = getattr(module, self.map_dtype.name)
+
+        Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
+        Q_cos_dev = self.backend.to_device(self.Q_cos_flat).astype(backend_dtype, copy=False)
+        Q_sin_dev = self.backend.to_device(self.Q_sin_flat).astype(backend_dtype, copy=False)
+        Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
+        Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
+        Q_patch_area_dev = self.backend.to_device(
+            self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
+        ).astype(backend_dtype, copy=False)
+        g1_dev = self.backend.to_device(g1_np).astype(backend_dtype, copy=False)
+        g2_dev = self.backend.to_device(g2_np).astype(backend_dtype, copy=False)
+        w_dev = self.backend.to_device(w_np).astype(backend_dtype, copy=False)
+
+        weighted_num = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
+        weighted_den = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
+        kernel(Q_inds_dev, Q_cos_dev, Q_sin_dev, Q_val_dev, g1_dev, g2_dev, w_dev, weighted_num, weighted_den)
+
+        weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
+        weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
+        aperture_shear = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        return self.backend.to_numpy(aperture_shear)
 
     def get_aperture_density(
         self,

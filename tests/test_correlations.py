@@ -494,6 +494,68 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.assertAlmostEqual(M_a[0], expected_M_a)
 
+    def test_get_aperture_shear_non_numpy_backend_path(self):
+        g1 = np.random.rand(self.npix)
+        g2 = np.random.rand(self.npix)
+        w = np.ones(self.npix)
+
+        class FakeBackend:
+            name = "cupy"
+            module = np
+            add = np.add
+
+            @staticmethod
+            def to_device(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def to_numpy(array):
+                return np.asarray(array)
+
+            @staticmethod
+            def zeros(shape, dtype):
+                return np.zeros(shape, dtype=dtype)
+
+            @staticmethod
+            def aperture_shear_kernel(
+                Q_inds,
+                Q_cos,
+                Q_sin,
+                Q_val,
+                g1_vals,
+                g2_vals,
+                weights,
+                out_num,
+                out_den,
+            ):
+                gt = -g1_vals[Q_inds] * Q_cos - g2_vals[Q_inds] * Q_sin
+                out_num[:] = weights[Q_inds] * gt * Q_val
+                out_den[:] = weights[Q_inds]
+
+        self.corr.backend = FakeBackend()
+        M_a = self.corr.get_aperture_shear(g1, g2, w)
+
+        Q_inds = self.corr.Q_inds[0]
+        Q_cos = self.corr.Q_cos[0]
+        Q_sin = self.corr.Q_sin[0]
+        Q_val = self.corr.Q_val[0]
+        Q_patch_area = self.corr.Q_patch_area[0]
+        gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
+        expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
+        self.assertAlmostEqual(M_a[0], expected_M_a)
+
+    def test_get_aperture_shear_missing_backend_kernel_raises(self):
+        class IncompleteBackend:
+            name = "numpy"
+
+        self.corr.backend = IncompleteBackend()
+        with self.assertRaisesRegex(RuntimeError, "aperture-shear kernel"):
+            self.corr.get_aperture_shear(
+                np.random.rand(self.npix),
+                np.random.rand(self.npix),
+                np.ones(self.npix),
+            )
+
     def test_get_aperture_density(self):
         """Test the get_aperture_density method for spin-0 fields."""
         delta = np.random.rand(self.npix)
