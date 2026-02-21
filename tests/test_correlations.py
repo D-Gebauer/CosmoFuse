@@ -1141,10 +1141,10 @@ class TestCorrelationCoverage(unittest.TestCase):
             sumofweights=1.0,
         )
         expected = (
-            d_lens[0] * g1[1]
-            + d_lens[1] * g1[2]
-            + d_lens[1] * g1[0]
-            + d_lens[2] * g1[1]
+            -d_lens[0] * g1[1]
+            -d_lens[1] * g1[2]
+            -d_lens[1] * g1[0]
+            -d_lens[2] * g1[1]
         )
         self.assertAlmostEqual(gamma_t[0, 0], expected)
 

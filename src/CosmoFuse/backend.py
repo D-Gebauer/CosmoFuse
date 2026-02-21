@@ -140,7 +140,7 @@ def _cpu_density_shear_corr_kernel(
             i = ind_i[idx]
             j = ind_j[idx]
             rot = exp_j[idx]
-            gamma_t = g1_source[j] * rot.real + g2_source[j] * rot.imag
+            gamma_t = -g1_source[j] * rot.real + g2_source[j] * rot.imag
             sum_gt += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
 
         out_gt[b] = sum_gt
@@ -227,7 +227,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
                 pix_j = int(ind_j[idx])
                 exp_j = rot_j[idx]
                 gamma_t_ij = (
-                    shear_map[pix_j, source_bin, 0] * exp_j.real
+                    -shear_map[pix_j, source_bin, 0] * exp_j.real
                     + shear_map[pix_j, source_bin, 1] * exp_j.imag
                 )
                 sum_gt += (
@@ -239,7 +239,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
 
                 exp_i = rot_i[idx]
                 gamma_t_ji = (
-                    shear_map[pix_i, source_bin, 0] * exp_i.real
+                    -shear_map[pix_i, source_bin, 0] * exp_i.real
                     + shear_map[pix_i, source_bin, 1] * exp_i.imag
                 )
                 sum_gt += (
@@ -276,7 +276,7 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
         const I i_idx = ind_i[i];
         const I j_idx = ind_j[i];
         const C rot = exp_j[i];
-        const T gamma_t = g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot);
+        const T gamma_t = -g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot);
         out_gt = w_lens[i_idx] * w_source[j_idx] * density_lens[i_idx] * gamma_t;
         """,
         "gpu_density_shear_corr_kernel",
@@ -497,7 +497,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 const long long shear_base_ab = source_idx_ab * 2;
 
                 const {complex_real_type} gamma_t_ab = (
-                    ({complex_real_type})shear[shear_base_ab] * rot_ab.x
+                    -({complex_real_type})shear[shear_base_ab] * rot_ab.x
                     + ({complex_real_type})shear[shear_base_ab + 1] * rot_ab.y
                 );
 
@@ -513,7 +513,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 const long long shear_base_ba = source_idx_ba * 2;
 
                 const {complex_real_type} gamma_t_ba = (
-                    ({complex_real_type})shear[shear_base_ba] * rot_ba.x
+                    -({complex_real_type})shear[shear_base_ba] * rot_ba.x
                     + ({complex_real_type})shear[shear_base_ba + 1] * rot_ba.y
                 );
 
@@ -915,61 +915,64 @@ def _cpu_vectorized_tomo_kernel(
     rot_i: np.ndarray,
     rot_j: np.ndarray,
     offsets: np.ndarray,
+    comb_i: np.ndarray,
+    comb_j: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
     n_bins = offsets.shape[0] - 1
-    nz = shear_map.shape[1]
-    half = 0.5
+    ncomb = comb_i.shape[0]
 
     for b in prange(n_bins):
         start = offsets[b]
         stop = offsets[b + 1]
 
-        comb_idx = 0
-        for i in range(nz):
-            for j in range(i, nz):
-                sum_p = 0.0 + 0.0j
-                sum_m = 0.0 + 0.0j
+        for comb_idx in range(ncomb):
+            i = comb_i[comb_idx]
+            j = comb_j[comb_idx]
 
-                for idx in range(start, stop):
-                    pix_i = int(ind_i[idx])
-                    pix_j = int(ind_j[idx])
-                    exp_i = rot_i[idx]
-                    exp_j = rot_j[idx]
+            sum_ab_p = 0.0 + 0.0j
+            sum_ab_m = 0.0 + 0.0j
+            sum_ba_p = 0.0 + 0.0j
+            sum_ba_m = 0.0 + 0.0j
 
-                    ga_i = (
-                        shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
-                    ) * exp_i
-                    gb_j = (
-                        shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
+            for idx in range(start, stop):
+                pix_i = int(ind_i[idx])
+                pix_j = int(ind_j[idx])
+                exp_i = rot_i[idx]
+                exp_j = rot_j[idx]
+
+                ga_i = (
+                    shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
+                ) * exp_i
+                gb_j = (
+                    shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
+                ) * exp_j
+                w_ij = weights[pix_i, i] * weights[pix_j, j]
+
+                sum_ab_p += w_ij * gb_j * np.conjugate(ga_i)
+                sum_ab_m += w_ij * gb_j * ga_i
+
+                if i != j:
+                    ga_j = (
+                        shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
                     ) * exp_j
-                    w_ij = weights[pix_i, i] * weights[pix_j, j]
+                    gb_i = (
+                        shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
+                    ) * exp_i
+                    w_ji = weights[pix_i, j] * weights[pix_j, i]
 
-                    ab_p = w_ij * gb_j * np.conjugate(ga_i)
-                    ab_m = w_ij * gb_j * ga_i
+                    sum_ba_p += w_ji * ga_j * np.conjugate(gb_i)
+                    sum_ba_m += w_ji * ga_j * gb_i
 
-                    if i == j:
-                        sum_p += ab_p
-                        sum_m += ab_m
-                    else:
-                        ga_q = (
-                            shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
-                        ) * exp_j
-                        gb_p = (
-                            shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
-                        ) * exp_i
-                        w_ji = weights[pix_i, j] * weights[pix_j, i]
+            out_row_ab = 2 * comb_idx
+            out_p[out_row_ab, b] = sum_ab_p
+            out_m[out_row_ab, b] = sum_ab_m
 
-                        ba_p = w_ji * ga_q * np.conjugate(gb_p)
-                        ba_m = w_ji * ga_q * gb_p
-
-                        sum_p += half * (ab_p + ba_p)
-                        sum_m += half * (ab_m + ba_m)
-
-                out_p[comb_idx, b] = sum_p
-                out_m[comb_idx, b] = sum_m
-                comb_idx += 1
+            if i != j:
+                out_row_ba = out_row_ab + 1
+                out_p[out_row_ba, b] = sum_ba_p
+                out_m[out_row_ba, b] = sum_ba_m
 
 
 def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:

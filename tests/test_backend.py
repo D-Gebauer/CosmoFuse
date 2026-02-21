@@ -349,8 +349,10 @@ class TestBackend(unittest.TestCase):
         ind_j = np.array([1], dtype=np.int64)
         rot_i = np.array([1.0 + 0.0j], dtype=np.complex128)
         rot_j = np.array([1.0 + 0.0j], dtype=np.complex128)
-        out_p = np.zeros((3, 1), dtype=np.complex128)
-        out_m = np.zeros((3, 1), dtype=np.complex128)
+        comb_i = np.array([0, 0, 1], dtype=np.int64)
+        comb_j = np.array([0, 1, 1], dtype=np.int64)
+        out_p = np.zeros((6, 1), dtype=np.complex128)
+        out_m = np.zeros((6, 1), dtype=np.complex128)
 
         launched = backend.xipm_tomo_vectorized_kernel(
             shear,
@@ -360,12 +362,14 @@ class TestBackend(unittest.TestCase):
             rot_i,
             rot_j,
             np.array([0, 1], dtype=np.int64),
+            comb_i,
+            comb_j,
             out_p,
             out_m,
         )
         self.assertIsNone(launched)
-        self.assertEqual(out_p.shape, (3, 1))
-        self.assertEqual(out_m.shape, (3, 1))
+        self.assertEqual(out_p.shape, (6, 1))
+        self.assertEqual(out_m.shape, (6, 1))
 
     def test_cpu_density_density_corr_kernel(self):
         density_a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
@@ -427,7 +431,7 @@ class TestBackend(unittest.TestCase):
             for idx in range(offsets[b], offsets[b + 1]):
                 i = ind_i[idx]
                 j = ind_j[idx]
-                gamma_t = g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
+                gamma_t = -g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
                 expected[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
 
         np.testing.assert_allclose(out_gt, expected)

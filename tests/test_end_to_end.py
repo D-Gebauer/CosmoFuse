@@ -242,12 +242,11 @@ class TestEndToEnd(unittest.TestCase):
         )
 
     def get_gc_correlation(self):
-        wtheta, = self.corr.compute_density_density(
-            self.density_maps[0],
-            self.density_maps[1],
-            self.w1,
-            self.w2,
+        wtheta_full = self.corr.vectorized_density_density(
+            self.density_maps,
+            np.stack((self.w1, self.w2), axis=0),
         )
+        wtheta = wtheta_full[1]
 
         self.assertAlmostEqual(
             np.abs(1 - (wtheta / self.wtheta_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -257,13 +256,14 @@ class TestEndToEnd(unittest.TestCase):
         )
 
     def get_ggl_correlation(self):
-        gamma_t, = self.corr.compute_density_shear(
-            self.density_maps[0],
-            self.shear_maps[1, 0],
-            self.shear_maps[1, 1],
-            self.w1,
-            self.w2,
+        gamma_t_full = self.corr.vectorized_density_shear(
+            self.density_maps,
+            self.shear_maps,
+            np.stack((self.w1, self.w2), axis=0),
+            np.stack((self.w1, self.w2), axis=0),
+            flip_g1=True,
         )
+        gamma_t = gamma_t_full[1]
 
         self.assertAlmostEqual(
             np.abs(1 - (gamma_t / self.gammat_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -272,11 +272,17 @@ class TestEndToEnd(unittest.TestCase):
             np.abs(gamma_t - self.gammat_treecorr_cross).max(), 0.0, delta=1e-10
         )
 
-    def test_end_to_end_correlations(self):
+    def test_end_to_end_wl_correlations(self):
         self.find_pairs()
         self.get_auto_correlation()
         self.get_cross_correlation()
+
+    def test_end_to_end_gc_correlation(self):
+        self.find_pairs()
         self.get_gc_correlation()
+
+    def test_end_to_end_ggl_correlation(self):
+        self.find_pairs()
         self.get_ggl_correlation()
 
 

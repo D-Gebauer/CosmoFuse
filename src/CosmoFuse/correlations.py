@@ -1706,8 +1706,11 @@ class Correlation:
             else np.complex128
         )
         nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-        out_p = np.zeros((nzbin_combs, nbins_total), dtype=complex_dtype)
-        out_m = np.zeros((nzbin_combs, nbins_total), dtype=complex_dtype)
+        out_p = np.zeros((2 * nzbin_combs, nbins_total), dtype=complex_dtype)
+        out_m = np.zeros((2 * nzbin_combs, nbins_total), dtype=complex_dtype)
+        comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
+            nzbins, nzbin_combs
+        )
         tomo_kernel = self.backend.xipm_tomo_vectorized_kernel
         offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
         launched = tomo_kernel(
@@ -1718,6 +1721,8 @@ class Correlation:
             np.ascontiguousarray(self.exp2phi_dev[0]),
             np.ascontiguousarray(self.exp2phi_dev[1]),
             offsets,
+            np.ascontiguousarray(comb_i),
+            np.ascontiguousarray(comb_j),
             out_p,
             out_m,
         )
@@ -1726,8 +1731,10 @@ class Correlation:
                 "Backend tomography vectorized kernel unavailable for CPU backend."
             )
 
-        xip_num = np.real(out_p)
-        xim_num = np.real(out_m)
+        xip_reduced = np.real(out_p)
+        xim_reduced = np.real(out_m)
+        xip_num = np.stack((xip_reduced[0::2], xip_reduced[1::2]), axis=0)
+        xim_num = np.stack((xim_reduced[0::2], xim_reduced[1::2]), axis=0)
         map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
         xip = self.backend.zeros(
             (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
@@ -1738,8 +1745,17 @@ class Correlation:
 
         half = self.map_dtype.type(0.5)
         for k in range(nzbin_combs):
-            sum_k = half * (sumofweights_dev[0, k] + sumofweights_dev[1, k])
-            xip[k], xim[k] = self._normalize_xipm_pairs(xip_num[k], xim_num[k], sum_k)
+            xip_ab, xim_ab = self._normalize_xipm_pairs(
+                xip_num[0, k], xim_num[0, k], sumofweights_dev[0, k]
+            )
+            if auto_comb[k]:
+                xip[k], xim[k] = xip_ab, xim_ab
+            else:
+                xip_ba, xim_ba = self._normalize_xipm_pairs(
+                    xip_num[1, k], xim_num[1, k], sumofweights_dev[1, k]
+                )
+                xip[k] = half * (xip_ab + xip_ba)
+                xim[k] = half * (xim_ab + xim_ba)
 
         return xip, xim
 

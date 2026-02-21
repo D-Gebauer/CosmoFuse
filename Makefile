@@ -10,23 +10,11 @@ install: ## Install the package
 install-dev: ## Install the package with development dependencies
 	pip install -e ".[dev]"
 
-test: ## Run tests
-	python -m unittest discover tests/ -v
-
-test-cov: ## Run tests with coverage
-	pytest --cov=CosmoFuse --cov-report=html --cov-report=term-missing
-
-test-pytest: ## Run tests with pytest
+test: ## Run tests with pytest
 	pytest tests/ -v
 
-test-env: ## Run tests in specific environment (usage: make test-env ENV=myenv)
-	conda run -n $(ENV) python -m unittest discover tests/ -v
-
-test-env-cov: ## Run tests with coverage in specific environment (usage: make test-env-cov ENV=myenv)
-	conda run -n $(ENV) pytest --cov=CosmoFuse --cov-report=html --cov-report=term-missing
-
-test-env-pytest: ## Run tests with pytest in specific environment (usage: make test-env-pytest ENV=myenv)
-	conda run -n $(ENV) pytest tests/ -v
+test-env: ## Run tests with pytest in specific environment (usage: make test-env-pytest ENV=myenv)
+	conda run --no-capture-output -n $(ENV) pytest tests/ -v
 
 clean: ## Clean build, test, coverage, cache and temporary artifacts
 	rm -rf build/
