@@ -611,6 +611,22 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.assertEqual(sin_2phi.shape, (2,))
         self.assertEqual(Q.shape, (2,))
 
+    def test_get_pairs_patch_M_a_custom_filter(self):
+        pixels_RA_Q_patch = np.array([0.1, 0.2])
+        pixels_dec_Q_patch = np.array([0.1, 0.2])
+
+        def custom_filter(theta, _theta_Q):
+            return np.full_like(theta, 2.5)
+
+        _cos_2phi, _sin_2phi, Q = self.corr.get_pairs_patch_M_a(
+            pixels_RA_Q_patch,
+            pixels_dec_Q_patch,
+            0.0,
+            0.0,
+            aperture_filter=custom_filter,
+        )
+        np.testing.assert_allclose(Q, 2.5)
+
     @patch('healpy.ang2pix')
     @patch('healpy.query_disc')
     @patch('CosmoFuse.correlations.pixel2RaDec')
@@ -1352,6 +1368,35 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(N_ap[:, 0], np.array([2.0, 3.0], dtype=np.float64))
         np.testing.assert_allclose(wtheta, wtheta_mock)
 
+    def test_get_full_tomo_shear_forwards_aperture_filter(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        def custom_filter(theta, _theta_Q):
+            return np.ones_like(theta)
+
+        with patch.object(
+            corr,
+            "_compute_tomo_aperture_shear",
+            return_value=np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+        ) as spy_map, patch.object(
+            corr,
+            "vectorized_shear_shear",
+            return_value=(
+                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 3.0, dtype=np.float64),
+            ),
+        ):
+            _ = corr.get_full_tomo_shear(
+                shear_maps,
+                shear_w,
+                aperture_filter=custom_filter,
+            )
+
+        spy_map.assert_called_once()
+        self.assertIs(spy_map.call_args.kwargs["aperture_filter"], custom_filter)
+
     def test_get_full_tomo_density_forwards_gc_auto_only_flag(self):
         corr = self._make_small_cpu_corr()
         density_maps = np.ones((2, 12), dtype=np.float64)
@@ -1370,6 +1415,32 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         spy_wtheta.assert_called_once()
         self.assertTrue(spy_wtheta.call_args.kwargs["gc_auto_correlations_only"])
+
+    def test_get_full_tomo_density_forwards_aperture_filter(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+
+        def custom_filter(theta, _theta_Q):
+            return np.ones_like(theta)
+
+        with patch.object(
+            corr,
+            "_compute_tomo_aperture_density",
+            return_value=np.full((2, corr.n_patches), 4.0, dtype=np.float64),
+        ) as spy_nap, patch.object(
+            corr,
+            "vectorized_density_density",
+            return_value=np.full((3, corr.n_patches, corr.nbins), 5.0, dtype=np.float64),
+        ):
+            _ = corr.get_full_tomo_density(
+                density_maps,
+                density_w,
+                aperture_filter=custom_filter,
+            )
+
+        spy_nap.assert_called_once()
+        self.assertIs(spy_nap.call_args.kwargs["aperture_filter"], custom_filter)
 
     def test_get_full_tomo_ggl_optional_outputs(self):
         corr = self._make_small_cpu_corr()
@@ -1497,6 +1568,42 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         spy_gammat.assert_called_once()
         self.assertEqual(spy_gammat.call_args.kwargs["ggl_bin_combinations"], selected)
+
+    def test_get_full_tomo_ggl_forwards_aperture_filter_to_optional_outputs(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        def custom_filter(theta, _theta_Q):
+            return np.ones_like(theta)
+
+        with patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((4, corr.n_patches, corr.nbins), 1.0, dtype=np.float64),
+        ), patch.object(
+            corr,
+            "_compute_tomo_aperture_density",
+            return_value=np.full((2, corr.n_patches), 2.0, dtype=np.float64),
+        ) as spy_nap, patch.object(
+            corr,
+            "_compute_tomo_aperture_shear",
+            return_value=np.full((2, corr.n_patches), 3.0, dtype=np.float64),
+        ) as spy_map:
+            _ = corr.get_full_tomo_ggl(
+                density_maps,
+                shear_maps,
+                density_w,
+                shear_w,
+                aperture_filter=custom_filter,
+                return_N_ap=True,
+                return_M_ap=True,
+            )
+
+        self.assertIs(spy_nap.call_args.kwargs["aperture_filter"], custom_filter)
+        self.assertIs(spy_map.call_args.kwargs["aperture_filter"], custom_filter)
 
     def test_vectorized_density_shear_uses_directional_lens_source_pairs(self):
         corr = self._make_small_cpu_corr()
@@ -2246,6 +2353,46 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         spy_density.assert_called_once()
         self.assertTrue(spy_density.call_args.kwargs["gc_auto_correlations_only"])
+
+    def test_get_3x2pt_tomo_forwards_aperture_filter(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.full((2, 12), 2.0, dtype=np.float64)
+        density_w = np.full((2, 12), 3.0, dtype=np.float64)
+
+        def custom_filter(theta, _theta_Q):
+            return np.ones_like(theta)
+
+        with patch.object(
+            corr,
+            "get_full_tomo_shear",
+            return_value=(
+                np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ) as spy_full, patch.object(
+            corr,
+            "get_full_tomo_density",
+            return_value=(
+                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
+                np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+            ),
+        ) as spy_density, patch.object(
+            corr,
+            "vectorized_density_shear",
+            return_value=np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        ):
+            _ = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights={"shear": shear_w, "density": density_w},
+                aperture_filter=custom_filter,
+            )
+
+        self.assertIs(spy_full.call_args.kwargs["aperture_filter"], custom_filter)
+        self.assertIs(spy_density.call_args.kwargs["aperture_filter"], custom_filter)
 
     def test_get_3x2pt_tomo_both_maps_with_default_weights_none(self):
         corr = self._make_small_cpu_corr()

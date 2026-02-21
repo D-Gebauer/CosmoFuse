@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import warnings
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
 import healpy as hp
@@ -403,6 +403,7 @@ class Correlation:
         self.Q_val_flat = None
         self.Q_offsets = None
         self.Q_patch_area_flat = None
+        self._aperture_filter_active_key = "Q_T"
 
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
@@ -447,6 +448,8 @@ class Correlation:
             self.Q_offsets = None
         if "Q_patch_area_flat" not in self.__dict__:
             self.Q_patch_area_flat = None
+        if "_aperture_filter_active_key" not in self.__dict__:
+            self._aperture_filter_active_key = "Q_T"
 
     def _invalidate_prepared_state(self) -> None:
         """Clears prepared backend buffers and cached tomographic weights."""
@@ -518,6 +521,44 @@ class Correlation:
         cached_tuple = (comb_i_dev, comb_j_dev)
         self._tomo_combination_cache[cache_key] = cached_tuple
         return cached_tuple
+
+    def _resolve_aperture_filter(
+        self,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> Callable[..., Any]:
+        return Q_T if aperture_filter is None else aperture_filter
+
+    def _aperture_filter_key(self, aperture_filter: Callable[..., Any]) -> Any:
+        if aperture_filter is Q_T:
+            return "Q_T"
+        return id(aperture_filter)
+
+    def _evaluate_aperture_filter(
+        self,
+        aperture_filter: Callable[..., Any],
+        theta: np.ndarray,
+    ) -> np.ndarray:
+        try:
+            values = aperture_filter(theta, self.theta_Q)
+        except TypeError:
+            values = aperture_filter(theta)
+        return np.asarray(values, dtype=self.rotation_dtype)
+
+    def _ensure_aperture_pairs(
+        self,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        filter_fn = self._resolve_aperture_filter(aperture_filter)
+        filter_key = self._aperture_filter_key(filter_fn)
+        if self.Q_inds_flat is None:
+            if self.Q_inds and self._aperture_filter_active_key == filter_key:
+                self._prepare_aperture_flat()
+                return
+            self.calculate_pairs_M_a(aperture_filter=filter_fn)
+            return
+
+        if self._aperture_filter_active_key != filter_key:
+            self.calculate_pairs_M_a(aperture_filter=filter_fn)
 
     def _get_selected_tomo_density_combination_indices(
         self,
@@ -707,6 +748,7 @@ class Correlation:
         pixels_dec_Q_patch: np.ndarray,
         Q_patch_center_RA: float,
         Q_patch_center_dec: float,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         cos_vartheta = np.cos(pixels_RA_Q_patch - Q_patch_center_RA) * np.cos(
             Q_patch_center_dec
@@ -729,12 +771,15 @@ class Correlation:
         cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
         sin_2phi = 2 * sin_phi * cos_phi
 
-        Q = Q_T(vartheta, self.theta_Q)
+        filter_fn = self._resolve_aperture_filter(aperture_filter)
+        Q = self._evaluate_aperture_filter(filter_fn, vartheta)
 
         return cos_2phi, sin_2phi, Q
 
     def __get_pairs_M_a_helper__(
-        self, i: int
+        self,
+        i: int,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
         pix_center = hp.ang2pix(self.nside, self.theta_center[i], self.phi_center[i])
@@ -747,7 +792,11 @@ class Correlation:
         ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
         Q_ra, Q_dec = pixel2RaDec(Qpix_inds, self.nside)
         Q_cos, Q_sin, Q_val = self.get_pairs_patch_M_a(
-            Q_ra, Q_dec, ra_center, dec_center
+            Q_ra,
+            Q_dec,
+            ra_center,
+            dec_center,
+            aperture_filter=aperture_filter,
         )
 
         Q_patch_area = self.rotation_dtype.type(
@@ -761,7 +810,11 @@ class Correlation:
             Q_patch_area,
         )
 
-    def calculate_pairs_M_a(self) -> None:
+    def calculate_pairs_M_a(
+        self,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        filter_fn = self._resolve_aperture_filter(aperture_filter)
         self.Q_cos, self.Q_sin, self.Q_val, self.Q_inds, self.Q_patch_area = (
             [],
             [],
@@ -772,7 +825,8 @@ class Correlation:
 
         for i in trange(self.n_patches, desc="M_a data", unit=" patches"):
             Q_cos, Q_sin, Q_val, Q_inds, Q_patch_area = self.__get_pairs_M_a_helper__(
-                i
+                i,
+                aperture_filter=filter_fn,
             )
             self.Q_cos.append(Q_cos)
             self.Q_sin.append(Q_sin)
@@ -781,6 +835,7 @@ class Correlation:
             self.Q_patch_area.append(Q_patch_area)
 
         self._prepare_aperture_flat()
+        self._aperture_filter_active_key = self._aperture_filter_key(filter_fn)
 
     def _prepare_aperture_flat(self) -> None:
         if not self.Q_inds:
@@ -815,12 +870,18 @@ class Correlation:
         self.Q_offsets = offsets
         self.Q_patch_area_flat = np.asarray(self.Q_patch_area, dtype=self.rotation_dtype)
 
-    def preprocess(self) -> None:
+    def preprocess(
+        self,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
         """
         logger.info("Calculating pairs for aperture mass")
-        self.calculate_pairs_M_a()
+        if aperture_filter is None:
+            self.calculate_pairs_M_a()
+        else:
+            self.calculate_pairs_M_a(aperture_filter=aperture_filter)
         logger.info("Calculating pairs for 2PCF")
         self.calculate_pairs_2PCF()
         logger.info("Preparing flattened pair arrays on backend device")
@@ -913,10 +974,13 @@ class Correlation:
         self.prepare()
 
     def get_aperture_shear(
-        self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray
+        self,
+        g1: np.ndarray,
+        g2: np.ndarray,
+        w: np.ndarray,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> np.ndarray:
-        if self.Q_inds_flat is None:
-            self._prepare_aperture_flat()
+        self._ensure_aperture_pairs(aperture_filter=aperture_filter)
         return self.aperture_shear_all_patches(
             self.Q_inds_flat,
             self.Q_cos_flat,
@@ -930,10 +994,12 @@ class Correlation:
         )
 
     def get_aperture_density(
-        self, map_values: np.ndarray, w: np.ndarray
+        self,
+        map_values: np.ndarray,
+        w: np.ndarray,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> np.ndarray:
-        if self.Q_inds_flat is None:
-            self._prepare_aperture_flat()
+        self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
         map_values_np = np.asarray(map_values, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
@@ -1950,6 +2016,7 @@ class Correlation:
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
+        aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> np.ndarray:
@@ -1963,12 +2030,15 @@ class Correlation:
         if flip_g2:
             g2_fac = -1
 
+        self._ensure_aperture_pairs(aperture_filter=aperture_filter)
+
         M_a = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
         for i in range(nzbins):
             M_a[i] = self.get_aperture_shear(
                 g1_fac * shear_maps_np[i, 0],
                 g2_fac * shear_maps_np[i, 1],
                 w_np[i],
+                aperture_filter=None,
             )
         return M_a
 
@@ -1976,13 +2046,20 @@ class Correlation:
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> np.ndarray:
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
 
+        self._ensure_aperture_pairs(aperture_filter=aperture_filter)
+
         M_g = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
         for i in range(density_np.shape[0]):
-            M_g[i] = self.get_aperture_density(density_np[i], w_np[i])
+            M_g[i] = self.get_aperture_density(
+                density_np[i],
+                w_np[i],
+                aperture_filter=None,
+            )
         return M_g
 
     def get_full_tomo_shear(
@@ -1990,6 +2067,7 @@ class Correlation:
         shear_maps: np.ndarray,
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1999,6 +2077,7 @@ class Correlation:
         M_a = self._compute_tomo_aperture_shear(
             shear_maps_np,
             w_np,
+            aperture_filter=aperture_filter,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
         )
@@ -2017,11 +2096,16 @@ class Correlation:
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
         gc_auto_correlations_only: bool = False,
+        aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute full density tomography outputs: M_g, xi_g."""
         density_np = np.asarray(density_maps, dtype=self.map_dtype)
         w_np = np.asarray(w, dtype=self.map_dtype)
-        M_g = self._compute_tomo_aperture_density(density_np, w_np)
+        M_g = self._compute_tomo_aperture_density(
+            density_np,
+            w_np,
+            aperture_filter=aperture_filter,
+        )
         xi_g = self.vectorized_density_density(
             density_np,
             w_np,
@@ -2038,6 +2122,7 @@ class Correlation:
         shear_weights: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
         return_N_ap: bool = False,
         return_M_ap: bool = False,
         flip_g1: bool = False,
@@ -2080,12 +2165,19 @@ class Correlation:
 
         outputs: List[np.ndarray] = [xi_t]
         if return_N_ap:
-            outputs.append(self._compute_tomo_aperture_density(density_np, density_w_np))
+            outputs.append(
+                self._compute_tomo_aperture_density(
+                    density_np,
+                    density_w_np,
+                    aperture_filter=aperture_filter,
+                )
+            )
         if return_M_ap:
             outputs.append(
                 self._compute_tomo_aperture_shear(
                     shear_np,
                     shear_w_np,
+                    aperture_filter=aperture_filter,
                     flip_g1=flip_g1,
                     flip_g2=flip_g2,
                 )
@@ -2498,6 +2590,7 @@ class Correlation:
         weights: Optional[Any] = None,
         gc_auto_correlations_only: bool = False,
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
     ) -> Tuple[
@@ -2552,6 +2645,7 @@ class Correlation:
             M_a, xi_p, xi_m = self.get_full_tomo_shear(
                 shear_np,
                 shear_w,
+                aperture_filter=aperture_filter,
                 flip_g1=flip_g1,
                 flip_g2=flip_g2,
             )
@@ -2568,6 +2662,7 @@ class Correlation:
                 density_np,
                 density_w,
                 gc_auto_correlations_only=gc_auto_correlations_only,
+                aperture_filter=aperture_filter,
             )
         else:
             M_g = None
