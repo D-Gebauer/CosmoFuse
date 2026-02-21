@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import warnings
 from typing import Any, Optional, Union
 
@@ -9,46 +10,62 @@ logger = logging.getLogger(__name__)
 
 _CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
 _MAX_VECTOR_TOMO_BINS = 64
+_CUDA_DIR = Path(__file__).with_name("cuda")
+_CUDA_SOURCE_CACHE: dict[str, str] = {}
 
-_COMMON_CUDA_SOURCE = """
-#define BLOCK_SIZE 256
+def _load_cuda_source_file(filename: str) -> str:
+    cached = _CUDA_SOURCE_CACHE.get(filename)
+    if cached is not None:
+        return cached
+    source_path = _CUDA_DIR / filename
+    source = source_path.read_text(encoding="utf-8")
+    _CUDA_SOURCE_CACHE[filename] = source
+    return source
 
-template<typename T>
-__device__ inline T block_reduce_sum(T val) {
-    __shared__ T shared[BLOCK_SIZE];
-    int lane = threadIdx.x;
-    shared[lane] = val;
-    __syncthreads();
 
-    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
-        if (lane < stride) {
-            shared[lane] += shared[lane + stride];
-        }
-        __syncthreads();
-    }
-    return shared[0];
-}
+_COMMON_CUDA_SOURCE = _load_cuda_source_file("common.cuh")
 
-template<typename T>
-__device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
-    __shared__ T s1[BLOCK_SIZE];
-    __shared__ T s2[BLOCK_SIZE];
-    int lane = threadIdx.x;
-    s1[lane] = val1;
-    s2[lane] = val2;
-    __syncthreads();
 
-    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
-        if (lane < stride) {
-            s1[lane] += s1[lane + stride];
-            s2[lane] += s2[lane + stride];
-        }
-        __syncthreads();
-    }
-    *out1 = s1[0];
-    *out2 = s2[0];
-}
-"""
+def _render_cuda_source_template(filename: str, replacements: dict[str, Any]) -> str:
+    source = _load_cuda_source_file(filename)
+    rendered = source.replace("__COMMON_CUDA_SOURCE__", _COMMON_CUDA_SOURCE)
+    for key, value in replacements.items():
+        rendered = rendered.replace(key, str(value))
+    return rendered
+
+
+def _has_raw_cuda_compiler(module: Any) -> bool:
+    return (
+        getattr(module, "RawModule", None) is not None
+        or getattr(module, "RawKernel", None) is not None
+    )
+
+
+def _compile_raw_cuda_kernel(module: Any, source: str, kernel_name: str) -> Any:
+    raw_module_ctor = getattr(module, "RawModule", None)
+    if raw_module_ctor is not None:
+        try:
+            raw_module = raw_module_ctor(
+                code=source,
+                options=_CUPY_FASTMATH_OPTIONS,
+                name_expressions=(kernel_name,),
+            )
+        except TypeError:
+            raw_module = raw_module_ctor(
+                source,
+                options=_CUPY_FASTMATH_OPTIONS,
+                name_expressions=(kernel_name,),
+            )
+
+        get_function = getattr(raw_module, "get_function", None)
+        if get_function is not None:
+            return get_function(kernel_name)
+
+    raw_kernel_ctor = getattr(module, "RawKernel", None)
+    if raw_kernel_ctor is None:
+        raise AttributeError("Backend module does not provide RawModule or RawKernel")
+
+    return raw_kernel_ctor(source, kernel_name, options=_CUPY_FASTMATH_OPTIONS)
 
 
 @njit(fastmath=True, parallel=True)
@@ -341,84 +358,17 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_fused_tomo_reduce_dd_{map_c_type}_{nzbins}"
-        source = (
-            _COMMON_CUDA_SOURCE
-            + f"""
-        #define TOMO_BINS {nzbins}
-
-        extern "C" __global__
-        void {kernel_name}(
-            const {map_c_type}* density,
-            const {map_c_type}* weights,
-            const long long* ind_i,
-            const long long* ind_j,
-            const long long* bin_offsets,
-            const int* comb_i,
-            const int* comb_j,
-            {map_c_type}* out_num,
-            const int ncomb,
-            const long long nbins_total,
-            const long long npairs)
-        {{
-            const int lane = (int)threadIdx.x;
-            const int comb_ori = (int)blockIdx.y;
-            const long long bin_flat = (long long)blockIdx.x;
-            if (bin_flat >= nbins_total || comb_ori >= (2 * ncomb)) {{
-                return;
-            }}
-
-            const int comb_idx = comb_ori >> 1;
-            const int i = comb_i[comb_idx];
-            const int j = comb_j[comb_idx];
-            const bool use_ba = (comb_ori & 1) == 1;
-            if (use_ba && i == j) {{
-                return;
-            }}
-
-            const long long start = bin_offsets[bin_flat];
-            const long long stop = bin_offsets[bin_flat + 1];
-
-            {map_c_type} sum_val = ({map_c_type})0.0;
-
-            for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
-                const long long idx_a = ind_i[tid];
-                const long long idx_b = ind_j[tid];
-
-                int ai = i;
-                int bj = j;
-                if (use_ba && i != j) {{
-                    ai = j;
-                    bj = i;
-                }}
-
-                const long long base_a = idx_a * (long long)TOMO_BINS + ai;
-                const long long base_b = idx_b * (long long)TOMO_BINS + bj;
-
-                sum_val += (
-                    weights[base_a]
-                    * weights[base_b]
-                    * density[base_a]
-                    * density[base_b]
-                );
-            }}
-
-            sum_val = block_reduce_sum(sum_val);
-
-            if (lane == 0) {{
-                const long long out_idx =
-                    ((long long)comb_ori) * nbins_total + bin_flat;
-                out_num[out_idx] = sum_val;
-            }}
-        }}
-        """
+        source = _render_cuda_source_template(
+            "density_density_tomo_vectorized.cu",
+            {
+                "__KERNEL_NAME__": kernel_name,
+                "__MAP_C_TYPE__": map_c_type,
+                "__TOMO_BINS__": nzbins,
+            },
         )
 
         try:
-            kernel = module.RawKernel(
-                source,
-                kernel_name,
-                options=_CUPY_FASTMATH_OPTIONS,
-            )
+            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
         except Exception as exc:
             logger.warning(
                 "Vectorized density-density RawKernel compilation failed for %d bins; using legacy path: %s",
@@ -443,7 +393,7 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
         nzbins = int(density_map.shape[1])
         if nzbins > _MAX_VECTOR_TOMO_BINS:
             return False
-        if getattr(module, "RawKernel", None) is None:
+        if not _has_raw_cuda_compiler(module):
             return False
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
@@ -498,102 +448,20 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_"
             f"{nlens_bins}_{nsource_bins}"
         )
-        source = (
-            _COMMON_CUDA_SOURCE
-            + f"""
-        #include <cuComplex.h>
-        #define LENS_TOMO_BINS {nlens_bins}
-        #define SOURCE_TOMO_BINS {nsource_bins}
-
-        extern "C" __global__
-        void {kernel_name}(
-            const {map_c_type}* density,
-            const {map_c_type}* shear,
-            const {map_c_type}* lens_weights,
-            const {map_c_type}* source_weights,
-            const long long* ind_i,
-            const long long* ind_j,
-            const {complex_c_type}* rot_i,
-            const {complex_c_type}* rot_j,
-            const long long* bin_offsets,
-            const int* comb_i,
-            const int* comb_j,
-            {map_c_type}* out_num,
-            const int ncomb,
-            const long long nbins_total,
-            const long long npairs)
-        {{
-            const int lane = (int)threadIdx.x;
-            const int comb_idx = (int)blockIdx.y;
-            const long long bin_flat = (long long)blockIdx.x;
-            if (bin_flat >= nbins_total || comb_idx >= ncomb) {{
-                return;
-            }}
-
-            const int lens_bin = comb_i[comb_idx];
-            const int source_bin = comb_j[comb_idx];
-
-            const long long start = bin_offsets[bin_flat];
-            const long long stop = bin_offsets[bin_flat + 1];
-
-            {map_c_type} sum_val = ({map_c_type})0.0;
-
-            for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
-                const long long idx_a = ind_i[tid];
-                const long long idx_b = ind_j[tid];
-                const {complex_c_type} rot_ab = rot_j[tid];
-                const {complex_c_type} rot_ba = rot_i[tid];
-
-                const long long lens_idx_ab = idx_a * (long long)LENS_TOMO_BINS + lens_bin;
-                const long long source_idx_ab = idx_b * (long long)SOURCE_TOMO_BINS + source_bin;
-                const long long shear_base_ab = source_idx_ab * 2;
-
-                const {complex_real_type} gamma_t_ab = (
-                    -({complex_real_type})shear[shear_base_ab] * rot_ab.x
-                    + ({complex_real_type})shear[shear_base_ab + 1] * rot_ab.y
-                );
-
-                sum_val += (
-                    lens_weights[lens_idx_ab]
-                    * source_weights[source_idx_ab]
-                    * density[lens_idx_ab]
-                    * ({map_c_type})gamma_t_ab
-                );
-
-                const long long lens_idx_ba = idx_b * (long long)LENS_TOMO_BINS + lens_bin;
-                const long long source_idx_ba = idx_a * (long long)SOURCE_TOMO_BINS + source_bin;
-                const long long shear_base_ba = source_idx_ba * 2;
-
-                const {complex_real_type} gamma_t_ba = (
-                    -({complex_real_type})shear[shear_base_ba] * rot_ba.x
-                    + ({complex_real_type})shear[shear_base_ba + 1] * rot_ba.y
-                );
-
-                sum_val += (
-                    lens_weights[lens_idx_ba]
-                    * source_weights[source_idx_ba]
-                    * density[lens_idx_ba]
-                    * ({map_c_type})gamma_t_ba
-                );
-            }}
-
-            sum_val = block_reduce_sum(sum_val);
-
-            if (lane == 0) {{
-                const long long out_idx =
-                    ((long long)comb_idx) * nbins_total + bin_flat;
-                out_num[out_idx] = sum_val;
-            }}
-        }}
-        """
+        source = _render_cuda_source_template(
+            "density_shear_tomo_vectorized.cu",
+            {
+                "__KERNEL_NAME__": kernel_name,
+                "__MAP_C_TYPE__": map_c_type,
+                "__COMPLEX_C_TYPE__": complex_c_type,
+                "__COMPLEX_REAL_TYPE__": complex_real_type,
+                "__LENS_TOMO_BINS__": nlens_bins,
+                "__SOURCE_TOMO_BINS__": nsource_bins,
+            },
         )
 
         try:
-            kernel = module.RawKernel(
-                source,
-                kernel_name,
-                options=_CUPY_FASTMATH_OPTIONS,
-            )
+            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
         except Exception as exc:
             logger.warning(
                 "Vectorized density-shear RawKernel compilation failed for lens/source bins (%d, %d); using legacy path: %s",
@@ -624,7 +492,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         nsource_bins = int(shear_map.shape[1])
         if nlens_bins > _MAX_VECTOR_TOMO_BINS or nsource_bins > _MAX_VECTOR_TOMO_BINS:
             return False
-        if getattr(module, "RawKernel", None) is None:
+        if not _has_raw_cuda_compiler(module):
             return False
 
         if rot_j.dtype == module.complex64:
@@ -1039,9 +907,6 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         complex_real_type: str,
         make_complex: str,
         cmul_fn: str,
-        conj_fn: str,
-        cadd_fn: str,
-        real_fn: str,
         suffix: str,
         nzbins: int,
     ) -> Optional[Any]:
@@ -1051,112 +916,21 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_fused_tomo_reduce_xipm_{map_c_type}_{suffix}_{nzbins}"
-        source = (
-            _COMMON_CUDA_SOURCE
-            + f"""
-        #include <cuComplex.h>
-        #define TOMO_BINS {nzbins}
-
-        extern "C" __global__
-        void {kernel_name}(
-            const {map_c_type}* shear,
-            const {map_c_type}* weights,
-            const long long* ind_i,
-            const long long* ind_j,
-            const {complex_c_type}* rot_i,
-            const {complex_c_type}* rot_j,
-            const long long* bin_offsets,
-            const int* comb_i,
-            const int* comb_j,
-            {map_c_type}* out_num,
-            const int ncomb,
-            const long long nbins_total,
-            const long long npairs)
-        {{
-            const int lane = (int)threadIdx.x;
-            const int comb_ori = (int)blockIdx.y;
-            const long long bin_flat = (long long)blockIdx.x;
-            if (bin_flat >= nbins_total || comb_ori >= (2 * ncomb)) {{
-                return;
-            }}
-
-            const int comb_idx = comb_ori >> 1;
-            const int i = comb_i[comb_idx];
-            const int j = comb_j[comb_idx];
-            const bool use_ba = (comb_ori & 1) == 1;
-            if (use_ba && i == j) {{
-                return;
-            }}
-
-            const long long start = bin_offsets[bin_flat];
-            const long long stop = bin_offsets[bin_flat + 1];
-
-            {map_c_type} sum_p = ({map_c_type})0.0;
-            {map_c_type} sum_m = ({map_c_type})0.0;
-
-            for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {{
-                const long long idx_a = ind_i[tid];
-                const long long idx_b = ind_j[tid];
-                const {complex_c_type} exp_a = rot_i[tid];
-                const {complex_c_type} exp_b = rot_j[tid];
-
-                int ai = i;
-                int bj = j;
-                if (use_ba && i != j) {{
-                    ai = j;
-                    bj = i;
-                }}
-
-                const long long idx_a_bin = idx_a * (long long)TOMO_BINS + ai;
-                const long long idx_b_bin = idx_b * (long long)TOMO_BINS + bj;
-                const long long base_a = idx_a_bin * 2;
-                const long long base_b = idx_b_bin * 2;
-
-                const {complex_c_type} g_a = {make_complex}(
-                    ({complex_real_type})shear[base_a],
-                    ({complex_real_type})shear[base_a + 1]
-                );
-                const {complex_c_type} g_b = {make_complex}(
-                    ({complex_real_type})shear[base_b],
-                    ({complex_real_type})shear[base_b + 1]
-                );
-
-                {complex_c_type} term_a = {cmul_fn}(g_a, exp_a);
-                {complex_c_type} term_b = {cmul_fn}(g_b, exp_b);
-
-                {map_c_type} w_pair = 
-                    weights[idx_a_bin] * weights[idx_b_bin];
-
-                const {complex_real_type} a_R = term_a.x;
-                const {complex_real_type} a_I = term_a.y;
-                const {complex_real_type} b_R = term_b.x;
-                const {complex_real_type} b_I = term_b.y;
-
-                sum_p += ({complex_real_type})w_pair * (b_R * a_R + b_I * a_I);
-                sum_m += ({complex_real_type})w_pair * (b_R * a_R - b_I * a_I);
-            }}
-
-            block_reduce_sum_pair(sum_p, sum_m, &sum_p, &sum_m);
-
-            if (lane == 0) {{
-                const long long out_p_idx =
-                    ((long long)comb_ori) * nbins_total + bin_flat;
-                const long long out_m_idx =
-                    ((long long)(2 * ncomb + comb_ori)) * nbins_total + bin_flat;
-
-                out_num[out_p_idx] = ({map_c_type})sum_p;
-                out_num[out_m_idx] = ({map_c_type})sum_m;
-            }}
-        }}
-        """
+        source = _render_cuda_source_template(
+            "tomo_vectorized_xipm.cu",
+            {
+                "__KERNEL_NAME__": kernel_name,
+                "__MAP_C_TYPE__": map_c_type,
+                "__COMPLEX_C_TYPE__": complex_c_type,
+                "__COMPLEX_REAL_TYPE__": complex_real_type,
+                "__MAKE_COMPLEX__": make_complex,
+                "__CMUL_FN__": cmul_fn,
+                "__TOMO_BINS__": nzbins,
+            },
         )
 
         try:
-            kernel = module.RawKernel(
-                source,
-                kernel_name,
-                options=_CUPY_FASTMATH_OPTIONS,
-            )
+            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
         except Exception as exc:
             logger.warning(
                 "Vectorized tomography RawKernel compilation failed for %d bins; using legacy path: %s",
@@ -1182,7 +956,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         nzbins = int(shear_map.shape[1])
         if nzbins > _MAX_VECTOR_TOMO_BINS:
             return False
-        if getattr(module, "RawKernel", None) is None:
+        if not _has_raw_cuda_compiler(module):
             return False
 
         if rot_i.dtype == module.complex64:
@@ -1190,18 +964,12 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             complex_real_type = "float"
             make_complex = "make_cuFloatComplex"
             cmul_fn = "cuCmulf"
-            conj_fn = "cuConjf"
-            cadd_fn = "cuCaddf"
-            real_fn = "cuCrealf"
             suffix = "c64"
         else:
             complex_c_type = "cuDoubleComplex"
             complex_real_type = "double"
             make_complex = "make_cuDoubleComplex"
             cmul_fn = "cuCmul"
-            conj_fn = "cuConj"
-            cadd_fn = "cuCadd"
-            real_fn = "cuCreal"
             suffix = "c128"
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
@@ -1211,9 +979,6 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             complex_real_type,
             make_complex,
             cmul_fn,
-            conj_fn,
-            cadd_fn,
-            real_fn,
             suffix,
             nzbins,
         )
@@ -1449,248 +1214,17 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
             return cached
 
         kernel_name = f"gpu_3x2pt_tomo_fused_{map_c_type}_{suffix}"
-        source = (
-            _COMMON_CUDA_SOURCE
-            + f"""
-        #include <cuComplex.h>
-
-        extern "C" __global__
-        void {kernel_name}(
-            const {map_c_type}* density,
-            const {map_c_type}* shear,
-            const {map_c_type}* density_w,
-            const {map_c_type}* shear_w,
-            const long long* ind_i,
-            const long long* ind_j,
-            const {complex_c_type}* rot_i,
-            const {complex_c_type}* rot_j,
-            const long long* pair_offsets,
-            const long long nbins_total,
-            const int n_density_bins,
-            const int n_shear_bins,
-            const int npatches,
-            const int npix,
-            const unsigned int* q_inds,
-            const {map_c_type}* q_cos,
-            const {map_c_type}* q_sin,
-            const {map_c_type}* q_val,
-            const long long* q_offsets,
-            const {map_c_type}* q_patch_area,
-            const int* ss_comb_i,
-            const int* ss_comb_j,
-            const int n_ss_comb,
-            const int* dd_comb_i,
-            const int* dd_comb_j,
-            const int n_dd_comb,
-            const int* ds_comb_i,
-            const int* ds_comb_j,
-            const int n_ds_comb,
-            {map_c_type}* out_ma_num,
-            {map_c_type}* out_ma_den,
-            {map_c_type}* out_mg_num,
-            {map_c_type}* out_mg_den,
-            {map_c_type}* out_xip_num,
-            {map_c_type}* out_xim_num,
-            {map_c_type}* out_xipm_den,
-            {map_c_type}* out_xig_num,
-            {map_c_type}* out_xig_den,
-            {map_c_type}* out_xit_num,
-            {map_c_type}* out_xit_den)
-        {{
-            const int lane = (int)threadIdx.x;
-            const long long x = (long long)blockIdx.x;
-            const int y = (int)blockIdx.y;
-            const int z = (int)blockIdx.z;
-
-            if (z == 0) {{
-                if (x >= npatches || y >= n_shear_bins) return;
-                const long long start = q_offsets[x];
-                const long long stop = q_offsets[x + 1];
-                {map_c_type} sum_num = ({map_c_type})0.0;
-                {map_c_type} sum_den = ({map_c_type})0.0;
-                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
-                    const unsigned int pix = q_inds[idx];
-                    const long long shear_idx = ((long long)pix * (long long)n_shear_bins + (long long)y) * 2LL;
-                    const long long w_idx = (long long)pix * (long long)n_shear_bins + (long long)y;
-                    const {map_c_type} g1 = shear[shear_idx];
-                    const {map_c_type} g2 = shear[shear_idx + 1LL];
-                    const {map_c_type} wv = shear_w[w_idx];
-                    const {map_c_type} gt = -g1 * q_cos[idx] - g2 * q_sin[idx];
-                    sum_num += wv * gt * q_val[idx];
-                    sum_den += wv;
-                }}
-                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
-                if (lane == 0) {{
-                    const long long out_idx = (long long)y * (long long)npatches + x;
-                    out_ma_num[out_idx] = q_patch_area[x] * sum_num;
-                    out_ma_den[out_idx] = sum_den;
-                }}
-                return;
-            }}
-
-            if (z == 1) {{
-                if (x >= npatches || y >= n_density_bins) return;
-                const long long start = q_offsets[x];
-                const long long stop = q_offsets[x + 1];
-                {map_c_type} sum_num = ({map_c_type})0.0;
-                {map_c_type} sum_den = ({map_c_type})0.0;
-                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
-                    const unsigned int pix = q_inds[idx];
-                    const long long d_idx = (long long)pix * (long long)n_density_bins + (long long)y;
-                    const {map_c_type} wv = density_w[d_idx];
-                    sum_num += wv * density[d_idx] * q_val[idx];
-                    sum_den += wv;
-                }}
-                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
-                if (lane == 0) {{
-                    const long long out_idx = (long long)y * (long long)npatches + x;
-                    out_mg_num[out_idx] = q_patch_area[x] * sum_num;
-                    out_mg_den[out_idx] = sum_den;
-                }}
-                return;
-            }}
-
-            if (z == 2) {{
-                if (x >= nbins_total || y >= (2 * n_ss_comb)) return;
-                const int comb_idx = y >> 1;
-                const int ori = y & 1;
-                const int i = ss_comb_i[comb_idx];
-                const int j = ss_comb_j[comb_idx];
-                if (ori == 1 && i == j) return;
-
-                int ai = i;
-                int bj = j;
-                if (ori == 1 && i != j) {{
-                    ai = j;
-                    bj = i;
-                }}
-
-                const long long start = pair_offsets[x];
-                const long long stop = pair_offsets[x + 1];
-                {map_c_type} sum_p = ({map_c_type})0.0;
-                {map_c_type} sum_m = ({map_c_type})0.0;
-                {map_c_type} sum_w = ({map_c_type})0.0;
-                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
-                    const long long pix_a = ind_i[idx];
-                    const long long pix_b = ind_j[idx];
-                    const {complex_c_type} ex_a = rot_i[idx];
-                    const {complex_c_type} ex_b = rot_j[idx];
-
-                    const long long a_base = ((pix_a * (long long)n_shear_bins + (long long)ai) * 2LL);
-                    const long long b_base = ((pix_b * (long long)n_shear_bins + (long long)bj) * 2LL);
-                    const {map_c_type} ga1 = shear[a_base];
-                    const {map_c_type} ga2 = shear[a_base + 1LL];
-                    const {map_c_type} gb1 = shear[b_base];
-                    const {map_c_type} gb2 = shear[b_base + 1LL];
-
-                    const {map_c_type} a_r = ga1 * ex_a.x - ga2 * ex_a.y;
-                    const {map_c_type} a_i = ga1 * ex_a.y + ga2 * ex_a.x;
-                    const {map_c_type} b_r = gb1 * ex_b.x - gb2 * ex_b.y;
-                    const {map_c_type} b_i = gb1 * ex_b.y + gb2 * ex_b.x;
-
-                    const long long wa_idx = pix_a * (long long)n_shear_bins + (long long)ai;
-                    const long long wb_idx = pix_b * (long long)n_shear_bins + (long long)bj;
-                    const {map_c_type} wv = shear_w[wa_idx] * shear_w[wb_idx];
-                    sum_w += wv;
-                    sum_p += wv * (b_r * a_r + b_i * a_i);
-                    sum_m += wv * (b_r * a_r - b_i * a_i);
-                }}
-                block_reduce_sum_pair(sum_p, sum_m, &sum_p, &sum_m);
-                sum_w = block_reduce_sum(sum_w);
-                if (lane == 0) {{
-                    const long long out_idx = (long long)y * nbins_total + x;
-                    out_xip_num[out_idx] = sum_p;
-                    out_xim_num[out_idx] = sum_m;
-                    out_xipm_den[out_idx] = sum_w;
-                }}
-                return;
-            }}
-
-            if (z == 3) {{
-                if (x >= nbins_total || y >= (2 * n_dd_comb)) return;
-                const int comb_idx = y >> 1;
-                const int ori = y & 1;
-                const int i = dd_comb_i[comb_idx];
-                const int j = dd_comb_j[comb_idx];
-                if (ori == 1 && i == j) return;
-
-                int ai = i;
-                int bj = j;
-                if (ori == 1 && i != j) {{
-                    ai = j;
-                    bj = i;
-                }}
-
-                const long long start = pair_offsets[x];
-                const long long stop = pair_offsets[x + 1];
-                {map_c_type} sum_num = ({map_c_type})0.0;
-                {map_c_type} sum_den = ({map_c_type})0.0;
-                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
-                    const long long pix_a = ind_i[idx];
-                    const long long pix_b = ind_j[idx];
-                    const long long ia = pix_a * (long long)n_density_bins + (long long)ai;
-                    const long long jb = pix_b * (long long)n_density_bins + (long long)bj;
-                    const {map_c_type} wv = density_w[ia] * density_w[jb];
-                    sum_den += wv;
-                    sum_num += wv * density[ia] * density[jb];
-                }}
-                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
-                if (lane == 0) {{
-                    const long long out_idx = (long long)y * nbins_total + x;
-                    out_xig_num[out_idx] = sum_num;
-                    out_xig_den[out_idx] = sum_den;
-                }}
-                return;
-            }}
-
-            if (z == 4) {{
-                if (x >= nbins_total || y >= n_ds_comb) return;
-                const int lens_bin = ds_comb_i[y];
-                const int source_bin = ds_comb_j[y];
-                const long long start = pair_offsets[x];
-                const long long stop = pair_offsets[x + 1];
-                {map_c_type} sum_num = ({map_c_type})0.0;
-                {map_c_type} sum_den = ({map_c_type})0.0;
-                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
-                    const long long pix_a = ind_i[idx];
-                    const long long pix_b = ind_j[idx];
-
-                    const long long lens_ab = pix_a * (long long)n_density_bins + (long long)lens_bin;
-                    const long long src_ab = pix_b * (long long)n_shear_bins + (long long)source_bin;
-                    const long long src_ab_base = src_ab * 2LL;
-                    const {complex_c_type} ex_ab = rot_j[idx];
-                    const {map_c_type} gt_ab = -shear[src_ab_base] * ex_ab.x + shear[src_ab_base + 1LL] * ex_ab.y;
-                    const {map_c_type} w_ab = density_w[lens_ab] * shear_w[src_ab];
-                    sum_num += w_ab * density[lens_ab] * gt_ab;
-                    sum_den += w_ab;
-
-                    const long long lens_ba = pix_b * (long long)n_density_bins + (long long)lens_bin;
-                    const long long src_ba = pix_a * (long long)n_shear_bins + (long long)source_bin;
-                    const long long src_ba_base = src_ba * 2LL;
-                    const {complex_c_type} ex_ba = rot_i[idx];
-                    const {map_c_type} gt_ba = -shear[src_ba_base] * ex_ba.x + shear[src_ba_base + 1LL] * ex_ba.y;
-                    const {map_c_type} w_ba = density_w[lens_ba] * shear_w[src_ba];
-                    sum_num += w_ba * density[lens_ba] * gt_ba;
-                    sum_den += w_ba;
-                }}
-                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
-                if (lane == 0) {{
-                    const long long out_idx = (long long)y * nbins_total + x;
-                    out_xit_num[out_idx] = sum_num;
-                    out_xit_den[out_idx] = sum_den;
-                }}
-                return;
-            }}
-        }}
-        """
+        source = _render_cuda_source_template(
+            "tomo_fused_3x2pt.cu",
+            {
+                "__KERNEL_NAME__": kernel_name,
+                "__MAP_C_TYPE__": map_c_type,
+                "__COMPLEX_C_TYPE__": complex_c_type,
+            },
         )
 
         try:
-            kernel = module.RawKernel(
-                source,
-                kernel_name,
-                options=_CUPY_FASTMATH_OPTIONS,
-            )
+            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
         except Exception as exc:
             logger.warning(
                 "Fused 3x2pt RawKernel compilation failed; using unfused path: %s",
@@ -1735,7 +1269,7 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         out_xit_num: Any,
         out_xit_den: Any,
     ) -> bool:
-        if getattr(module, "RawKernel", None) is None:
+        if not _has_raw_cuda_compiler(module):
             return False
 
         if rot_i.dtype == module.complex64:

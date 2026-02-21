@@ -11,6 +11,7 @@ from scipy.special import binom
 from tqdm import trange
 
 from .backend import get_backend
+from .compute_context import ComputeContext
 from .correlation_helpers import (
     Q_T,
     calculate_all_zetas as _calculate_all_zetas_helper,
@@ -23,6 +24,7 @@ from .correlation_helpers import (
     zeta_g_plus as _zeta_g_plus_helper,
     zeta_g_t as _zeta_g_t_helper,
 )
+from .pair_finder import PairFinder
 from .utils import pixel2RaDec
 
 logger = logging.getLogger(__name__)
@@ -401,6 +403,15 @@ class Correlation:
             _compute_aperture_shear_all_patches
         )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(fastmath)
+        self._pair_finder = PairFinder(
+            nbins=self.nbins,
+            binedges=self.binedges,
+            index_dtype=self.index_dtype,
+            rotation_dtype=self.rotation_dtype,
+            rotation_complex_dtype=self.rotation_complex_dtype,
+            kernel=self._compute_pairs_kernel,
+            resolve_angle_method_code=_resolve_angle_method_code,
+        )
         self.radius_filter = 5 * self.theta_Q
 
         if mask is not None:
@@ -414,31 +425,12 @@ class Correlation:
 
         self.backend = get_backend(device)
         self.device = device
+        self._compute_context = ComputeContext()
 
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
-
-        self.inds_dev = None
-        self.exp2phi_dev = None
-        self.bins_dev = None
-        self.tot_bins_dev = None
-        self.tot_bins_reduceat_dev = None
-        self.ntotpairs = 0
-        self._prepare_version = 0
-        self._tomo_sumofweights_cache = None
-        self._tomo_sumofweights_cache_w_fingerprint = None
-        self._tomo_sumofweights_cache_prepare_version = None
-        self._xipm_sumofweights_cache = None
-        self._xipm_sumofweights_cache_w_fingerprint = None
-        self._xipm_sumofweights_cache_prepare_version = None
-        self._tomo_combination_cache = {}
-        self.Q_inds_flat = None
-        self.Q_cos_flat = None
-        self.Q_sin_flat = None
-        self.Q_val_flat = None
-        self.Q_offsets = None
-        self.Q_patch_area_flat = None
+        self._compute_context.initialize_runtime_state(self)
         self._aperture_filter_active_key = "Q_T"
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -447,6 +439,10 @@ class Correlation:
             del state['backend']
         if '_compute_pairs_kernel' in state:
             del state['_compute_pairs_kernel']
+        if '_pair_finder' in state:
+            del state['_pair_finder']
+        if '_compute_context' in state:
+            del state['_compute_context']
         if '_tomo_combination_cache' in state:
             state['_tomo_combination_cache'] = {}
         return state
@@ -459,57 +455,23 @@ class Correlation:
                 _compute_aperture_shear_all_patches
             )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
-        if "_prepare_version" not in self.__dict__:
-            self._prepare_version = 0
-        if "_tomo_sumofweights_cache" not in self.__dict__:
-            self._tomo_sumofweights_cache = None
-        if "_tomo_sumofweights_cache_w_fingerprint" not in self.__dict__:
-            self._tomo_sumofweights_cache_w_fingerprint = None
-        if "_tomo_sumofweights_cache_prepare_version" not in self.__dict__:
-            self._tomo_sumofweights_cache_prepare_version = None
-        if "_xipm_sumofweights_cache" not in self.__dict__:
-            self._xipm_sumofweights_cache = None
-        if "_xipm_sumofweights_cache_w_fingerprint" not in self.__dict__:
-            self._xipm_sumofweights_cache_w_fingerprint = None
-        if "_xipm_sumofweights_cache_prepare_version" not in self.__dict__:
-            self._xipm_sumofweights_cache_prepare_version = None
-        if "_tomo_combination_cache" not in self.__dict__:
-            self._tomo_combination_cache = {}
-        if "Q_inds_flat" not in self.__dict__:
-            self.Q_inds_flat = None
-        if "Q_cos_flat" not in self.__dict__:
-            self.Q_cos_flat = None
-        if "Q_sin_flat" not in self.__dict__:
-            self.Q_sin_flat = None
-        if "Q_val_flat" not in self.__dict__:
-            self.Q_val_flat = None
-        if "Q_offsets" not in self.__dict__:
-            self.Q_offsets = None
-        if "Q_patch_area_flat" not in self.__dict__:
-            self.Q_patch_area_flat = None
+        self._pair_finder = PairFinder(
+            nbins=self.nbins,
+            binedges=self.binedges,
+            index_dtype=self.index_dtype,
+            rotation_dtype=self.rotation_dtype,
+            rotation_complex_dtype=self.rotation_complex_dtype,
+            kernel=self._compute_pairs_kernel,
+            resolve_angle_method_code=_resolve_angle_method_code,
+        )
+        self._compute_context = ComputeContext()
+        self._compute_context.ensure_runtime_state(self)
         if "_aperture_filter_active_key" not in self.__dict__:
             self._aperture_filter_active_key = "Q_T"
 
     def _invalidate_prepared_state(self) -> None:
         """Clears prepared backend buffers and cached tomographic weights."""
-        self.inds_dev = None
-        self.exp2phi_dev = None
-        self.bins_dev = None
-        self.tot_bins_dev = None
-        self.tot_bins_reduceat_dev = None
-        self.ntotpairs = 0
-        self._tomo_sumofweights_cache = None
-        self._tomo_sumofweights_cache_w_fingerprint = None
-        self._tomo_sumofweights_cache_prepare_version = None
-        self._xipm_sumofweights_cache = None
-        self._xipm_sumofweights_cache_w_fingerprint = None
-        self._xipm_sumofweights_cache_prepare_version = None
-        self.Q_inds_flat = None
-        self.Q_cos_flat = None
-        self.Q_sin_flat = None
-        self.Q_val_flat = None
-        self.Q_offsets = None
-        self.Q_patch_area_flat = None
+        self._compute_context.invalidate_prepared_state(self)
 
     def _get_tomo_combination_indices(
         self, nzbins: int, nzbin_combs: int
@@ -686,69 +648,13 @@ class Correlation:
         dec: np.ndarray,
         angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
-        ra_local = np.asarray(ra, dtype=self.rotation_dtype)
-        dec_local = np.asarray(dec, dtype=self.rotation_dtype)
-        binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
-        patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
-        angle_method_code = _resolve_angle_method_code(angle_method)
-
-        if patch_inds_local.size < 2:
-            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
-            return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
-
-        (
-            inds_a,
-            inds_b,
-            bin_indices,
-            exp2phi1_real,
-            exp2phi1_imag,
-            exp2phi2_real,
-            exp2phi2_imag,
-        ) = self._compute_pairs_kernel(
-            patch_inds_local,
-            ra_local,
-            dec_local,
-            binedges_local,
-            angle_method_code,
+        self._pair_finder.kernel = self._compute_pairs_kernel
+        return self._pair_finder.get_pairs_patch(
+            patch_inds,
+            ra,
+            dec,
+            angle_method=angle_method,
         )
-
-        npairs = bin_indices.size
-        if npairs == 0:
-            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
-            return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
-
-        order = np.argsort(bin_indices, kind="stable")
-        inds_a = inds_a[order]
-        inds_b = inds_b[order]
-        bin_indices = bin_indices[order]
-        exp2phi1_real = exp2phi1_real[order]
-        exp2phi1_imag = exp2phi1_imag[order]
-        exp2phi2_real = exp2phi2_real[order]
-        exp2phi2_imag = exp2phi2_imag[order]
-
-        exp2phi1 = (
-            exp2phi1_real.astype(self.rotation_dtype, copy=False)
-            + 1j * exp2phi1_imag.astype(self.rotation_dtype, copy=False)
-        ).astype(self.rotation_complex_dtype, copy=False)
-        exp2phi2 = (
-            exp2phi2_real.astype(self.rotation_dtype, copy=False)
-            + 1j * exp2phi2_imag.astype(self.rotation_dtype, copy=False)
-        ).astype(self.rotation_complex_dtype, copy=False)
-        exp2phi = np.vstack((exp2phi1, exp2phi2)).astype(
-            self.rotation_complex_dtype, copy=False
-        )
-
-        all_inds = []
-        for bin_idx in range(self.nbins):
-            in_bin = np.where(bin_indices == bin_idx)[0]
-            all_inds.append(
-                np.array(
-                    [inds_a[in_bin], inds_b[in_bin]],
-                    dtype=self.index_dtype,
-                )
-            )
-
-        return all_inds, exp2phi
 
     def __get_pairs_helper__(
         self,

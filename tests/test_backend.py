@@ -11,6 +11,7 @@ import CosmoFuse.backend
 from CosmoFuse.backend import (
     Backend,
     _MAX_VECTOR_TOMO_BINS,
+    _compile_raw_cuda_kernel,
     _build_cupy_3x2pt_tomo_fused_kernel,
     _cpu_aperture_density_kernel,
     _cpu_aperture_shear_kernel,
@@ -58,6 +59,35 @@ class TestBackend(unittest.TestCase):
         arr = np.array([1, 2, 3])
         np_arr = backend.to_numpy(arr)
         self.assertIsInstance(np_arr, np.ndarray)
+
+    def test_compile_raw_cuda_kernel_rawmodule_legacy_signature_fallback(self):
+        source = "extern \"C\" __global__ void k(){}"
+        kernel_name = "k"
+
+        class LegacyRawModule:
+            def __init__(self, *args, **kwargs):
+                if "code" in kwargs:
+                    raise TypeError("legacy RawModule signature")
+                self.args = args
+                self.kwargs = kwargs
+
+            def get_function(self, name):
+                return ("kernel", name, self.args, self.kwargs)
+
+        class FakeModule:
+            RawModule = LegacyRawModule
+
+        compiled = _compile_raw_cuda_kernel(FakeModule, source, kernel_name)
+        self.assertEqual(compiled[0], "kernel")
+        self.assertEqual(compiled[1], kernel_name)
+        self.assertEqual(compiled[2][0], source)
+
+    def test_compile_raw_cuda_kernel_raises_without_raw_compiler(self):
+        class FakeModule:
+            pass
+
+        with self.assertRaisesRegex(AttributeError, "RawModule or RawKernel"):
+            _compile_raw_cuda_kernel(FakeModule, "code", "kernel")
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_cupy_backend_creation(self):
