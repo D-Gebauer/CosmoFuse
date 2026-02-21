@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import h5py
 import healpy as hp
 import numpy as np
-from numba import njit, prange
+from numba import njit
 from scipy.special import binom
 from tqdm import trange
 
@@ -39,6 +39,23 @@ _ROTATION_COMPLEX_PRECISION = {
     "float32": np.complex64,
     "float64": np.complex128,
 }
+
+_ANGLE_METHOD_TO_CODE = {
+    "arccos": 0,
+    "haversine": 1,
+    "law": 2,
+}
+
+
+def _resolve_angle_method_code(angle_method: str) -> int:
+    key = str(angle_method).lower()
+    code = _ANGLE_METHOD_TO_CODE.get(key)
+    if code is None:
+        raise ValueError(
+            "angle_method must be one of ('arccos', 'haversine', 'law'); "
+            f"got {angle_method!r}"
+        )
+    return int(code)
 
 
 def _compute_aperture_shear_all_patches(
@@ -74,6 +91,7 @@ def _compute_pairs_impl(
     ra: np.ndarray,
     dec: np.ndarray,
     binedges: np.ndarray,
+    angle_method_code: int = 1,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -84,90 +102,91 @@ def _compute_pairs_impl(
     np.ndarray,
 ]:
     npts = patch_inds.size
-    counts = np.zeros(npts, dtype=np.int64)
 
     sin_dec = np.sin(dec)
     cos_dec = np.cos(dec)
+    sin_ra = np.sin(ra)
+    cos_ra = np.cos(ra)
 
-    # Precompute cosine of bin edges
-    # cos is a decreasing function on [0, pi], so we must reverse the order
-    # if we want increasing cosine thresholds, or handle checks carefully.
-    # binedges are sorted increasing theta -> decreasing cos_theta.
+    # arccos method thresholds in theta space
+    theta_min = binedges[0]
+    theta_max = binedges[binedges.size - 1]
+
+    # law-of-cosines thresholds in cosine space
     cos_binedges = np.cos(binedges)
-    cos_max = cos_binedges[0]  # corresponding to theta_min (largest cos)
-    cos_min = cos_binedges[binedges.size - 1]  # corresponding to theta_max (smallest cos)
+    cos_max = cos_binedges[0]
+    cos_min = cos_binedges[binedges.size - 1]
 
-    for i in prange(npts - 1):
+    # haversine thresholds in hav(theta) space
+    hav_binedges = np.sin(0.5 * binedges) ** 2
+    hav_min = hav_binedges[0]
+    hav_max = hav_binedges[binedges.size - 1]
+
+    max_pairs = npts * (npts - 1) // 2
+    inds_a = np.empty(max_pairs, dtype=patch_inds.dtype)
+    inds_b = np.empty(max_pairs, dtype=patch_inds.dtype)
+    bin_indices = np.empty(max_pairs, dtype=np.int64)
+    exp2phi1_real = np.empty(max_pairs, dtype=ra.dtype)
+    exp2phi1_imag = np.empty(max_pairs, dtype=ra.dtype)
+    exp2phi2_real = np.empty(max_pairs, dtype=ra.dtype)
+    exp2phi2_imag = np.empty(max_pairs, dtype=ra.dtype)
+
+    out_idx = 0
+    for i in range(npts - 1):
         rai = ra[i]
+        deci = dec[i]
         sdi = sin_dec[i]
         cdi = cos_dec[i]
-        count_i = 0
-        for j in range(i + 1, npts):
-            cos_theta = sdi * sin_dec[j] + cdi * cos_dec[j] * np.cos(rai - ra[j])
-            
-            # Check range using cosine values
-            # theta <= bin_min <=> cos_theta >= cos_max
-            # theta >= bin_max <=> cos_theta <= cos_min
-            if cos_theta >= cos_max or cos_theta <= cos_min:
-                continue
-
-            valid = False
-            for b in range(binedges.size - 1):
-                # binedges[b] < theta < binedges[b+1]
-                # cos(binedges[b]) > cos_theta > cos(binedges[b+1])
-                # cos_binedges[b] > cos_theta > cos_binedges[b+1]
-                if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
-                    valid = True
-                    break
-            if not valid:
-                continue
-            count_i += 1
-        counts[i] = count_i
-
-    offsets = np.empty(npts + 1, dtype=np.int64)
-    offsets[0] = 0
-    for i in range(npts):
-        offsets[i + 1] = offsets[i] + counts[i]
-
-    ntotal = offsets[npts]
-
-    inds_a = np.empty(ntotal, dtype=patch_inds.dtype)
-    inds_b = np.empty(ntotal, dtype=patch_inds.dtype)
-    bin_indices = np.empty(ntotal, dtype=np.int64)
-    exp2phi1_real = np.empty(ntotal, dtype=ra.dtype)
-    exp2phi1_imag = np.empty(ntotal, dtype=ra.dtype)
-    exp2phi2_real = np.empty(ntotal, dtype=ra.dtype)
-    exp2phi2_imag = np.empty(ntotal, dtype=ra.dtype)
-
-    for i in prange(npts - 1):
-        rai = ra[i]
-        sdi = sin_dec[i]
-        cdi = cos_dec[i]
-        x1 = cdi * np.cos(rai)
-        y1 = cdi * np.sin(rai)
+        x1 = cdi * cos_ra[i]
+        y1 = cdi * sin_ra[i]
         z1 = sdi
-        out_idx = offsets[i]
 
         for j in range(i + 1, npts):
             raj = ra[j]
+            decj = dec[j]
             sdj = sin_dec[j]
             cdj = cos_dec[j]
-            x2 = cdj * np.cos(raj)
-            y2 = cdj * np.sin(raj)
+            x2 = cdj * cos_ra[j]
+            y2 = cdj * sin_ra[j]
             z2 = sdj
 
             dra = raj - rai
-            cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
-            
-            # Range check with cosines
-            if cos_theta >= cos_max or cos_theta <= cos_min:
-                continue
-
             bin_idx = -1
-            for b in range(binedges.size - 1):
-                if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
-                    bin_idx = b
-                    break
+
+            if angle_method_code == 0:
+                cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
+                if cos_theta > 1.0:
+                    cos_theta = 1.0
+                elif cos_theta < -1.0:
+                    cos_theta = -1.0
+                theta = np.arccos(cos_theta)
+                if theta <= theta_min or theta >= theta_max:
+                    continue
+                for b in range(binedges.size - 1):
+                    if theta > binedges[b] and theta < binedges[b + 1]:
+                        bin_idx = b
+                        break
+            elif angle_method_code == 1:
+                ddec2 = 0.5 * (decj - deci)
+                dra2 = 0.5 * dra
+                sddec = np.sin(ddec2)
+                sdra = np.sin(dra2)
+                hav = sddec * sddec + cdi * cdj * sdra * sdra
+                if hav <= hav_min or hav >= hav_max:
+                    continue
+                for b in range(binedges.size - 1):
+                    if hav > hav_binedges[b] and hav < hav_binedges[b + 1]:
+                        bin_idx = b
+                        break
+            else:
+                cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
+                if cos_theta >= cos_max or cos_theta <= cos_min:
+                    continue
+                for b in range(binedges.size - 1):
+                    if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
+                        bin_idx = b
+                        break
+
             if bin_idx < 0:
                 continue
 
@@ -221,6 +240,14 @@ def _compute_pairs_impl(
             exp2phi2_imag[out_idx] = s2
             out_idx += 1
 
+    inds_a = inds_a[:out_idx]
+    inds_b = inds_b[:out_idx]
+    bin_indices = bin_indices[:out_idx]
+    exp2phi1_real = exp2phi1_real[:out_idx]
+    exp2phi1_imag = exp2phi1_imag[:out_idx]
+    exp2phi2_real = exp2phi2_real[:out_idx]
+    exp2phi2_imag = exp2phi2_imag[:out_idx]
+
     return (
         inds_a,
         inds_b,
@@ -232,10 +259,18 @@ def _compute_pairs_impl(
     )
 
 
-_compute_pairs_numba = njit(fastmath=True, parallel=True)(_compute_pairs_impl)
-_compute_pairs_numba_precise = njit(fastmath=False, parallel=True)(
-    _compute_pairs_impl
-)
+_compute_pairs_kernel_cache: Dict[bool, Any] = {}
+
+
+def _get_pairs_numba_kernel(fastmath: bool) -> Any:
+    key = bool(fastmath)
+    cached = _compute_pairs_kernel_cache.get(key)
+    if cached is not None:
+        return cached
+
+    kernel = njit(fastmath=key, parallel=True)(_compute_pairs_impl)
+    _compute_pairs_kernel_cache[key] = kernel
+    return kernel
 
 
 def _normalize_precision(
@@ -365,6 +400,7 @@ class Correlation:
         self.aperture_shear_all_patches = njit(fastmath=fastmath)(
             _compute_aperture_shear_all_patches
         )
+        self._compute_pairs_kernel = _get_pairs_numba_kernel(fastmath)
         self.radius_filter = 5 * self.theta_Q
 
         if mask is not None:
@@ -409,6 +445,8 @@ class Correlation:
         state = self.__dict__.copy()
         if 'backend' in state:
             del state['backend']
+        if '_compute_pairs_kernel' in state:
+            del state['_compute_pairs_kernel']
         if '_tomo_combination_cache' in state:
             state['_tomo_combination_cache'] = {}
         return state
@@ -420,6 +458,7 @@ class Correlation:
             self.aperture_shear_all_patches = njit(fastmath=self.fastmath)(
                 _compute_aperture_shear_all_patches
             )
+        self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
         if "_prepare_version" not in self.__dict__:
             self._prepare_version = 0
         if "_tomo_sumofweights_cache" not in self.__dict__:
@@ -641,12 +680,17 @@ class Correlation:
         return comb_i_dev, comb_j_dev, ncomb
 
     def get_pairs_patch(
-        self, patch_inds: np.ndarray, ra: np.ndarray, dec: np.ndarray
+        self,
+        patch_inds: np.ndarray,
+        ra: np.ndarray,
+        dec: np.ndarray,
+        angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
         ra_local = np.asarray(ra, dtype=self.rotation_dtype)
         dec_local = np.asarray(dec, dtype=self.rotation_dtype)
         binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
+        angle_method_code = _resolve_angle_method_code(angle_method)
 
         if patch_inds_local.size < 2:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
@@ -660,13 +704,12 @@ class Correlation:
             exp2phi1_imag,
             exp2phi2_real,
             exp2phi2_imag,
-        ) = (
-            _compute_pairs_numba if self.fastmath else _compute_pairs_numba_precise
-        )(
+        ) = self._compute_pairs_kernel(
             patch_inds_local,
             ra_local,
             dec_local,
             binedges_local,
+            angle_method_code,
         )
 
         npairs = bin_indices.size
@@ -707,7 +750,11 @@ class Correlation:
 
         return all_inds, exp2phi
 
-    def __get_pairs_helper__(self, i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def __get_pairs_helper__(
+        self,
+        i: int,
+        angle_method: str = "haversine",
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
         patch_inds = hp.query_disc(
             self.nside, vec=vec, radius=np.radians(self.patch_size / 60)
@@ -717,7 +764,12 @@ class Correlation:
         (
             inds,
             exp2theta,
-        ) = self.get_pairs_patch(pix_inds, ra, dec)
+        ) = self.get_pairs_patch(
+            pix_inds,
+            ra,
+            dec,
+            angle_method=angle_method,
+        )
         ninds = np.array([len(inds[i][0]) for i in range(self.nbins)], dtype=self.index_dtype)
         all_inds = np.zeros((2, int(ninds.sum())), dtype=self.index_dtype)
         for bin_idx in range(self.nbins):
@@ -728,10 +780,10 @@ class Correlation:
 
         return all_inds, exp2theta.astype(self.rotation_complex_dtype, copy=False), ninds
 
-    def calculate_pairs_2PCF(self) -> None:
+    def calculate_pairs_2PCF(self, angle_method: str = "haversine") -> None:
         pair_inds, pair_exp2phi, bins = [], [], []
         for i in trange(self.n_patches, desc="2PCF pairs", unit=" patches"):
-            result = self.__get_pairs_helper__(i)
+            result = self.__get_pairs_helper__(i, angle_method=angle_method)
 
             pair_inds.append(result[0])
             pair_exp2phi.append(result[1])
@@ -873,6 +925,7 @@ class Correlation:
     def preprocess(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        angle_method: str = "haversine",
     ) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
@@ -883,9 +936,20 @@ class Correlation:
         else:
             self.calculate_pairs_M_a(aperture_filter=aperture_filter)
         logger.info("Calculating pairs for 2PCF")
-        self.calculate_pairs_2PCF()
+        self.calculate_pairs_2PCF(angle_method=angle_method)
         logger.info("Preparing flattened pair arrays on backend device")
         self.prepare()
+
+    def precompute(
+        self,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        angle_method: str = "haversine",
+    ) -> None:
+        """Backward-compatible alias for preprocess()."""
+        self.preprocess(
+            aperture_filter=aperture_filter,
+            angle_method=angle_method,
+        )
 
     def save_pairs(self, filepath: str) -> None:
         if (
@@ -981,9 +1045,9 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> np.ndarray:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
-        g1_np = np.asarray(g1, dtype=self.map_dtype)
-        g2_np = np.asarray(g2, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
+        g1_arr = self._coerce_map_input_array(g1)
+        g2_arr = self._coerce_map_input_array(g2)
+        w_arr = self._coerce_map_input_array(w)
         kernel = getattr(self.backend, "aperture_shear_kernel", None)
         if kernel is None:
             raise RuntimeError(
@@ -998,9 +1062,9 @@ class Correlation:
                 self.Q_sin_flat,
                 self.Q_val_flat,
                 self.Q_offsets,
-                g1_np,
-                g2_np,
-                w_np,
+                g1_arr,
+                g2_arr,
+                w_arr,
                 self.Q_patch_area_flat,
                 aperture_shear,
             )
@@ -1017,9 +1081,9 @@ class Correlation:
         Q_patch_area_dev = self.backend.to_device(
             self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
         ).astype(backend_dtype, copy=False)
-        g1_dev = self.backend.to_device(g1_np).astype(backend_dtype, copy=False)
-        g2_dev = self.backend.to_device(g2_np).astype(backend_dtype, copy=False)
-        w_dev = self.backend.to_device(w_np).astype(backend_dtype, copy=False)
+        g1_dev = self._to_backend_array(g1_arr, dtype=backend_dtype)
+        g2_dev = self._to_backend_array(g2_arr, dtype=backend_dtype)
+        w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
 
         weighted_num = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
         weighted_den = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
@@ -1038,8 +1102,8 @@ class Correlation:
     ) -> np.ndarray:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
-        map_values_np = np.asarray(map_values, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
+        map_values_arr = self._coerce_map_input_array(map_values)
+        w_arr = self._coerce_map_input_array(w)
         kernel = getattr(self.backend, "aperture_density_kernel", None)
         if kernel is None:
             raise RuntimeError(
@@ -1052,8 +1116,8 @@ class Correlation:
                 self.Q_inds_flat,
                 self.Q_val_flat,
                 self.Q_offsets,
-                map_values_np,
-                w_np,
+                map_values_arr,
+                w_arr,
                 self.Q_patch_area_flat,
                 aperture_density,
             )
@@ -1068,8 +1132,8 @@ class Correlation:
         Q_patch_area_dev = self.backend.to_device(
             self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
         ).astype(backend_dtype, copy=False)
-        map_values_dev = self.backend.to_device(map_values_np).astype(backend_dtype, copy=False)
-        w_dev = self.backend.to_device(w_np).astype(backend_dtype, copy=False)
+        map_values_dev = self._to_backend_array(map_values_arr, dtype=backend_dtype)
+        w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
 
         weighted_num = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
         weighted_den = self.backend.zeros(Q_inds_dev.shape[0], dtype=backend_dtype)
@@ -1192,10 +1256,10 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        density1_dev = self.backend.to_device(density1).astype(self.map_dtype, copy=False)
-        density2_dev = self.backend.to_device(density2).astype(self.map_dtype, copy=False)
-        w1_dev = self.backend.to_device(w1).astype(self.map_dtype, copy=False)
-        w2_dev = self.backend.to_device(w2).astype(self.map_dtype, copy=False)
+        density1_dev = self._to_backend_array(density1, dtype=self.map_dtype)
+        density2_dev = self._to_backend_array(density2, dtype=self.map_dtype)
+        w1_dev = self._to_backend_array(w1, dtype=self.map_dtype)
+        w2_dev = self._to_backend_array(w2, dtype=self.map_dtype)
 
         if sumofweights is None:
             sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
@@ -1281,13 +1345,11 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        density_lens_dev = self.backend.to_device(density_lens).astype(
-            self.map_dtype, copy=False
-        )
-        g1_source_dev = self.backend.to_device(g1_source).astype(self.map_dtype, copy=False)
-        g2_source_dev = self.backend.to_device(g2_source).astype(self.map_dtype, copy=False)
-        w_lens_dev = self.backend.to_device(w_lens).astype(self.map_dtype, copy=False)
-        w_source_dev = self.backend.to_device(w_source).astype(self.map_dtype, copy=False)
+        density_lens_dev = self._to_backend_array(density_lens, dtype=self.map_dtype)
+        g1_source_dev = self._to_backend_array(g1_source, dtype=self.map_dtype)
+        g2_source_dev = self._to_backend_array(g2_source, dtype=self.map_dtype)
+        w_lens_dev = self._to_backend_array(w_lens, dtype=self.map_dtype)
+        w_source_dev = self._to_backend_array(w_source, dtype=self.map_dtype)
 
         if sumofweights is None:
             sum_ab = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
@@ -1372,9 +1434,9 @@ class Correlation:
         sumofweights: Optional[Union[np.ndarray, float]] = None,
         return_numpy: bool = True,
     ) -> Tuple[Any, Any]:
-        g1_dev = self.backend.to_device(g1).astype(self.map_dtype, copy=False)
-        g2_dev = self.backend.to_device(g2).astype(self.map_dtype, copy=False)
-        w_dev = self.backend.to_device(w).astype(self.map_dtype, copy=False)
+        g1_dev = self._to_backend_array(g1, dtype=self.map_dtype)
+        g2_dev = self._to_backend_array(g2, dtype=self.map_dtype)
+        w_dev = self._to_backend_array(w, dtype=self.map_dtype)
 
         if sumofweights is None:
             sumofweights_dev = self._get_xipm_sumofweights(w_dev, w_dev)
@@ -1458,12 +1520,12 @@ class Correlation:
         sumofweights_ba: Optional[Union[np.ndarray, float]] = None,
         return_numpy: bool = True,
     ) -> Tuple[Any, Any]:
-        g11_dev = self.backend.to_device(g11).astype(self.map_dtype, copy=False)
-        g21_dev = self.backend.to_device(g21).astype(self.map_dtype, copy=False)
-        g12_dev = self.backend.to_device(g12).astype(self.map_dtype, copy=False)
-        g22_dev = self.backend.to_device(g22).astype(self.map_dtype, copy=False)
-        w1_dev = self.backend.to_device(w1).astype(self.map_dtype, copy=False)
-        w2_dev = self.backend.to_device(w2).astype(self.map_dtype, copy=False)
+        g11_dev = self._to_backend_array(g11, dtype=self.map_dtype)
+        g21_dev = self._to_backend_array(g21, dtype=self.map_dtype)
+        g12_dev = self._to_backend_array(g12, dtype=self.map_dtype)
+        g22_dev = self._to_backend_array(g22, dtype=self.map_dtype)
+        w1_dev = self._to_backend_array(w1, dtype=self.map_dtype)
+        w2_dev = self._to_backend_array(w2, dtype=self.map_dtype)
 
         if sumofweights_ab is None:
             sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
@@ -1636,9 +1698,51 @@ class Correlation:
         per_comb = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
         return self.backend.module.stack((per_comb, per_comb), axis=0)
 
+    def _is_backend_native_array(self, array: Any) -> bool:
+        if self.backend.name != "cupy":
+            return False
+
+        module_ndarray = getattr(self.backend.module, "ndarray", None)
+        if module_ndarray is not None and not isinstance(array, module_ndarray):
+            return False
+        if not hasattr(array, "device"):
+            return False
+
+        array_device = getattr(array, "device", None)
+        array_device_id = getattr(array_device, "id", None)
+        target_device_id = getattr(self.backend, "device_id", None)
+        if (
+            target_device_id is not None
+            and array_device_id is not None
+            and int(array_device_id) != int(target_device_id)
+        ):
+            return False
+
+        return True
+
+    def _to_backend_array(self, array: Any, dtype: Optional[Any] = None) -> Any:
+        backend_array = array if self._is_backend_native_array(array) else self.backend.to_device(array)
+        if dtype is not None:
+            backend_array = backend_array.astype(dtype, copy=False)
+        return backend_array
+
+    def _coerce_map_input_array(self, array: Any) -> Any:
+        if self._is_backend_native_array(array):
+            return array.astype(self.map_dtype, copy=False)
+        return np.asarray(array, dtype=self.map_dtype)
+
     def _fingerprint_weights(
-        self, w_np: np.ndarray
+        self, w_np: Any
     ) -> Tuple[Tuple[int, ...], str, str]:
+        if self._is_backend_native_array(w_np):
+            shape = tuple(getattr(w_np, "shape", ()))
+            dtype_str = np.dtype(getattr(w_np, "dtype", self.map_dtype)).str
+            device_id = getattr(getattr(w_np, "device", None), "id", "unknown")
+            data_ptr = getattr(getattr(w_np, "data", None), "ptr", None)
+            if data_ptr is None:
+                data_ptr = id(w_np)
+            return (shape, dtype_str, f"device:{device_id};ptr:{data_ptr}")
+
         w_contiguous = np.ascontiguousarray(w_np)
         digest = hashlib.blake2b(w_contiguous.tobytes()).hexdigest()
         return (w_contiguous.shape, w_contiguous.dtype.str, digest)
@@ -1986,13 +2090,13 @@ class Correlation:
         nzbins = shear_maps.shape[0]
         nzbin_combs = int(binom(nzbins + 1, 2))
 
-        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
-        shear_maps_dev = self.backend.to_device(shear_maps_np)
-        w_dev = self.backend.to_device(w_np)
+        shear_maps_arr = self._coerce_map_input_array(shear_maps)
+        w_arr = self._coerce_map_input_array(w)
+        shear_maps_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
+        w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
 
         if sumofweights is None:
-            w_fingerprint = self._fingerprint_weights(w_np)
+            w_fingerprint = self._fingerprint_weights(w_arr)
             cache = self._tomo_sumofweights_cache
             cache_is_valid = (
                 cache is not None
@@ -2013,18 +2117,22 @@ class Correlation:
                 self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
                 self._tomo_sumofweights_cache_prepare_version = self._prepare_version
         else:
-            sumofweights_np = np.asarray(sumofweights, dtype=self.map_dtype)
-            if sumofweights_np.ndim < 2:
+            sumofweights_arr = (
+                sumofweights
+                if self._is_backend_native_array(sumofweights)
+                else np.asarray(sumofweights, dtype=self.map_dtype)
+            )
+            if sumofweights_arr.ndim < 2:
                 raise ValueError(
                     "sumofweights must have at least two dimensions with "
                     "shape (2, nzbin_combs, ...)"
                 )
-            if sumofweights_np.shape[0] != 2 or sumofweights_np.shape[1] != nzbin_combs:
+            if sumofweights_arr.shape[0] != 2 or sumofweights_arr.shape[1] != nzbin_combs:
                 raise ValueError(
                     f"sumofweights must have first dimensions (2, {nzbin_combs}); "
-                    f"got {sumofweights_np.shape}"
+                    f"got {sumofweights_arr.shape}"
                 )
-            sumofweights_dev = self.backend.to_device(sumofweights_np)
+            sumofweights_dev = self._to_backend_array(sumofweights_arr, dtype=self.map_dtype)
 
         g1_fac, g2_fac = 1, 1
         if flip_g1:
@@ -2244,8 +2352,8 @@ class Correlation:
         half = self.map_dtype.type(0.5)
         nbins_total = self.n_patches * self.nbins
 
-        density_dev = self.backend.to_device(density_maps).astype(self.map_dtype, copy=False)
-        w_dev = self.backend.to_device(weights).astype(self.map_dtype, copy=False)
+        density_dev = self._to_backend_array(density_maps, dtype=self.map_dtype)
+        w_dev = self._to_backend_array(weights, dtype=self.map_dtype)
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         w_soa = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
 
@@ -2368,10 +2476,10 @@ class Correlation:
         map_backend_dtype = getattr(module, self.map_dtype.name)
         nbins_total = self.n_patches * self.nbins
 
-        density_dev = self.backend.to_device(density_maps).astype(self.map_dtype, copy=False)
-        shear_dev = self.backend.to_device(shear_maps).astype(self.map_dtype, copy=False)
-        density_w_dev = self.backend.to_device(density_w).astype(self.map_dtype, copy=False)
-        shear_w_dev = self.backend.to_device(shear_w).astype(self.map_dtype, copy=False)
+        density_dev = self._to_backend_array(density_maps, dtype=self.map_dtype)
+        shear_dev = self._to_backend_array(shear_maps, dtype=self.map_dtype)
+        density_w_dev = self._to_backend_array(density_w, dtype=self.map_dtype)
+        shear_w_dev = self._to_backend_array(shear_w, dtype=self.map_dtype)
 
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
@@ -2477,12 +2585,12 @@ class Correlation:
         terms. If ``gc_auto_correlations_only=True``, computes only auto-correlations
         ``(i, i)`` for each tomographic bin.
         """
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
-        nzbins = density_np.shape[0]
+        density_arr = self._coerce_map_input_array(density_maps)
+        w_arr = self._coerce_map_input_array(w)
+        nzbins = density_arr.shape[0]
         wtheta = self._density_density_tomo_vectorized(
-            density_np,
-            w_np,
+            density_arr,
+            w_arr,
             sumofweights,
             nzbins,
             gc_auto_correlations_only,
@@ -2513,55 +2621,55 @@ class Correlation:
         ``flip_g1`` and ``flip_g2`` mirror TreeCorr's ``Catalog(..., flip_g1=...)``
         and ``flip_g2`` behavior for source shears.
         """
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        wd_np = np.asarray(density_weights, dtype=self.map_dtype)
-        ws_np = np.asarray(shear_weights, dtype=self.map_dtype)
-        if density_np.ndim != 2:
+        density_arr = self._coerce_map_input_array(density_maps)
+        shear_arr = self._coerce_map_input_array(shear_maps)
+        wd_arr = self._coerce_map_input_array(density_weights)
+        ws_arr = self._coerce_map_input_array(shear_weights)
+        if density_arr.ndim != 2:
             raise ValueError(
                 "density_maps must have shape (n_lens_bins, npix); "
-                f"got {density_np.shape}"
+                f"got {density_arr.shape}"
             )
-        if shear_np.ndim != 3 or shear_np.shape[1] != 2:
+        if shear_arr.ndim != 3 or shear_arr.shape[1] != 2:
             raise ValueError(
                 "shear_maps must have shape (nzbins, 2, npix); "
-                f"got {shear_np.shape}"
+                f"got {shear_arr.shape}"
             )
-        if wd_np.shape != density_np.shape:
+        if wd_arr.shape != density_arr.shape:
             raise ValueError(
                 "density_weights must match density_maps shape; "
-                f"got {wd_np.shape} and {density_np.shape}"
+                f"got {wd_arr.shape} and {density_arr.shape}"
             )
-        if ws_np.ndim != 2:
+        if ws_arr.ndim != 2:
             raise ValueError(
                 "shear_weights must have shape (n_source_bins, npix); "
-                f"got {ws_np.shape}"
+                f"got {ws_arr.shape}"
             )
-        if ws_np.shape[0] != shear_np.shape[0] or ws_np.shape[1] != shear_np.shape[2]:
+        if ws_arr.shape[0] != shear_arr.shape[0] or ws_arr.shape[1] != shear_arr.shape[2]:
             raise ValueError(
                 "shear_weights must match shear_maps tomography/pixel dimensions; "
-                f"got {ws_np.shape} and {shear_np.shape}"
+                f"got {ws_arr.shape} and {shear_arr.shape}"
             )
-        if density_np.shape[1] != shear_np.shape[2]:
+        if density_arr.shape[1] != shear_arr.shape[2]:
             raise ValueError(
                 "density_maps and shear_maps must have the same number of pixels; "
-                f"got {density_np.shape[1]} and {shear_np.shape[2]}"
+                f"got {density_arr.shape[1]} and {shear_arr.shape[2]}"
             )
 
         if flip_g1 or flip_g2:
-            shear_np = shear_np.copy()
+            shear_arr = shear_arr.copy()
             if flip_g1:
-                shear_np[:, 0] *= -1
+                shear_arr[:, 0] *= -1
             if flip_g2:
-                shear_np[:, 1] *= -1
+                shear_arr[:, 1] *= -1
 
-        nlens_bins = density_np.shape[0]
-        nsource_bins = shear_np.shape[0]
+        nlens_bins = density_arr.shape[0]
+        nsource_bins = shear_arr.shape[0]
         gammat = self._density_shear_tomo_vectorized(
-            density_np,
-            shear_np,
-            wd_np,
-            ws_np,
+            density_arr,
+            shear_arr,
+            wd_arr,
+            ws_arr,
             sumofweights,
             nlens_bins,
             nsource_bins,
@@ -2636,10 +2744,10 @@ class Correlation:
         if fused_kernel is None:
             raise RuntimeError("Backend does not provide a fused 3x2pt tomography kernel.")
 
-        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        shear_w_np = np.asarray(shear_weights, dtype=self.map_dtype)
-        density_w_np = np.asarray(density_weights, dtype=self.map_dtype)
+        shear_np = self._coerce_map_input_array(shear_maps)
+        density_np = self._coerce_map_input_array(density_maps)
+        shear_w_np = self._coerce_map_input_array(shear_weights)
+        density_w_np = self._coerce_map_input_array(density_weights)
 
         if density_np.ndim != 2:
             raise ValueError(
@@ -2686,10 +2794,10 @@ class Correlation:
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
 
-        density_dev = self.backend.to_device(density_np).astype(self.map_dtype, copy=False)
-        shear_dev = self.backend.to_device(shear_np).astype(self.map_dtype, copy=False)
-        density_w_dev = self.backend.to_device(density_w_np).astype(self.map_dtype, copy=False)
-        shear_w_dev = self.backend.to_device(shear_w_np).astype(self.map_dtype, copy=False)
+        density_dev = self._to_backend_array(density_np, dtype=self.map_dtype)
+        shear_dev = self._to_backend_array(shear_np, dtype=self.map_dtype)
+        density_w_dev = self._to_backend_array(density_w_np, dtype=self.map_dtype)
+        shear_w_dev = self._to_backend_array(shear_w_np, dtype=self.map_dtype)
 
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
