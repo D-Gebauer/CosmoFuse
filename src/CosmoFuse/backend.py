@@ -1249,6 +1249,576 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     return _cupy_tomo_vectorized_kernel
 
 
+@njit(fastmath=True, parallel=True)
+def _cpu_3x2pt_tomo_fused_kernel(
+    density_map: np.ndarray,
+    shear_map: np.ndarray,
+    density_weights: np.ndarray,
+    shear_weights: np.ndarray,
+    ind_i: np.ndarray,
+    ind_j: np.ndarray,
+    rot_i: np.ndarray,
+    rot_j: np.ndarray,
+    pair_offsets: np.ndarray,
+    q_inds: np.ndarray,
+    q_cos: np.ndarray,
+    q_sin: np.ndarray,
+    q_val: np.ndarray,
+    q_offsets: np.ndarray,
+    q_patch_area: np.ndarray,
+    ss_comb_i: np.ndarray,
+    ss_comb_j: np.ndarray,
+    dd_comb_i: np.ndarray,
+    dd_comb_j: np.ndarray,
+    ds_comb_i: np.ndarray,
+    ds_comb_j: np.ndarray,
+    out_ma_num: np.ndarray,
+    out_ma_den: np.ndarray,
+    out_mg_num: np.ndarray,
+    out_mg_den: np.ndarray,
+    out_xip_num: np.ndarray,
+    out_xim_num: np.ndarray,
+    out_xipm_den: np.ndarray,
+    out_xig_num: np.ndarray,
+    out_xig_den: np.ndarray,
+    out_xit_num: np.ndarray,
+    out_xit_den: np.ndarray,
+) -> None:
+    n_patches = q_offsets.shape[0] - 1
+    n_shear = shear_map.shape[1]
+    n_density = density_map.shape[1]
+    nbins_total = pair_offsets.shape[0] - 1
+
+    for tomo_idx in prange(n_shear):
+        for patch_idx in range(n_patches):
+            start = q_offsets[patch_idx]
+            stop = q_offsets[patch_idx + 1]
+            sum_w = 0.0
+            sum_num = 0.0
+            for q_idx in range(start, stop):
+                pix_idx = q_inds[q_idx]
+                weight = shear_weights[pix_idx, tomo_idx]
+                gt = -shear_map[pix_idx, tomo_idx, 0] * q_cos[q_idx] - shear_map[pix_idx, tomo_idx, 1] * q_sin[q_idx]
+                sum_w += weight
+                sum_num += weight * gt * q_val[q_idx]
+
+            out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
+            out_ma_den[tomo_idx, patch_idx] = sum_w
+
+    for tomo_idx in prange(n_density):
+        for patch_idx in range(n_patches):
+            start = q_offsets[patch_idx]
+            stop = q_offsets[patch_idx + 1]
+            sum_w = 0.0
+            sum_num = 0.0
+            for q_idx in range(start, stop):
+                pix_idx = q_inds[q_idx]
+                weight = density_weights[pix_idx, tomo_idx]
+                sum_w += weight
+                sum_num += weight * density_map[pix_idx, tomo_idx] * q_val[q_idx]
+
+            out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
+            out_mg_den[tomo_idx, patch_idx] = sum_w
+
+    n_ss_comb = ss_comb_i.shape[0]
+    for comb_ori in prange(2 * n_ss_comb):
+        comb_idx = comb_ori >> 1
+        ori = comb_ori & 1
+        i_bin = ss_comb_i[comb_idx]
+        j_bin = ss_comb_j[comb_idx]
+
+        if ori == 1 and i_bin == j_bin:
+            continue
+
+        ai = i_bin
+        bj = j_bin
+        if ori == 1 and i_bin != j_bin:
+            ai = j_bin
+            bj = i_bin
+
+        for bin_flat in range(nbins_total):
+            start = pair_offsets[bin_flat]
+            stop = pair_offsets[bin_flat + 1]
+            sum_p = 0.0
+            sum_m = 0.0
+            sum_w = 0.0
+            for pair_idx in range(start, stop):
+                pix_a = ind_i[pair_idx]
+                pix_b = ind_j[pair_idx]
+
+                exp_a = rot_i[pair_idx]
+                exp_b = rot_j[pair_idx]
+
+                ga1 = shear_map[pix_a, ai, 0]
+                ga2 = shear_map[pix_a, ai, 1]
+                gb1 = shear_map[pix_b, bj, 0]
+                gb2 = shear_map[pix_b, bj, 1]
+
+                a_r = ga1 * exp_a.real - ga2 * exp_a.imag
+                a_i = ga1 * exp_a.imag + ga2 * exp_a.real
+                b_r = gb1 * exp_b.real - gb2 * exp_b.imag
+                b_i = gb1 * exp_b.imag + gb2 * exp_b.real
+
+                w_pair = shear_weights[pix_a, ai] * shear_weights[pix_b, bj]
+                sum_w += w_pair
+                sum_p += w_pair * (b_r * a_r + b_i * a_i)
+                sum_m += w_pair * (b_r * a_r - b_i * a_i)
+
+            out_xip_num[comb_ori, bin_flat] = sum_p
+            out_xim_num[comb_ori, bin_flat] = sum_m
+            out_xipm_den[comb_ori, bin_flat] = sum_w
+
+    n_dd_comb = dd_comb_i.shape[0]
+    for comb_ori in prange(2 * n_dd_comb):
+        comb_idx = comb_ori >> 1
+        ori = comb_ori & 1
+        i_bin = dd_comb_i[comb_idx]
+        j_bin = dd_comb_j[comb_idx]
+
+        if ori == 1 and i_bin == j_bin:
+            continue
+
+        ai = i_bin
+        bj = j_bin
+        if ori == 1 and i_bin != j_bin:
+            ai = j_bin
+            bj = i_bin
+
+        for bin_flat in range(nbins_total):
+            start = pair_offsets[bin_flat]
+            stop = pair_offsets[bin_flat + 1]
+            sum_num = 0.0
+            sum_den = 0.0
+            for pair_idx in range(start, stop):
+                pix_a = ind_i[pair_idx]
+                pix_b = ind_j[pair_idx]
+                weight = density_weights[pix_a, ai] * density_weights[pix_b, bj]
+                sum_den += weight
+                sum_num += weight * density_map[pix_a, ai] * density_map[pix_b, bj]
+
+            out_xig_num[comb_ori, bin_flat] = sum_num
+            out_xig_den[comb_ori, bin_flat] = sum_den
+
+    n_ds_comb = ds_comb_i.shape[0]
+    for comb_idx in prange(n_ds_comb):
+        lens_bin = ds_comb_i[comb_idx]
+        source_bin = ds_comb_j[comb_idx]
+
+        for bin_flat in range(nbins_total):
+            start = pair_offsets[bin_flat]
+            stop = pair_offsets[bin_flat + 1]
+            sum_num = 0.0
+            sum_den = 0.0
+            for pair_idx in range(start, stop):
+                pix_a = ind_i[pair_idx]
+                pix_b = ind_j[pair_idx]
+
+                exp_ab = rot_j[pair_idx]
+                gt_ab = (
+                    -shear_map[pix_b, source_bin, 0] * exp_ab.real
+                    + shear_map[pix_b, source_bin, 1] * exp_ab.imag
+                )
+                w_ab = density_weights[pix_a, lens_bin] * shear_weights[pix_b, source_bin]
+                sum_num += w_ab * density_map[pix_a, lens_bin] * gt_ab
+                sum_den += w_ab
+
+                exp_ba = rot_i[pair_idx]
+                gt_ba = (
+                    -shear_map[pix_a, source_bin, 0] * exp_ba.real
+                    + shear_map[pix_a, source_bin, 1] * exp_ba.imag
+                )
+                w_ba = density_weights[pix_b, lens_bin] * shear_weights[pix_a, source_bin]
+                sum_num += w_ba * density_map[pix_b, lens_bin] * gt_ba
+                sum_den += w_ba
+
+            out_xit_num[comb_idx, bin_flat] = sum_num
+            out_xit_den[comb_idx, bin_flat] = sum_den
+
+
+def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
+    kernel_cache: dict[tuple[str, str], Any] = {}
+
+    def _get_or_build_raw_kernel(
+        map_c_type: str,
+        complex_c_type: str,
+        suffix: str,
+    ) -> Optional[Any]:
+        key = (map_c_type, suffix)
+        cached = kernel_cache.get(key)
+        if cached is not None:
+            return cached
+
+        kernel_name = f"gpu_3x2pt_tomo_fused_{map_c_type}_{suffix}"
+        source = (
+            _COMMON_CUDA_SOURCE
+            + f"""
+        #include <cuComplex.h>
+
+        extern "C" __global__
+        void {kernel_name}(
+            const {map_c_type}* density,
+            const {map_c_type}* shear,
+            const {map_c_type}* density_w,
+            const {map_c_type}* shear_w,
+            const long long* ind_i,
+            const long long* ind_j,
+            const {complex_c_type}* rot_i,
+            const {complex_c_type}* rot_j,
+            const long long* pair_offsets,
+            const long long nbins_total,
+            const int n_density_bins,
+            const int n_shear_bins,
+            const int npatches,
+            const int npix,
+            const unsigned int* q_inds,
+            const {map_c_type}* q_cos,
+            const {map_c_type}* q_sin,
+            const {map_c_type}* q_val,
+            const long long* q_offsets,
+            const {map_c_type}* q_patch_area,
+            const int* ss_comb_i,
+            const int* ss_comb_j,
+            const int n_ss_comb,
+            const int* dd_comb_i,
+            const int* dd_comb_j,
+            const int n_dd_comb,
+            const int* ds_comb_i,
+            const int* ds_comb_j,
+            const int n_ds_comb,
+            {map_c_type}* out_ma_num,
+            {map_c_type}* out_ma_den,
+            {map_c_type}* out_mg_num,
+            {map_c_type}* out_mg_den,
+            {map_c_type}* out_xip_num,
+            {map_c_type}* out_xim_num,
+            {map_c_type}* out_xipm_den,
+            {map_c_type}* out_xig_num,
+            {map_c_type}* out_xig_den,
+            {map_c_type}* out_xit_num,
+            {map_c_type}* out_xit_den)
+        {{
+            const int lane = (int)threadIdx.x;
+            const long long x = (long long)blockIdx.x;
+            const int y = (int)blockIdx.y;
+            const int z = (int)blockIdx.z;
+
+            if (z == 0) {{
+                if (x >= npatches || y >= n_shear_bins) return;
+                const long long start = q_offsets[x];
+                const long long stop = q_offsets[x + 1];
+                {map_c_type} sum_num = ({map_c_type})0.0;
+                {map_c_type} sum_den = ({map_c_type})0.0;
+                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
+                    const unsigned int pix = q_inds[idx];
+                    const long long shear_idx = ((long long)pix * (long long)n_shear_bins + (long long)y) * 2LL;
+                    const long long w_idx = (long long)pix * (long long)n_shear_bins + (long long)y;
+                    const {map_c_type} g1 = shear[shear_idx];
+                    const {map_c_type} g2 = shear[shear_idx + 1LL];
+                    const {map_c_type} wv = shear_w[w_idx];
+                    const {map_c_type} gt = -g1 * q_cos[idx] - g2 * q_sin[idx];
+                    sum_num += wv * gt * q_val[idx];
+                    sum_den += wv;
+                }}
+                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
+                if (lane == 0) {{
+                    const long long out_idx = (long long)y * (long long)npatches + x;
+                    out_ma_num[out_idx] = q_patch_area[x] * sum_num;
+                    out_ma_den[out_idx] = sum_den;
+                }}
+                return;
+            }}
+
+            if (z == 1) {{
+                if (x >= npatches || y >= n_density_bins) return;
+                const long long start = q_offsets[x];
+                const long long stop = q_offsets[x + 1];
+                {map_c_type} sum_num = ({map_c_type})0.0;
+                {map_c_type} sum_den = ({map_c_type})0.0;
+                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
+                    const unsigned int pix = q_inds[idx];
+                    const long long d_idx = (long long)pix * (long long)n_density_bins + (long long)y;
+                    const {map_c_type} wv = density_w[d_idx];
+                    sum_num += wv * density[d_idx] * q_val[idx];
+                    sum_den += wv;
+                }}
+                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
+                if (lane == 0) {{
+                    const long long out_idx = (long long)y * (long long)npatches + x;
+                    out_mg_num[out_idx] = q_patch_area[x] * sum_num;
+                    out_mg_den[out_idx] = sum_den;
+                }}
+                return;
+            }}
+
+            if (z == 2) {{
+                if (x >= nbins_total || y >= (2 * n_ss_comb)) return;
+                const int comb_idx = y >> 1;
+                const int ori = y & 1;
+                const int i = ss_comb_i[comb_idx];
+                const int j = ss_comb_j[comb_idx];
+                if (ori == 1 && i == j) return;
+
+                int ai = i;
+                int bj = j;
+                if (ori == 1 && i != j) {{
+                    ai = j;
+                    bj = i;
+                }}
+
+                const long long start = pair_offsets[x];
+                const long long stop = pair_offsets[x + 1];
+                {map_c_type} sum_p = ({map_c_type})0.0;
+                {map_c_type} sum_m = ({map_c_type})0.0;
+                {map_c_type} sum_w = ({map_c_type})0.0;
+                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
+                    const long long pix_a = ind_i[idx];
+                    const long long pix_b = ind_j[idx];
+                    const {complex_c_type} ex_a = rot_i[idx];
+                    const {complex_c_type} ex_b = rot_j[idx];
+
+                    const long long a_base = ((pix_a * (long long)n_shear_bins + (long long)ai) * 2LL);
+                    const long long b_base = ((pix_b * (long long)n_shear_bins + (long long)bj) * 2LL);
+                    const {map_c_type} ga1 = shear[a_base];
+                    const {map_c_type} ga2 = shear[a_base + 1LL];
+                    const {map_c_type} gb1 = shear[b_base];
+                    const {map_c_type} gb2 = shear[b_base + 1LL];
+
+                    const {map_c_type} a_r = ga1 * ex_a.x - ga2 * ex_a.y;
+                    const {map_c_type} a_i = ga1 * ex_a.y + ga2 * ex_a.x;
+                    const {map_c_type} b_r = gb1 * ex_b.x - gb2 * ex_b.y;
+                    const {map_c_type} b_i = gb1 * ex_b.y + gb2 * ex_b.x;
+
+                    const long long wa_idx = pix_a * (long long)n_shear_bins + (long long)ai;
+                    const long long wb_idx = pix_b * (long long)n_shear_bins + (long long)bj;
+                    const {map_c_type} wv = shear_w[wa_idx] * shear_w[wb_idx];
+                    sum_w += wv;
+                    sum_p += wv * (b_r * a_r + b_i * a_i);
+                    sum_m += wv * (b_r * a_r - b_i * a_i);
+                }}
+                block_reduce_sum_pair(sum_p, sum_m, &sum_p, &sum_m);
+                sum_w = block_reduce_sum(sum_w);
+                if (lane == 0) {{
+                    const long long out_idx = (long long)y * nbins_total + x;
+                    out_xip_num[out_idx] = sum_p;
+                    out_xim_num[out_idx] = sum_m;
+                    out_xipm_den[out_idx] = sum_w;
+                }}
+                return;
+            }}
+
+            if (z == 3) {{
+                if (x >= nbins_total || y >= (2 * n_dd_comb)) return;
+                const int comb_idx = y >> 1;
+                const int ori = y & 1;
+                const int i = dd_comb_i[comb_idx];
+                const int j = dd_comb_j[comb_idx];
+                if (ori == 1 && i == j) return;
+
+                int ai = i;
+                int bj = j;
+                if (ori == 1 && i != j) {{
+                    ai = j;
+                    bj = i;
+                }}
+
+                const long long start = pair_offsets[x];
+                const long long stop = pair_offsets[x + 1];
+                {map_c_type} sum_num = ({map_c_type})0.0;
+                {map_c_type} sum_den = ({map_c_type})0.0;
+                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
+                    const long long pix_a = ind_i[idx];
+                    const long long pix_b = ind_j[idx];
+                    const long long ia = pix_a * (long long)n_density_bins + (long long)ai;
+                    const long long jb = pix_b * (long long)n_density_bins + (long long)bj;
+                    const {map_c_type} wv = density_w[ia] * density_w[jb];
+                    sum_den += wv;
+                    sum_num += wv * density[ia] * density[jb];
+                }}
+                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
+                if (lane == 0) {{
+                    const long long out_idx = (long long)y * nbins_total + x;
+                    out_xig_num[out_idx] = sum_num;
+                    out_xig_den[out_idx] = sum_den;
+                }}
+                return;
+            }}
+
+            if (z == 4) {{
+                if (x >= nbins_total || y >= n_ds_comb) return;
+                const int lens_bin = ds_comb_i[y];
+                const int source_bin = ds_comb_j[y];
+                const long long start = pair_offsets[x];
+                const long long stop = pair_offsets[x + 1];
+                {map_c_type} sum_num = ({map_c_type})0.0;
+                {map_c_type} sum_den = ({map_c_type})0.0;
+                for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {{
+                    const long long pix_a = ind_i[idx];
+                    const long long pix_b = ind_j[idx];
+
+                    const long long lens_ab = pix_a * (long long)n_density_bins + (long long)lens_bin;
+                    const long long src_ab = pix_b * (long long)n_shear_bins + (long long)source_bin;
+                    const long long src_ab_base = src_ab * 2LL;
+                    const {complex_c_type} ex_ab = rot_j[idx];
+                    const {map_c_type} gt_ab = -shear[src_ab_base] * ex_ab.x + shear[src_ab_base + 1LL] * ex_ab.y;
+                    const {map_c_type} w_ab = density_w[lens_ab] * shear_w[src_ab];
+                    sum_num += w_ab * density[lens_ab] * gt_ab;
+                    sum_den += w_ab;
+
+                    const long long lens_ba = pix_b * (long long)n_density_bins + (long long)lens_bin;
+                    const long long src_ba = pix_a * (long long)n_shear_bins + (long long)source_bin;
+                    const long long src_ba_base = src_ba * 2LL;
+                    const {complex_c_type} ex_ba = rot_i[idx];
+                    const {map_c_type} gt_ba = -shear[src_ba_base] * ex_ba.x + shear[src_ba_base + 1LL] * ex_ba.y;
+                    const {map_c_type} w_ba = density_w[lens_ba] * shear_w[src_ba];
+                    sum_num += w_ba * density[lens_ba] * gt_ba;
+                    sum_den += w_ba;
+                }}
+                block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
+                if (lane == 0) {{
+                    const long long out_idx = (long long)y * nbins_total + x;
+                    out_xit_num[out_idx] = sum_num;
+                    out_xit_den[out_idx] = sum_den;
+                }}
+                return;
+            }}
+        }}
+        """
+        )
+
+        try:
+            kernel = module.RawKernel(
+                source,
+                kernel_name,
+                options=_CUPY_FASTMATH_OPTIONS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fused 3x2pt RawKernel compilation failed; using unfused path: %s",
+                exc,
+            )
+            return None
+
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_3x2pt_tomo_fused_kernel(
+        density_map: Any,
+        shear_map: Any,
+        density_weights: Any,
+        shear_weights: Any,
+        ind_i: Any,
+        ind_j: Any,
+        rot_i: Any,
+        rot_j: Any,
+        pair_offsets: Any,
+        q_inds: Any,
+        q_cos: Any,
+        q_sin: Any,
+        q_val: Any,
+        q_offsets: Any,
+        q_patch_area: Any,
+        ss_comb_i: Any,
+        ss_comb_j: Any,
+        dd_comb_i: Any,
+        dd_comb_j: Any,
+        ds_comb_i: Any,
+        ds_comb_j: Any,
+        out_ma_num: Any,
+        out_ma_den: Any,
+        out_mg_num: Any,
+        out_mg_den: Any,
+        out_xip_num: Any,
+        out_xim_num: Any,
+        out_xipm_den: Any,
+        out_xig_num: Any,
+        out_xig_den: Any,
+        out_xit_num: Any,
+        out_xit_den: Any,
+    ) -> bool:
+        if getattr(module, "RawKernel", None) is None:
+            return False
+
+        if rot_i.dtype == module.complex64:
+            complex_c_type = "cuFloatComplex"
+            suffix = "c64"
+        else:
+            complex_c_type = "cuDoubleComplex"
+            suffix = "c128"
+
+        map_c_type = "float" if density_map.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(
+            map_c_type,
+            complex_c_type,
+            suffix,
+        )
+        if raw_kernel is None:
+            return False
+
+        nbins_total = int(pair_offsets.shape[0] - 1)
+        npatches = int(q_offsets.shape[0] - 1)
+        n_density_bins = int(density_map.shape[1])
+        n_shear_bins = int(shear_map.shape[1])
+        npix = int(density_map.shape[0])
+        n_ss_comb = int(ss_comb_i.shape[0])
+        n_dd_comb = int(dd_comb_i.shape[0])
+        n_ds_comb = int(ds_comb_i.shape[0])
+
+        max_x = max(1, nbins_total, npatches)
+        max_y = max(1, n_shear_bins, n_density_bins, 2 * n_ss_comb, 2 * n_dd_comb, n_ds_comb)
+        threads = 256
+        blocks = (max_x, max_y, 5)
+
+        raw_kernel(
+            blocks,
+            (threads,),
+            (
+                density_map,
+                shear_map,
+                density_weights,
+                shear_weights,
+                ind_i,
+                ind_j,
+                rot_i,
+                rot_j,
+                pair_offsets,
+                np.int64(nbins_total),
+                np.int32(n_density_bins),
+                np.int32(n_shear_bins),
+                np.int32(npatches),
+                np.int32(npix),
+                q_inds,
+                q_cos,
+                q_sin,
+                q_val,
+                q_offsets,
+                q_patch_area,
+                ss_comb_i,
+                ss_comb_j,
+                np.int32(n_ss_comb),
+                dd_comb_i,
+                dd_comb_j,
+                np.int32(n_dd_comb),
+                ds_comb_i,
+                ds_comb_j,
+                np.int32(n_ds_comb),
+                out_ma_num,
+                out_ma_den,
+                out_mg_num,
+                out_mg_den,
+                out_xip_num,
+                out_xim_num,
+                out_xipm_den,
+                out_xig_num,
+                out_xig_den,
+                out_xit_num,
+                out_xit_den,
+            ),
+        )
+        return True
+
+    return _cupy_3x2pt_tomo_fused_kernel
+
+
 def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
@@ -1315,6 +1885,7 @@ class Backend:
         kernel_density_shear: Optional[Any] = None,
         kernel_density_density_tomo_vectorized: Optional[Any] = None,
         kernel_density_shear_tomo_vectorized: Optional[Any] = None,
+        kernel_3x2pt_tomo_fused: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
@@ -1332,6 +1903,7 @@ class Backend:
         self.kernel_density_shear_tomo_vectorized = (
             kernel_density_shear_tomo_vectorized
         )
+        self.kernel_3x2pt_tomo_fused = kernel_3x2pt_tomo_fused
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -1415,6 +1987,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             kernel_density_shear=_cpu_density_shear_corr_kernel,
             kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,
             kernel_density_shear_tomo_vectorized=_cpu_density_shear_tomo_vectorized_kernel,
+            kernel_3x2pt_tomo_fused=_cpu_3x2pt_tomo_fused_kernel,
         )
 
     elif device_type == 'gpu':
@@ -1437,6 +2010,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 kernel_density_shear=_build_cupy_density_shear_corr_kernel(cupy),
                 kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(cupy),
                 kernel_density_shear_tomo_vectorized=_build_cupy_density_shear_tomo_vectorized_kernel(cupy),
+                kernel_3x2pt_tomo_fused=_build_cupy_3x2pt_tomo_fused_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':

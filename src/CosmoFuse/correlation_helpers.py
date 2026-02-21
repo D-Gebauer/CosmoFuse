@@ -109,6 +109,77 @@ def _zeta_from_fields(
     return out
 
 
+def _zeta_from_cross_fields(
+    central_field: np.ndarray,
+    annulus_field: np.ndarray,
+) -> np.ndarray:
+    """Compute i3PCF covariance for central field vs cross-correlation annulus field.
+
+    Supports any number of annulus tomographic combinations:
+    - If annulus combinations match upper-triangular size for ``nzbins``, preserves
+      legacy ordering ``(z_center, z2, z3)`` with ``z2 <= z3``.
+    - Otherwise, treats annulus combinations as generic entries and returns all
+      ``(z_center, annulus_combination)`` covariances.
+    """
+    central = np.asarray(central_field)
+    annulus = np.asarray(annulus_field)
+
+    if central.ndim != 3:
+        raise ValueError(
+            "central_field must have shape (nmaps, nzbins, n_patches); "
+            f"got {central.shape}"
+        )
+    if annulus.ndim != 4:
+        raise ValueError(
+            "annulus_field must have shape (nmaps, n_correlations, n_patches, nbins); "
+            f"got {annulus.shape}"
+        )
+    if central.shape[0] != annulus.shape[0]:
+        raise ValueError(
+            "central_field and annulus_field must have the same number of maps; "
+            f"got {central.shape[0]} and {annulus.shape[0]}"
+        )
+    if central.shape[2] != annulus.shape[2]:
+        raise ValueError(
+            "central_field and annulus_field must share n_patches; "
+            f"got {central.shape[2]} and {annulus.shape[2]}"
+        )
+
+    nmaps, nzbins, _ = central.shape
+    n_correlations = annulus.shape[1]
+    nbins = annulus.shape[3]
+
+    triangular_pairs = nzbins * (nzbins + 1) // 2
+    dtype = np.result_type(central.dtype, annulus.dtype)
+
+    if n_correlations == triangular_pairs:
+        zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
+        out = np.zeros((nmaps, len(zeta_combs), nbins), dtype=dtype)
+        for k, (z_center, z2, z3) in enumerate(zeta_combs):
+            pair_idx = _get_pair_index(nzbins, z2, z3)
+            center_vals = central[:, z_center, :]
+            annulus_vals = annulus[:, pair_idx, :, :]
+
+            mean_center = np.mean(center_vals, axis=1)
+            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+            out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
+        return out
+
+    out = np.zeros((nmaps, nzbins * n_correlations, nbins), dtype=dtype)
+    k = 0
+    for z_center in range(nzbins):
+        center_vals = central[:, z_center, :]
+        mean_center = np.mean(center_vals, axis=1)
+        for pair_idx in range(n_correlations):
+            annulus_vals = annulus[:, pair_idx, :, :]
+            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+            out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
+            k += 1
+    return out
+
+
 def zeta_g_plus(M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
     """g at center, xi+ at annulus."""
     return _zeta_from_fields(M_g, xi_p)
@@ -141,12 +212,12 @@ def zeta_a_g(M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
 
 def zeta_g_t(M_g: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
     """g at center, tangential shear gamma_t at annulus."""
-    return _zeta_from_fields(M_g, xi_t)
+    return _zeta_from_cross_fields(M_g, xi_t)
 
 
 def zeta_a_t(M_a: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
     """a at center, tangential shear gamma_t at annulus."""
-    return _zeta_from_fields(M_a, xi_t)
+    return _zeta_from_cross_fields(M_a, xi_t)
 
 
 def calculate_all_zetas(

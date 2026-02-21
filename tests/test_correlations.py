@@ -974,6 +974,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             "Q_val_flat",
             "Q_offsets",
             "Q_patch_area_flat",
+            "_aperture_filter_active_key",
         ]:
             state.pop(key, None)
 
@@ -985,8 +986,37 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIsNone(restored._tomo_sumofweights_cache)
         self.assertIsNone(restored._xipm_sumofweights_cache)
         self.assertEqual(restored._tomo_combination_cache, {})
+        self.assertEqual(restored._aperture_filter_active_key, "Q_T")
         self.assertIsNone(restored.Q_inds_flat)
         self.assertIsNone(restored.Q_offsets)
+
+    def test_aperture_filter_helpers_and_ensure_pairs_branches(self):
+        corr = self._make_small_cpu_corr()
+
+        self.assertEqual(corr._aperture_filter_key(correlations_module.Q_T), "Q_T")
+
+        def custom_filter(theta):
+            return np.full_like(theta, 2.0)
+
+        self.assertIsInstance(corr._aperture_filter_key(custom_filter), int)
+        vals = corr._evaluate_aperture_filter(custom_filter, np.array([1.0], dtype=np.float64))
+        np.testing.assert_allclose(vals, np.array([2.0], dtype=np.float64))
+
+        corr.Q_inds_flat = None
+        corr.Q_inds = [np.array([0], dtype=np.uint32)]
+        corr._aperture_filter_active_key = "different"
+        with patch.object(corr, "calculate_pairs_M_a") as spy_calc, patch.object(
+            corr, "_prepare_aperture_flat"
+        ) as spy_flat:
+            corr._ensure_aperture_pairs(aperture_filter=custom_filter)
+        spy_calc.assert_called_once()
+        spy_flat.assert_not_called()
+
+        corr.Q_inds_flat = np.array([0], dtype=np.uint32)
+        corr._aperture_filter_active_key = "stale"
+        with patch.object(corr, "calculate_pairs_M_a") as spy_calc:
+            corr._ensure_aperture_pairs(aperture_filter=custom_filter)
+        spy_calc.assert_called_once()
 
     def test_prepare_can_release_pair_inds(self):
         corr = Correlation(
@@ -1911,6 +1941,79 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_w,
             )
 
+    def test_vectorized_density_shear_additional_validation_errors(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_w = np.ones((2, 12), dtype=np.float64)
+        shear_w = np.ones((2, 12), dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "density_maps must have shape"):
+            corr.vectorized_density_shear(
+                np.ones((12,), dtype=np.float64),
+                shear_maps,
+                density_w,
+                shear_w,
+            )
+
+        with self.assertRaisesRegex(ValueError, "density_weights must match density_maps"):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                np.ones((3, 12), dtype=np.float64),
+                shear_w,
+            )
+
+        with self.assertRaisesRegex(ValueError, "shear_weights must have shape"):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                np.ones((2, 1, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "shear_weights must match shear_maps"):
+            corr.vectorized_density_shear(
+                density_maps,
+                shear_maps,
+                density_w,
+                np.ones((3, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "must have the same number of pixels"):
+            corr.vectorized_density_shear(
+                np.ones((2, 11), dtype=np.float64),
+                np.ones((2, 2, 12), dtype=np.float64),
+                np.ones((2, 11), dtype=np.float64),
+                np.ones((2, 12), dtype=np.float64),
+            )
+
+    def test_get_selected_tomo_cross_combinations_validation_errors(self):
+        corr = self._make_small_cpu_corr()
+
+        with self.assertRaisesRegex(
+            ValueError, r"iterable of \(lens_bin, source_bin\) pairs"
+        ):
+            corr._get_selected_tomo_cross_combination_indices(
+                2,
+                2,
+                ggl_bin_combinations=[0],
+            )
+
+        with self.assertRaisesRegex(ValueError, "Lens tomographic bin index"):
+            corr._get_selected_tomo_cross_combination_indices(
+                2,
+                2,
+                ggl_bin_combinations=[(2, 0)],
+            )
+
+        with self.assertRaisesRegex(ValueError, "Source tomographic bin index"):
+            corr._get_selected_tomo_cross_combination_indices(
+                2,
+                2,
+                ggl_bin_combinations=[(0, 2)],
+            )
+
     def test_normalize_tomo_sumofweights_per_comb_branches(self):
         corr = self._make_small_cpu_corr()
         nzbin_combs = 3
@@ -2223,55 +2326,18 @@ class TestCorrelationCoverage(unittest.TestCase):
 
     def test_get_3x2pt_tomo_raises_when_no_maps(self):
         corr = self._make_small_cpu_corr()
-        with self.assertRaisesRegex(ValueError, "At least one of shear_maps or density_maps"):
+        with self.assertRaisesRegex(ValueError, "Both shear_maps and density_maps"):
             corr.get_3x2pt_tomo()
 
-    def test_get_3x2pt_tomo_shear_only_and_density_only_weights_scalar_input(self):
+    def test_get_3x2pt_tomo_raises_when_only_one_map_is_provided(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((1, 2, 12), dtype=np.float64)
         density_maps = np.ones((1, 12), dtype=np.float64)
-        w = np.ones((1, 12), dtype=np.float64)
+        with self.assertRaisesRegex(ValueError, "Both shear_maps and density_maps"):
+            corr.get_3x2pt_tomo(shear_maps=shear_maps)
 
-        with patch.object(
-            corr,
-            "get_full_tomo_shear",
-            return_value=(
-                np.full((1, corr.n_patches), 1.0, dtype=np.float64),
-                np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
-                np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ) as spy_full:
-            M_ap, N_ap, xip, xim, wtheta, gammat = corr.get_3x2pt_tomo(
-                shear_maps=shear_maps,
-                weights=w,
-            )
-        self.assertIsNotNone(M_ap)
-        self.assertIsNotNone(xip)
-        self.assertIsNotNone(xim)
-        self.assertIsNone(N_ap)
-        self.assertIsNone(wtheta)
-        self.assertIsNone(gammat)
-        spy_full.assert_called_once()
-
-        with patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((1, corr.n_patches), 3.0, dtype=np.float64),
-                np.full((1, corr.n_patches, corr.nbins), 4.0, dtype=np.float64),
-            ),
-        ) as spy_density:
-            M_ap, N_ap, xip, xim, wtheta, gammat = corr.get_3x2pt_tomo(
-                density_maps=density_maps,
-                weights=w,
-            )
-        self.assertIsNone(M_ap)
-        self.assertIsNone(xip)
-        self.assertIsNone(xim)
-        self.assertIsNotNone(N_ap)
-        self.assertIsNotNone(wtheta)
-        self.assertIsNone(gammat)
-        spy_density.assert_called_once()
+        with self.assertRaisesRegex(ValueError, "Both shear_maps and density_maps"):
+            corr.get_3x2pt_tomo(density_maps=density_maps)
 
     def test_get_3x2pt_tomo_both_maps_weights_variants(self):
         corr = self._make_small_cpu_corr()
@@ -2279,27 +2345,20 @@ class TestCorrelationCoverage(unittest.TestCase):
         density_maps = np.ones((2, 12), dtype=np.float64)
         shear_w = np.full((2, 12), 2.0, dtype=np.float64)
         density_w = np.full((2, 12), 3.0, dtype=np.float64)
+        fused_return = (
+            np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+            np.full((2, corr.n_patches), 5.0, dtype=np.float64),
+            np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+            np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+            np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+            np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        )
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
-            return_value=(
-                np.full((2, corr.n_patches), 1.0, dtype=np.float64),
-                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
-                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ) as spy_full, patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
-                np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
-            ),
-        ) as spy_ap, patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ) as spy_ds:
+            "_compute_3x2pt_tomo_fused",
+            return_value=fused_return,
+        ) as spy_fused:
             out_dict = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2319,9 +2378,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(len(out_dict), 6)
         self.assertEqual(len(out_tuple), 6)
         self.assertEqual(len(out_shared), 6)
-        self.assertEqual(spy_full.call_count, 3)
-        self.assertEqual(spy_ap.call_count, 3)
-        self.assertEqual(spy_ds.call_count, 3)
+        self.assertEqual(spy_fused.call_count, 3)
 
         with self.assertRaisesRegex(
             ValueError,
@@ -2344,24 +2401,16 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
+            "_compute_3x2pt_tomo_fused",
             return_value=(
-                np.full((2, corr.n_patches), 1.0, dtype=np.float64),
-                np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+                np.zeros((2, corr.n_patches), dtype=np.float64),
+                np.zeros((2, corr.n_patches), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
                 np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
             ),
-        ) as spy_full, patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
-                np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
-            ),
-        ), patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((3, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ) as spy_ds:
+        ) as spy_fused:
             _ = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2371,13 +2420,10 @@ class TestCorrelationCoverage(unittest.TestCase):
                 flip_g2=True,
             )
 
-        spy_full.assert_called_once()
-        self.assertTrue(spy_full.call_args.kwargs["flip_g1"])
-        self.assertTrue(spy_full.call_args.kwargs["flip_g2"])
-        spy_ds.assert_called_once()
-        self.assertTrue(spy_ds.call_args.kwargs["flip_g1"])
-        self.assertTrue(spy_ds.call_args.kwargs["flip_g2"])
-        self.assertEqual(spy_ds.call_args.kwargs["ggl_bin_combinations"], selected)
+        spy_fused.assert_called_once()
+        self.assertTrue(spy_fused.call_args.kwargs["flip_g1"])
+        self.assertTrue(spy_fused.call_args.kwargs["flip_g2"])
+        self.assertEqual(spy_fused.call_args.kwargs["ggl_bin_combinations"], selected)
 
     def test_get_3x2pt_tomo_forwards_gc_auto_only_to_density(self):
         corr = self._make_small_cpu_corr()
@@ -2388,24 +2434,16 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
+            "_compute_3x2pt_tomo_fused",
             return_value=(
                 np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
                 np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ), patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((2, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+                np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
             ),
-        ) as spy_density, patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ):
+        ) as spy_fused:
             _ = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2413,8 +2451,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 gc_auto_correlations_only=True,
             )
 
-        spy_density.assert_called_once()
-        self.assertTrue(spy_density.call_args.kwargs["gc_auto_correlations_only"])
+        spy_fused.assert_called_once()
+        self.assertTrue(spy_fused.call_args.kwargs["gc_auto_correlations_only"])
 
     def test_get_3x2pt_tomo_forwards_aperture_filter(self):
         corr = self._make_small_cpu_corr()
@@ -2428,24 +2466,16 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
+            "_compute_3x2pt_tomo_fused",
             return_value=(
                 np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
                 np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ) as spy_full, patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((2, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+                np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
             ),
-        ) as spy_density, patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ):
+        ) as spy_fused:
             _ = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2453,8 +2483,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 aperture_filter=custom_filter,
             )
 
-        self.assertIs(spy_full.call_args.kwargs["aperture_filter"], custom_filter)
-        self.assertIs(spy_density.call_args.kwargs["aperture_filter"], custom_filter)
+        self.assertIs(spy_fused.call_args.kwargs["aperture_filter"], custom_filter)
 
     def test_get_3x2pt_tomo_both_maps_with_default_weights_none(self):
         corr = self._make_small_cpu_corr()
@@ -2463,24 +2492,16 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
+            "_compute_3x2pt_tomo_fused",
             return_value=(
                 np.full((1, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((1, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
                 np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ), patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((1, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+                np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
             ),
-        ), patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ):
+        ) as spy_fused:
             outputs = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2488,6 +2509,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
 
         self.assertEqual(len(outputs), 6)
+        self.assertTrue(np.all(spy_fused.call_args.kwargs["shear_weights"] == 1.0))
+        self.assertTrue(np.all(spy_fused.call_args.kwargs["density_weights"] == 1.0))
 
     def test_get_3x2pt_tomo_dict_missing_keys_falls_back_to_default_weights(self):
         corr = self._make_small_cpu_corr()
@@ -2496,24 +2519,16 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with patch.object(
             corr,
-            "get_full_tomo_shear",
+            "_compute_3x2pt_tomo_fused",
             return_value=(
                 np.full((1, corr.n_patches), 1.0, dtype=np.float64),
+                np.full((1, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
                 np.zeros((1, corr.n_patches, corr.nbins), dtype=np.float64),
-            ),
-        ), patch.object(
-            corr,
-            "get_full_tomo_density",
-            return_value=(
-                np.full((1, corr.n_patches), 5.0, dtype=np.float64),
                 np.full((1, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+                np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
             ),
-        ), patch.object(
-            corr,
-            "vectorized_density_shear",
-            return_value=np.full((1, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
-        ):
+        ) as spy_fused:
             outputs = corr.get_3x2pt_tomo(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2521,6 +2536,311 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
 
         self.assertEqual(len(outputs), 6)
+        self.assertTrue(np.all(spy_fused.call_args.kwargs["shear_weights"] == 1.0))
+        self.assertTrue(np.all(spy_fused.call_args.kwargs["density_weights"] == 1.0))
+
+    def test_get_3x2pt_tomo_fused_with_shared_weights_input(self):
+        corr = self._make_small_cpu_corr()
+        shear_maps = np.ones((2, 2, 12), dtype=np.float64)
+        density_maps = np.ones((2, 12), dtype=np.float64)
+        shared_w = np.full((2, 12), 9.0, dtype=np.float64)
+
+        with patch.object(
+            corr,
+            "_compute_3x2pt_tomo_fused",
+            return_value=(
+                np.zeros((2, corr.n_patches), dtype=np.float64),
+                np.zeros((2, corr.n_patches), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+                np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+                np.zeros((4, corr.n_patches, corr.nbins), dtype=np.float64),
+            ),
+        ) as spy_fused:
+            _ = corr.get_3x2pt_tomo(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                weights=shared_w,
+            )
+
+        np.testing.assert_array_equal(spy_fused.call_args.kwargs["shear_weights"], shared_w)
+        np.testing.assert_array_equal(spy_fused.call_args.kwargs["density_weights"], shared_w)
+
+    def test_get_3x2pt_tomo_matches_component_methods_cpu(self):
+        corr = self._make_small_cpu_corr()
+        rng = np.random.default_rng(1234)
+
+        shear_maps = rng.normal(size=(2, 2, 12)).astype(np.float64)
+        density_maps = rng.normal(size=(2, 12)).astype(np.float64)
+        shear_w = (1.0 + rng.random(size=(2, 12))).astype(np.float64)
+        density_w = (1.0 + rng.random(size=(2, 12))).astype(np.float64)
+        selected = [(0, 1), (1, 0)]
+
+        M_a_ref, xi_p_ref, xi_m_ref = corr.get_full_tomo_shear(
+            shear_maps,
+            shear_w,
+            flip_g1=True,
+        )
+        M_g_ref, xi_g_ref = corr.get_full_tomo_density(
+            density_maps,
+            density_w,
+            gc_auto_correlations_only=True,
+        )
+        xi_t_ref = corr.vectorized_density_shear(
+            density_maps,
+            shear_maps,
+            density_w,
+            shear_w,
+            ggl_bin_combinations=selected,
+            flip_g1=True,
+        )
+
+        M_a, M_g, xi_p, xi_m, xi_g, xi_t = corr.get_3x2pt_tomo(
+            shear_maps=shear_maps,
+            density_maps=density_maps,
+            weights={"shear": shear_w, "density": density_w},
+            gc_auto_correlations_only=True,
+            ggl_bin_combinations=selected,
+            flip_g1=True,
+        )
+
+        np.testing.assert_allclose(M_a, M_a_ref, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(M_g, M_g_ref, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(xi_p, xi_p_ref, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(xi_m, xi_m_ref, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(xi_g, xi_g_ref, rtol=1e-7, atol=1e-9)
+        np.testing.assert_allclose(xi_t, xi_t_ref, rtol=1e-7, atol=1e-9)
+
+    def test_compute_3x2pt_tomo_fused_missing_kernel_raises(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.kernel_3x2pt_tomo_fused = None
+
+        with self.assertRaisesRegex(RuntimeError, "fused 3x2pt tomography kernel"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+    def test_compute_3x2pt_tomo_fused_validation_errors(self):
+        corr = self._make_small_cpu_corr()
+
+        with self.assertRaisesRegex(ValueError, "density_maps must have shape"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((12,), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "shear_maps must have shape"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "density_weights must match density_maps"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((2, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "shear_weights must have shape"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "shear_weights must match shear_maps"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((2, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+        with self.assertRaisesRegex(ValueError, "must have the same number of pixels"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 11), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 11), dtype=np.float64),
+            )
+
+    def test_compute_3x2pt_tomo_fused_prepare_and_flip_g2_branch(self):
+        corr = self._make_small_cpu_corr()
+        corr.inds_dev = None
+        captured = {}
+
+        def fake_kernel(*args):
+            captured["shear"] = np.array(args[1], copy=True)
+
+        corr.backend.kernel_3x2pt_tomo_fused = fake_kernel
+
+        shear_maps = np.zeros((1, 2, 12), dtype=np.float64)
+        shear_maps[:, 0] = 2.0
+        shear_maps[:, 1] = 3.0
+
+        with patch.object(corr, "prepare", wraps=corr.prepare) as spy_prepare:
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+                flip_g2=True,
+            )
+
+        self.assertTrue(spy_prepare.called)
+        self.assertIn("shear", captured)
+        np.testing.assert_allclose(captured["shear"][:, 0, 1], -3.0)
+
+    def test_compute_3x2pt_tomo_fused_xig_cross_numpy_and_non_numpy_paths(self):
+        corr = self._make_small_cpu_corr()
+
+        density_maps = np.array(
+            [
+                [2.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                [3.0, 7.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        density_w = np.array(
+            [
+                [11.0, 13.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                [17.0, 19.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        shear_maps = np.zeros((1, 2, 12), dtype=np.float64)
+        shear_w = np.ones((1, 12), dtype=np.float64)
+
+        out_np = corr._compute_3x2pt_tomo_fused(
+            shear_maps=shear_maps,
+            density_maps=density_maps,
+            shear_weights=shear_w,
+            density_weights=density_w,
+            gc_auto_correlations_only=False,
+        )
+
+        xi_g_np = out_np[4]
+        pairs = corr.pair_inds[0]
+        ab_den = 0.0
+        ba_den = 0.0
+        ab_num = 0.0
+        ba_num = 0.0
+        for pix_a, pix_b in pairs:
+            w_ab = density_w[0, pix_a] * density_w[1, pix_b]
+            w_ba = density_w[1, pix_a] * density_w[0, pix_b]
+            ab_den += w_ab
+            ba_den += w_ba
+            ab_num += w_ab * density_maps[0, pix_a] * density_maps[1, pix_b]
+            ba_num += w_ba * density_maps[1, pix_a] * density_maps[0, pix_b]
+
+        expected_numpy = (ab_num + ba_num) / (ab_den + ba_den)
+        self.assertAlmostEqual(xi_g_np[1, 0, 0], expected_numpy)
+
+        original_name = corr.backend.name
+        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
+        original_to_device = corr.backend.to_device
+        original_to_numpy = corr.backend.to_numpy
+        try:
+            corr.backend.name = "cupy"
+            corr.backend.to_device = lambda arr: np.asarray(arr)
+            corr.backend.to_numpy = lambda arr: np.asarray(arr)
+
+            def launched_kernel(*args):
+                original_kernel(*args)
+                return True
+
+            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
+            out_fake_gpu = corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+                gc_auto_correlations_only=False,
+            )
+        finally:
+            corr.backend.name = original_name
+            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
+            corr.backend.to_device = original_to_device
+            corr.backend.to_numpy = original_to_numpy
+
+        xi_g_fake_gpu = out_fake_gpu[4]
+        expected_non_numpy = 0.5 * ((ab_num / ab_den) + (ba_num / ba_den))
+        self.assertAlmostEqual(xi_g_fake_gpu[1, 0, 0], expected_non_numpy)
+
+    def test_density_density_tomo_vectorized_gc_auto_cross_directional_sum_branch(self):
+        corr = self._make_small_cpu_corr()
+        density_maps = np.array(
+            [
+                np.linspace(1.0, 2.1, 12, dtype=np.float64),
+                np.linspace(2.2, 3.3, 12, dtype=np.float64),
+            ]
+        )
+        weights = np.array(
+            [
+                np.linspace(1.0, 1.5, 12, dtype=np.float64),
+                np.linspace(1.6, 2.1, 12, dtype=np.float64),
+            ]
+        )
+
+        comb_i = np.array([0], dtype=np.int32)
+        comb_j = np.array([1], dtype=np.int32)
+        auto = np.array([False], dtype=bool)
+        with patch.object(
+            corr,
+            "_get_selected_tomo_density_combination_indices",
+            return_value=(comb_i, comb_j, auto, 1),
+        ), patch.object(corr, "_reduce_pairs", wraps=corr._reduce_pairs) as spy_reduce:
+            out = corr._density_density_tomo_vectorized(
+                density_maps,
+                weights,
+                sumofweights=None,
+                nzbins=2,
+                gc_auto_correlations_only=True,
+            )
+
+        self.assertEqual(out.shape, (1, corr.n_patches, corr.nbins))
+        self.assertGreaterEqual(spy_reduce.call_count, 2)
+
+    def test_compute_3x2pt_tomo_fused_non_numpy_launch_decline_raises(self):
+        corr = self._make_small_cpu_corr()
+        corr.backend.name = "cupy"
+        corr.backend.to_device = lambda arr: np.asarray(arr)
+        corr.backend.to_numpy = lambda arr: np.asarray(arr)
+        corr.backend.kernel_3x2pt_tomo_fused = lambda *_args: False
+
+        with self.assertRaisesRegex(RuntimeError, "declined fused 3x2pt tomography kernel launch"):
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
+            )
+
+    def test_compute_aperture_shear_all_patches_helper(self):
+        vals = correlations_module._compute_aperture_shear_all_patches(
+            np.array([0, 1], dtype=np.uint32),
+            np.array([1.0, 1.0], dtype=np.float64),
+            np.array([0.0, 0.0], dtype=np.float64),
+            np.array([2.0, 2.0], dtype=np.float64),
+            np.array([0, 2], dtype=np.int64),
+            np.array([1.0, 3.0], dtype=np.float64),
+            np.array([0.0, 0.0], dtype=np.float64),
+            np.array([2.0, 4.0], dtype=np.float64),
+            np.array([5.0], dtype=np.float64),
+        )
+        gt = np.array([-1.0, -3.0])
+        expected = 5.0 * np.sum(np.array([2.0, 4.0]) * gt * 2.0) / np.sum(np.array([2.0, 4.0]))
+        self.assertAlmostEqual(vals[0], expected)
 
     def test_compute_density_methods_non_numpy_backend_path(self):
         corr = self._make_small_cpu_corr()
@@ -2845,6 +3165,21 @@ class TestCorrelationCoverage(unittest.TestCase):
         """Test the preprocess method."""
         self.corr.preprocess()
         mock_calculate_pairs_M_a.assert_called_once_with()
+        mock_calculate_pairs_2PCF.assert_called_once_with()
+        mock_prepare.assert_called_once_with()
+
+    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
+    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
+    @patch('CosmoFuse.correlations.Correlation.prepare')
+    def test_preprocess_with_aperture_filter(
+        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
+    ):
+        def custom_filter(theta, theta_q):
+            return np.ones_like(theta) * theta_q
+
+        self.corr.preprocess(aperture_filter=custom_filter)
+        mock_calculate_pairs_M_a.assert_called_once()
+        self.assertIs(mock_calculate_pairs_M_a.call_args.kwargs["aperture_filter"], custom_filter)
         mock_calculate_pairs_2PCF.assert_called_once_with()
         mock_prepare.assert_called_once_with()
 

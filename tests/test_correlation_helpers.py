@@ -117,3 +117,99 @@ def test_shape_validation_raises_value_error():
     with pytest.raises(ValueError):
         zeta_g_plus(M_g, bad_annulus)
 
+
+def test_shape_validation_raises_on_central_ndim():
+    M_g = np.zeros((2, 4))
+    annulus = np.zeros((2, 3, 4, 2))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, annulus)
+
+
+def test_shape_validation_raises_on_annulus_ndim():
+    M_g = np.zeros((2, 2, 4))
+    annulus = np.zeros((2, 3, 4))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, annulus)
+
+
+def test_shape_validation_raises_on_map_count_mismatch():
+    M_g = np.zeros((2, 2, 4))
+    annulus = np.zeros((3, 3, 4, 2))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, annulus)
+
+
+def test_shape_validation_raises_on_patch_count_mismatch():
+    M_g = np.zeros((2, 2, 4))
+    annulus = np.zeros((2, 3, 5, 2))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, annulus)
+
+
+def test_shape_validation_raises_on_pair_count_mismatch():
+    M_g = np.zeros((2, 2, 4))
+    annulus = np.zeros((2, 4, 4, 2))
+    with pytest.raises(ValueError):
+        zeta_g_plus(M_g, annulus)
+
+
+def test_zeta_t_accepts_arbitrary_cross_combination_count():
+    nmaps = 2
+    nzbins = 3
+    npatches = 5
+    ncorrelations = 7
+    nbins = 4
+
+    rng = np.random.default_rng(42)
+    center = rng.normal(size=(nmaps, nzbins, npatches))
+    xi_t = rng.normal(size=(nmaps, ncorrelations, npatches, nbins))
+
+    z_gt = zeta_g_t(center, xi_t)
+    z_at = zeta_a_t(center, xi_t)
+
+    assert z_gt.shape == (nmaps, nzbins * ncorrelations, nbins)
+    assert z_at.shape == (nmaps, nzbins * ncorrelations, nbins)
+
+    expected = np.zeros_like(z_gt)
+    out_idx = 0
+    for z_center in range(nzbins):
+        center_vals = center[:, z_center, :]
+        mean_center = np.mean(center_vals, axis=1)
+        for pair_idx in range(ncorrelations):
+            annulus_vals = xi_t[:, pair_idx, :, :]
+            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+            expected[:, out_idx, :] = mean_product - mean_center[:, None] * mean_annulus
+            out_idx += 1
+
+    np.testing.assert_allclose(z_gt, expected)
+    np.testing.assert_allclose(z_at, expected)
+
+
+def test_zeta_t_validation_raises_on_central_ndim():
+    center = np.zeros((2, 4))
+    xi_t = np.zeros((2, 3, 4, 2))
+    with pytest.raises(ValueError):
+        zeta_g_t(center, xi_t)
+
+
+def test_zeta_t_validation_raises_on_annulus_ndim():
+    center = np.zeros((2, 2, 4))
+    xi_t = np.zeros((2, 3, 4))
+    with pytest.raises(ValueError):
+        zeta_g_t(center, xi_t)
+
+
+def test_zeta_t_validation_raises_on_map_count_mismatch():
+    center = np.zeros((2, 2, 4))
+    xi_t = np.zeros((3, 5, 4, 2))
+    with pytest.raises(ValueError):
+        zeta_g_t(center, xi_t)
+
+
+def test_zeta_t_validation_raises_on_patch_count_mismatch():
+    center = np.zeros((2, 2, 4))
+    xi_t = np.zeros((2, 5, 6, 2))
+    with pytest.raises(ValueError):
+        zeta_g_t(center, xi_t)
+

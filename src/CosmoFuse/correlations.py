@@ -2620,6 +2620,279 @@ class Correlation:
             xi_t=xi_t,
         )
 
+    def _compute_3x2pt_tomo_fused(
+        self,
+        shear_maps: np.ndarray,
+        density_maps: np.ndarray,
+        shear_weights: np.ndarray,
+        density_weights: np.ndarray,
+        gc_auto_correlations_only: bool = False,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
+        if fused_kernel is None:
+            raise RuntimeError("Backend does not provide a fused 3x2pt tomography kernel.")
+
+        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        shear_w_np = np.asarray(shear_weights, dtype=self.map_dtype)
+        density_w_np = np.asarray(density_weights, dtype=self.map_dtype)
+
+        if density_np.ndim != 2:
+            raise ValueError(
+                "density_maps must have shape (n_density_bins, npix); "
+                f"got {density_np.shape}"
+            )
+        if shear_np.ndim != 3 or shear_np.shape[1] != 2:
+            raise ValueError(
+                "shear_maps must have shape (n_shear_bins, 2, npix); "
+                f"got {shear_np.shape}"
+            )
+        if density_w_np.shape != density_np.shape:
+            raise ValueError(
+                "density_weights must match density_maps shape; "
+                f"got {density_w_np.shape} and {density_np.shape}"
+            )
+        if shear_w_np.ndim != 2:
+            raise ValueError(
+                "shear_weights must have shape (n_shear_bins, npix); "
+                f"got {shear_w_np.shape}"
+            )
+        if shear_w_np.shape[0] != shear_np.shape[0] or shear_w_np.shape[1] != shear_np.shape[2]:
+            raise ValueError(
+                "shear_weights must match shear_maps tomography/pixel dimensions; "
+                f"got {shear_w_np.shape} and {shear_np.shape}"
+            )
+        if density_np.shape[1] != shear_np.shape[2]:
+            raise ValueError(
+                "density_maps and shear_maps must have the same number of pixels; "
+                f"got {density_np.shape[1]} and {shear_np.shape[2]}"
+            )
+
+        if flip_g1 or flip_g2:
+            shear_np = shear_np.copy()
+            if flip_g1:
+                shear_np[:, 0] *= -1
+            if flip_g2:
+                shear_np[:, 1] *= -1
+
+        if self.inds_dev is None:
+            self.prepare()
+        self._ensure_aperture_pairs(aperture_filter=aperture_filter)
+
+        module = self.backend.module
+        map_backend_dtype = getattr(module, self.map_dtype.name)
+
+        density_dev = self.backend.to_device(density_np).astype(self.map_dtype, copy=False)
+        shear_dev = self.backend.to_device(shear_np).astype(self.map_dtype, copy=False)
+        density_w_dev = self.backend.to_device(density_w_np).astype(self.map_dtype, copy=False)
+        shear_w_dev = self.backend.to_device(shear_w_np).astype(self.map_dtype, copy=False)
+
+        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
+        shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
+        density_w_soa = module.ascontiguousarray(module.transpose(density_w_dev, (1, 0)))
+        shear_w_soa = module.ascontiguousarray(module.transpose(shear_w_dev, (1, 0)))
+
+        n_shear_bins = int(shear_np.shape[0])
+        n_density_bins = int(density_np.shape[0])
+        n_patches = int(self.n_patches)
+        nbins_total = int(self.n_patches * self.nbins)
+
+        ss_ncomb = int(binom(n_shear_bins + 1, 2))
+        ss_comb_i, ss_comb_j, ss_auto = self._get_tomo_combination_indices(
+            n_shear_bins,
+            ss_ncomb,
+        )
+        dd_comb_i, dd_comb_j, dd_auto, dd_ncomb = (
+            self._get_selected_tomo_density_combination_indices(
+                n_density_bins,
+                gc_auto_correlations_only=gc_auto_correlations_only,
+            )
+        )
+        ds_comb_i, ds_comb_j, ds_ncomb = self._get_selected_tomo_cross_combination_indices(
+            n_density_bins,
+            n_shear_bins,
+            ggl_bin_combinations=ggl_bin_combinations,
+        )
+
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
+        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
+        pair_offsets = module.ascontiguousarray(
+            self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
+        )
+
+        q_inds_u32 = np.asarray(self.Q_inds_flat, dtype=np.uint32)
+        q_inds = module.ascontiguousarray(self.backend.to_device(q_inds_u32))
+        q_cos = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.map_dtype))
+        )
+        q_sin = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.map_dtype))
+        )
+        q_val = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.map_dtype))
+        )
+        q_offsets = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_offsets, dtype=np.int64))
+        )
+        q_patch_area = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_patch_area_flat, dtype=self.map_dtype))
+        )
+
+        out_ma_num = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
+        out_ma_den = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
+        out_mg_num = self.backend.zeros((n_density_bins, n_patches), dtype=map_backend_dtype)
+        out_mg_den = self.backend.zeros((n_density_bins, n_patches), dtype=map_backend_dtype)
+
+        out_xip_num = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
+        out_xim_num = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
+        out_xip_den = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
+
+        out_xig_num = self.backend.zeros((2 * dd_ncomb, nbins_total), dtype=map_backend_dtype)
+        out_xig_den = self.backend.zeros((2 * dd_ncomb, nbins_total), dtype=map_backend_dtype)
+
+        out_xit_num = self.backend.zeros((ds_ncomb, nbins_total), dtype=map_backend_dtype)
+        out_xit_den = self.backend.zeros((ds_ncomb, nbins_total), dtype=map_backend_dtype)
+
+        if self.backend.name == "numpy":
+            fused_kernel(
+                np.ascontiguousarray(density_soa),
+                np.ascontiguousarray(shear_soa),
+                np.ascontiguousarray(density_w_soa),
+                np.ascontiguousarray(shear_w_soa),
+                np.ascontiguousarray(inds_i),
+                np.ascontiguousarray(inds_j),
+                np.ascontiguousarray(rot_i),
+                np.ascontiguousarray(rot_j),
+                np.ascontiguousarray(pair_offsets),
+                np.ascontiguousarray(q_inds),
+                np.ascontiguousarray(q_cos),
+                np.ascontiguousarray(q_sin),
+                np.ascontiguousarray(q_val),
+                np.ascontiguousarray(q_offsets),
+                np.ascontiguousarray(q_patch_area),
+                np.ascontiguousarray(ss_comb_i),
+                np.ascontiguousarray(ss_comb_j),
+                np.ascontiguousarray(dd_comb_i),
+                np.ascontiguousarray(dd_comb_j),
+                np.ascontiguousarray(ds_comb_i),
+                np.ascontiguousarray(ds_comb_j),
+                out_ma_num,
+                out_ma_den,
+                out_mg_num,
+                out_mg_den,
+                out_xip_num,
+                out_xim_num,
+                out_xip_den,
+                out_xig_num,
+                out_xig_den,
+                out_xit_num,
+                out_xit_den,
+            )
+        else:
+            launched = fused_kernel(
+                density_soa,
+                shear_soa,
+                density_w_soa,
+                shear_w_soa,
+                inds_i,
+                inds_j,
+                rot_i,
+                rot_j,
+                pair_offsets,
+                q_inds,
+                q_cos,
+                q_sin,
+                q_val,
+                q_offsets,
+                q_patch_area,
+                module.ascontiguousarray(ss_comb_i),
+                module.ascontiguousarray(ss_comb_j),
+                module.ascontiguousarray(dd_comb_i),
+                module.ascontiguousarray(dd_comb_j),
+                module.ascontiguousarray(ds_comb_i),
+                module.ascontiguousarray(ds_comb_j),
+                out_ma_num,
+                out_ma_den,
+                out_mg_num,
+                out_mg_den,
+                out_xip_num,
+                out_xim_num,
+                out_xip_den,
+                out_xig_num,
+                out_xig_den,
+                out_xit_num,
+                out_xit_den,
+            )
+            if not launched:
+                raise RuntimeError("Backend declined fused 3x2pt tomography kernel launch.")
+
+        def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+            out = np.zeros_like(num, dtype=self.map_dtype)
+            valid = den != 0
+            out[valid] = num[valid] / den[valid]
+            return out
+
+        ma_num_np = np.asarray(self.backend.to_numpy(out_ma_num), dtype=self.map_dtype)
+        ma_den_np = np.asarray(self.backend.to_numpy(out_ma_den), dtype=self.map_dtype)
+        mg_num_np = np.asarray(self.backend.to_numpy(out_mg_num), dtype=self.map_dtype)
+        mg_den_np = np.asarray(self.backend.to_numpy(out_mg_den), dtype=self.map_dtype)
+        M_a = _safe_div(ma_num_np, ma_den_np)
+        M_g = _safe_div(mg_num_np, mg_den_np)
+
+        xip_num_np = np.asarray(self.backend.to_numpy(out_xip_num), dtype=self.map_dtype)
+        xim_num_np = np.asarray(self.backend.to_numpy(out_xim_num), dtype=self.map_dtype)
+        xip_den_np = np.asarray(self.backend.to_numpy(out_xip_den), dtype=self.map_dtype)
+        xip = np.zeros((ss_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
+        xim = np.zeros((ss_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
+
+        half = self.map_dtype.type(0.5)
+        for k in range(ss_ncomb):
+            ab_idx = 2 * k
+            ba_idx = ab_idx + 1
+            xip_ab = _safe_div(xip_num_np[ab_idx], xip_den_np[ab_idx]).reshape((n_patches, self.nbins))
+            xim_ab = _safe_div(xim_num_np[ab_idx], xip_den_np[ab_idx]).reshape((n_patches, self.nbins))
+            if ss_auto[k]:
+                xip[k] = xip_ab
+                xim[k] = xim_ab
+            else:
+                xip_ba = _safe_div(xip_num_np[ba_idx], xip_den_np[ba_idx]).reshape((n_patches, self.nbins))
+                xim_ba = _safe_div(xim_num_np[ba_idx], xip_den_np[ba_idx]).reshape((n_patches, self.nbins))
+                xip[k] = half * (xip_ab + xip_ba)
+                xim[k] = half * (xim_ab + xim_ba)
+
+        xig_num_np = np.asarray(self.backend.to_numpy(out_xig_num), dtype=self.map_dtype)
+        xig_den_np = np.asarray(self.backend.to_numpy(out_xig_den), dtype=self.map_dtype)
+        xi_g = np.zeros((dd_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
+        for k in range(dd_ncomb):
+            ab_idx = 2 * k
+            ba_idx = ab_idx + 1
+            xig_ab = _safe_div(xig_num_np[ab_idx], xig_den_np[ab_idx]).reshape((n_patches, self.nbins))
+            if dd_auto[k]:
+                xi_g[k] = xig_ab
+            else:
+                if self.backend.name == "numpy":
+                    xi_g[k] = _safe_div(
+                        xig_num_np[ab_idx] + xig_num_np[ba_idx],
+                        xig_den_np[ab_idx] + xig_den_np[ba_idx],
+                    ).reshape((n_patches, self.nbins))
+                else:
+                    xig_ba = _safe_div(xig_num_np[ba_idx], xig_den_np[ba_idx]).reshape((n_patches, self.nbins))
+                    xi_g[k] = half * (xig_ab + xig_ba)
+
+        xit_num_np = np.asarray(self.backend.to_numpy(out_xit_num), dtype=self.map_dtype)
+        xit_den_np = np.asarray(self.backend.to_numpy(out_xit_den), dtype=self.map_dtype)
+        xi_t = np.zeros((ds_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
+        for k in range(ds_ncomb):
+            xi_t[k] = _safe_div(xit_num_np[k], xit_den_np[k]).reshape((n_patches, self.nbins))
+
+        return M_a, M_g, xip, xim, xi_g, xi_t
+
     def get_3x2pt_tomo(
         self,
         shear_maps: Optional[np.ndarray] = None,
@@ -2638,85 +2911,52 @@ class Correlation:
         Optional[np.ndarray],
         Optional[np.ndarray],
     ]:
-        if shear_maps is None and density_maps is None:
-            raise ValueError("At least one of shear_maps or density_maps must be provided.")
+        if shear_maps is None or density_maps is None:
+            raise ValueError(
+                "Both shear_maps and density_maps must be provided for get_3x2pt_tomo."
+            )
 
-        shear_np = None if shear_maps is None else np.asarray(shear_maps, dtype=self.map_dtype)
-        density_np = None if density_maps is None else np.asarray(density_maps, dtype=self.map_dtype)
+        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
+        density_np = np.asarray(density_maps, dtype=self.map_dtype)
 
         shear_w = None
         density_w = None
         if weights is None:
-            if shear_np is not None:
-                shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
-            if density_np is not None:
-                density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
+            shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
+            density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
         elif isinstance(weights, dict):
             shear_w = weights.get("shear")
             density_w = weights.get("density")
         elif isinstance(weights, (tuple, list)) and len(weights) == 2:
             shear_w, density_w = weights
         else:
-            if shear_np is not None and density_np is None:
-                shear_w = weights
-            elif density_np is not None and shear_np is None:
-                density_w = weights
-            elif shear_np is not None and density_np is not None:
-                weight_arr = np.asarray(weights)
-                if (
-                    weight_arr.ndim == 2
-                    and weight_arr.shape[0] == shear_np.shape[0]
-                    and weight_arr.shape[0] == density_np.shape[0]
-                ):
-                    shear_w = weight_arr
-                    density_w = weight_arr
-                else:
-                    raise ValueError(
-                        "When both shear_maps and density_maps are provided, weights must be a dict or (shear_weights, density_weights)."
-                    )
+            weight_arr = np.asarray(weights)
+            if (
+                weight_arr.ndim == 2
+                and weight_arr.shape[0] == shear_np.shape[0]
+                and weight_arr.shape[0] == density_np.shape[0]
+            ):
+                shear_w = weight_arr
+                density_w = weight_arr
+            else:
+                raise ValueError(
+                    "When both shear_maps and density_maps are provided, weights must be a dict or (shear_weights, density_weights)."
+                )
 
-        if shear_np is not None:
-            if shear_w is None:
-                shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
-            shear_w = np.asarray(shear_w, dtype=self.map_dtype)
-            M_a, xi_p, xi_m = self.get_full_tomo_shear(
-                shear_np,
-                shear_w,
-                aperture_filter=aperture_filter,
-                flip_g1=flip_g1,
-                flip_g2=flip_g2,
-            )
-        else:
-            M_a = None
-            xi_p = None
-            xi_m = None
+        if shear_w is None:
+            shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
+        if density_w is None:
+            density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
 
-        if density_np is not None:
-            if density_w is None:
-                density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
-            density_w = np.asarray(density_w, dtype=self.map_dtype)
-            M_g, xi_g = self.get_full_tomo_density(
-                density_np,
-                density_w,
-                gc_auto_correlations_only=gc_auto_correlations_only,
-                aperture_filter=aperture_filter,
-            )
-        else:
-            M_g = None
-            xi_g = None
-
-        if density_np is not None and shear_np is not None:
-            xi_t = self.vectorized_density_shear(
-                density_np,
-                shear_np,
-                density_w,
-                shear_w,
-                ggl_bin_combinations=ggl_bin_combinations,
-                flip_g1=flip_g1,
-                flip_g2=flip_g2,
-            )
-        else:
-            xi_t = None
-
-        return M_a, M_g, xi_p, xi_m, xi_g, xi_t
+        return self._compute_3x2pt_tomo_fused(
+            shear_maps=shear_np,
+            density_maps=density_np,
+            shear_weights=np.asarray(shear_w, dtype=self.map_dtype),
+            density_weights=np.asarray(density_w, dtype=self.map_dtype),
+            gc_auto_correlations_only=gc_auto_correlations_only,
+            ggl_bin_combinations=ggl_bin_combinations,
+            aperture_filter=aperture_filter,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
+        )
 
