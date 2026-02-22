@@ -8,7 +8,7 @@ from numba import njit, prange
 
 logger = logging.getLogger(__name__)
 
-_CUPY_FASTMATH_OPTIONS = ("--use_fast_math",)
+_CUPY_FASTMATH_OPTIONS = ("--use_fast_math", )
 _MAX_VECTOR_TOMO_BINS = 64
 _CUDA_DIR = Path(__file__).with_name("cuda")
 _CUDA_SOURCE_CACHE: dict[str, str] = {}

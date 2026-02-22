@@ -872,17 +872,133 @@ class Correlation:
         density_w_soa: Any,
         shear_w_soa: Any,
     ) -> None:
-        n_density_bins = int(density_dev.shape[0])
-        n_shear_bins = int(shear_dev.shape[0])
+        module = self.backend.module
+        copyto = getattr(module, "copyto", np.copyto)
+        swapaxes = getattr(module, "swapaxes", np.swapaxes)
+        moveaxis = getattr(module, "moveaxis", np.moveaxis)
 
-        for i in range(n_density_bins):
-            density_soa[:, i] = density_dev[i]
-            density_w_soa[:, i] = density_w_dev[i]
+        copyto(density_soa, swapaxes(density_dev, 0, 1))
+        copyto(density_w_soa, swapaxes(density_w_dev, 0, 1))
+        copyto(shear_soa, moveaxis(shear_dev, 2, 0))
+        copyto(shear_w_soa, swapaxes(shear_w_dev, 0, 1))
 
-        for i in range(n_shear_bins):
-            shear_soa[:, i, 0] = shear_dev[i, 0]
-            shear_soa[:, i, 1] = shear_dev[i, 1]
-            shear_w_soa[:, i] = shear_w_dev[i]
+    def _get_or_create_fused_output_buffers(
+        self,
+        n_shear_bins: int,
+        n_density_bins: int,
+        n_patches: int,
+        nbins_total: int,
+        ss_ncomb: int,
+        dd_ncomb: int,
+        ds_ncomb: int,
+        map_backend_dtype: Any,
+    ) -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+        ctx = self.compute_context
+        if ctx.fused_output_buffers is None:
+            ctx.fused_output_buffers = {}
+
+        cache = ctx.fused_output_buffers
+        module = self.backend.module
+        empty = getattr(module, "empty", None)
+
+        specs = (
+            ("out_ma_num", (n_shear_bins, n_patches)),
+            ("out_ma_den", (n_shear_bins, n_patches)),
+            ("out_mg_num", (n_density_bins, n_patches)),
+            ("out_mg_den", (n_density_bins, n_patches)),
+            ("out_xip_num", (2 * ss_ncomb, nbins_total)),
+            ("out_xim_num", (2 * ss_ncomb, nbins_total)),
+            ("out_xip_den", (2 * ss_ncomb, nbins_total)),
+            ("out_xig_num", (2 * dd_ncomb, nbins_total)),
+            ("out_xig_den", (2 * dd_ncomb, nbins_total)),
+            ("out_xit_num", (ds_ncomb, nbins_total)),
+            ("out_xit_den", (ds_ncomb, nbins_total)),
+        )
+
+        buffers: Dict[str, Any] = {}
+        for name, shape in specs:
+            arr = cache.get(name)
+            if (
+                arr is None
+                or getattr(arr, "shape", None) != shape
+                or getattr(arr, "dtype", None) != map_backend_dtype
+            ):
+                if empty is not None:
+                    arr = empty(shape, dtype=map_backend_dtype)
+                else:
+                    arr = self.backend.zeros(shape, dtype=map_backend_dtype)
+                cache[name] = arr
+            buffers[name] = arr
+
+        return (
+            buffers["out_ma_num"],
+            buffers["out_ma_den"],
+            buffers["out_mg_num"],
+            buffers["out_mg_den"],
+            buffers["out_xip_num"],
+            buffers["out_xim_num"],
+            buffers["out_xip_den"],
+            buffers["out_xig_num"],
+            buffers["out_xig_den"],
+            buffers["out_xit_num"],
+            buffers["out_xit_den"],
+        )
+
+    def _get_or_create_fused_post_buffers(
+        self,
+        n_shear_bins: int,
+        n_density_bins: int,
+        n_patches: int,
+        ss_ncomb: int,
+        dd_ncomb: int,
+        ds_ncomb: int,
+        map_backend_dtype: Any,
+    ) -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+        ctx = self.compute_context
+        if ctx.fused_output_buffers is None:
+            ctx.fused_output_buffers = {}
+
+        cache = ctx.fused_output_buffers
+        module = self.backend.module
+        empty = getattr(module, "empty", None)
+
+        specs = (
+            ("M_a", (n_shear_bins, n_patches)),
+            ("M_g", (n_density_bins, n_patches)),
+            ("xip", (ss_ncomb, n_patches, self.nbins)),
+            ("xim", (ss_ncomb, n_patches, self.nbins)),
+            ("xi_g", (dd_ncomb, n_patches, self.nbins)),
+            ("xi_t", (ds_ncomb, n_patches, self.nbins)),
+            ("tmp_a", (n_patches, self.nbins)),
+            ("tmp_b", (n_patches, self.nbins)),
+        )
+
+        buffers: Dict[str, Any] = {}
+        for name, shape in specs:
+            cache_key = f"post_{name}"
+            arr = cache.get(cache_key)
+            if (
+                arr is None
+                or getattr(arr, "shape", None) != shape
+                or getattr(arr, "dtype", None) != map_backend_dtype
+            ):
+                if empty is not None:
+                    arr = empty(shape, dtype=map_backend_dtype)
+                else:
+                    arr = self.backend.zeros(shape, dtype=map_backend_dtype)
+                cache[cache_key] = arr
+            buffers[name] = arr
+
+        return (
+            buffers["M_a"],
+            buffers["M_g"],
+            buffers["xip"],
+            buffers["xim"],
+            buffers["xi_g"],
+            buffers["xi_t"],
+            buffers["tmp_a"],
+            buffers["tmp_b"],
+        )
 
     def preprocess(
         self,
@@ -2662,6 +2778,7 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
         if fused_kernel is None:
@@ -2784,20 +2901,28 @@ class Correlation:
         q_offsets = self.compute_context.Q_offsets_dev
         q_patch_area = self.compute_context.Q_patch_area_dev
 
-        out_ma_num = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
-        out_ma_den = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
-        out_mg_num = self.backend.zeros((n_density_bins, n_patches), dtype=map_backend_dtype)
-        out_mg_den = self.backend.zeros((n_density_bins, n_patches), dtype=map_backend_dtype)
-
-        out_xip_num = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
-        out_xim_num = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
-        out_xip_den = self.backend.zeros((2 * ss_ncomb, nbins_total), dtype=map_backend_dtype)
-
-        out_xig_num = self.backend.zeros((2 * dd_ncomb, nbins_total), dtype=map_backend_dtype)
-        out_xig_den = self.backend.zeros((2 * dd_ncomb, nbins_total), dtype=map_backend_dtype)
-
-        out_xit_num = self.backend.zeros((ds_ncomb, nbins_total), dtype=map_backend_dtype)
-        out_xit_den = self.backend.zeros((ds_ncomb, nbins_total), dtype=map_backend_dtype)
+        (
+            out_ma_num,
+            out_ma_den,
+            out_mg_num,
+            out_mg_den,
+            out_xip_num,
+            out_xim_num,
+            out_xip_den,
+            out_xig_num,
+            out_xig_den,
+            out_xit_num,
+            out_xit_den,
+        ) = self._get_or_create_fused_output_buffers(
+            n_shear_bins=n_shear_bins,
+            n_density_bins=n_density_bins,
+            n_patches=n_patches,
+            nbins_total=nbins_total,
+            ss_ncomb=ss_ncomb,
+            dd_ncomb=dd_ncomb,
+            ds_ncomb=ds_ncomb,
+            map_backend_dtype=map_backend_dtype,
+        )
 
         if self.backend.name == "numpy":
             fused_kernel(
@@ -2878,6 +3003,98 @@ class Correlation:
             out[valid] = num[valid] / den[valid]
             return out
 
+        def _safe_div_into_device(num: Any, den: Any, out: Any) -> Any:
+            mask = den != 0
+            safe_den = module.where(mask, den, self.map_dtype.type(1.0))
+            module.divide(num, safe_den, out=out)
+            out *= mask.astype(out.dtype, copy=False)
+            return out
+
+        if return_device and self.backend.name == "cupy":
+            (
+                M_a_dev,
+                M_g_dev,
+                xip_dev,
+                xim_dev,
+                xi_g_dev,
+                xi_t_dev,
+                tmp_a,
+                tmp_b,
+            ) = self._get_or_create_fused_post_buffers(
+                n_shear_bins=n_shear_bins,
+                n_density_bins=n_density_bins,
+                n_patches=n_patches,
+                ss_ncomb=ss_ncomb,
+                dd_ncomb=dd_ncomb,
+                ds_ncomb=ds_ncomb,
+                map_backend_dtype=map_backend_dtype,
+            )
+
+            _safe_div_into_device(out_ma_num, out_ma_den, M_a_dev)
+            _safe_div_into_device(out_mg_num, out_mg_den, M_g_dev)
+
+            half = self.map_dtype.type(0.5)
+
+            for k in range(ss_ncomb):
+                ab_idx = 2 * k
+                ba_idx = ab_idx + 1
+
+                _safe_div_into_device(
+                    out_xip_num[ab_idx].reshape((n_patches, self.nbins)),
+                    out_xip_den[ab_idx].reshape((n_patches, self.nbins)),
+                    xip_dev[k],
+                )
+                _safe_div_into_device(
+                    out_xim_num[ab_idx].reshape((n_patches, self.nbins)),
+                    out_xip_den[ab_idx].reshape((n_patches, self.nbins)),
+                    xim_dev[k],
+                )
+
+                if not ss_auto[k]:
+                    _safe_div_into_device(
+                        out_xip_num[ba_idx].reshape((n_patches, self.nbins)),
+                        out_xip_den[ba_idx].reshape((n_patches, self.nbins)),
+                        tmp_a,
+                    )
+                    xip_dev[k] += tmp_a
+                    xip_dev[k] *= half
+
+                    _safe_div_into_device(
+                        out_xim_num[ba_idx].reshape((n_patches, self.nbins)),
+                        out_xip_den[ba_idx].reshape((n_patches, self.nbins)),
+                        tmp_b,
+                    )
+                    xim_dev[k] += tmp_b
+                    xim_dev[k] *= half
+
+            for k in range(dd_ncomb):
+                ab_idx = 2 * k
+                ba_idx = ab_idx + 1
+
+                _safe_div_into_device(
+                    out_xig_num[ab_idx].reshape((n_patches, self.nbins)),
+                    out_xig_den[ab_idx].reshape((n_patches, self.nbins)),
+                    xi_g_dev[k],
+                )
+
+                if not dd_auto[k]:
+                    _safe_div_into_device(
+                        out_xig_num[ba_idx].reshape((n_patches, self.nbins)),
+                        out_xig_den[ba_idx].reshape((n_patches, self.nbins)),
+                        tmp_a,
+                    )
+                    xi_g_dev[k] += tmp_a
+                    xi_g_dev[k] *= half
+
+            for k in range(ds_ncomb):
+                _safe_div_into_device(
+                    out_xit_num[k].reshape((n_patches, self.nbins)),
+                    out_xit_den[k].reshape((n_patches, self.nbins)),
+                    xi_t_dev[k],
+                )
+
+            return M_a_dev, M_g_dev, xip_dev, xim_dev, xi_g_dev, xi_t_dev
+
         ma_num_np = np.asarray(self.backend.to_numpy(out_ma_num), dtype=self.map_dtype)
         ma_den_np = np.asarray(self.backend.to_numpy(out_ma_den), dtype=self.map_dtype)
         mg_num_np = np.asarray(self.backend.to_numpy(out_mg_num), dtype=self.map_dtype)
@@ -2943,6 +3160,7 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = False,
     ) -> Tuple[
         Optional[np.ndarray],
         Optional[np.ndarray],
@@ -3005,5 +3223,6 @@ class Correlation:
             aperture_filter=aperture_filter,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
+            return_device=return_device,
         )
 

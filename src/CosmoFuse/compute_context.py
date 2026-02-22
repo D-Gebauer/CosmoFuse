@@ -44,6 +44,9 @@ class ComputeContext:
         ("fused_density_w_soa", None),
         ("fused_shear_w_soa", None),
     )
+    _FUSED_OUTPUT_BUFFER_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
+        ("fused_output_buffers", None),
+    )
 
     def __init__(self) -> None:
         self.tomo_combination_cache: Dict[Any, Any] = {}
@@ -56,6 +59,7 @@ class ComputeContext:
             + self._APERTURE_DEFAULTS
             + self._APERTURE_DEVICE_DEFAULTS
             + self._FUSED_INPUT_BUFFER_DEFAULTS
+            + self._FUSED_OUTPUT_BUFFER_DEFAULTS
         ):
             setattr(self, name, value)
         self.prepare_version = 0
@@ -67,6 +71,7 @@ class ComputeContext:
             + self._APERTURE_DEFAULTS
             + self._APERTURE_DEVICE_DEFAULTS
             + self._FUSED_INPUT_BUFFER_DEFAULTS
+            + self._FUSED_OUTPUT_BUFFER_DEFAULTS
         ):
             if name not in self.__dict__:
                 setattr(self, name, value)
@@ -82,5 +87,6 @@ class ComputeContext:
             + self._APERTURE_DEFAULTS
             + self._APERTURE_DEVICE_DEFAULTS
             + self._FUSED_INPUT_BUFFER_DEFAULTS
+            + self._FUSED_OUTPUT_BUFFER_DEFAULTS
         ):
             setattr(self, name, value)
