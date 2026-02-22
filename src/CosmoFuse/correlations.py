@@ -1017,7 +1017,10 @@ class Correlation:
         logger.info("Calculating pairs for 2PCF")
         self.calculate_pairs_2PCF(angle_method=angle_method)
         logger.info("Preparing flattened pair arrays on backend device")
-        self.prepare(release_host_pairs=release_host_pairs)
+        if release_host_pairs:
+            self.prepare(release_host_pairs=True)
+        else:
+            self.prepare()
 
     def precompute(
         self,
