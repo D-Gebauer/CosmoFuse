@@ -105,24 +105,15 @@ def _compute_pairs_impl(
 ]:
     npts = patch_inds.size
 
-    sin_dec = np.sin(dec)
     cos_dec = np.cos(dec)
-    sin_ra = np.sin(ra)
-    cos_ra = np.cos(ra)
+    x = cos_dec * np.cos(ra)
+    y = cos_dec * np.sin(ra)
+    z = np.sin(dec)
 
-    # arccos method thresholds in theta space
-    theta_min = binedges[0]
-    theta_max = binedges[binedges.size - 1]
-
-    # law-of-cosines thresholds in cosine space
+    # cosine-space thresholds (cos is monotonically decreasing over [0, pi])
     cos_binedges = np.cos(binedges)
     cos_max = cos_binedges[0]
     cos_min = cos_binedges[binedges.size - 1]
-
-    # haversine thresholds in hav(theta) space
-    hav_binedges = np.sin(0.5 * binedges) ** 2
-    hav_min = hav_binedges[0]
-    hav_max = hav_binedges[binedges.size - 1]
 
     max_pairs = npts * (npts - 1) // 2
     inds_a = np.empty(max_pairs, dtype=patch_inds.dtype)
@@ -135,59 +126,24 @@ def _compute_pairs_impl(
 
     out_idx = 0
     for i in range(npts - 1):
-        rai = ra[i]
-        deci = dec[i]
-        sdi = sin_dec[i]
-        cdi = cos_dec[i]
-        x1 = cdi * cos_ra[i]
-        y1 = cdi * sin_ra[i]
-        z1 = sdi
+        x1 = x[i]
+        y1 = y[i]
+        z1 = z[i]
 
         for j in range(i + 1, npts):
-            raj = ra[j]
-            decj = dec[j]
-            sdj = sin_dec[j]
-            cdj = cos_dec[j]
-            x2 = cdj * cos_ra[j]
-            y2 = cdj * sin_ra[j]
-            z2 = sdj
+            x2 = x[j]
+            y2 = y[j]
+            z2 = z[j]
 
-            dra = raj - rai
+            cos_theta = x1 * x2 + y1 * y2 + z1 * z2
             bin_idx = -1
 
-            if angle_method_code == 0:
-                cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
-                if cos_theta > 1.0:
-                    cos_theta = 1.0
-                elif cos_theta < -1.0:
-                    cos_theta = -1.0
-                theta = np.arccos(cos_theta)
-                if theta <= theta_min or theta >= theta_max:
-                    continue
-                for b in range(binedges.size - 1):
-                    if theta > binedges[b] and theta < binedges[b + 1]:
-                        bin_idx = b
-                        break
-            elif angle_method_code == 1:
-                ddec2 = 0.5 * (decj - deci)
-                dra2 = 0.5 * dra
-                sddec = np.sin(ddec2)
-                sdra = np.sin(dra2)
-                hav = sddec * sddec + cdi * cdj * sdra * sdra
-                if hav <= hav_min or hav >= hav_max:
-                    continue
-                for b in range(binedges.size - 1):
-                    if hav > hav_binedges[b] and hav < hav_binedges[b + 1]:
-                        bin_idx = b
-                        break
-            else:
-                cos_theta = sdi * sdj + cdi * cdj * np.cos(dra)
-                if cos_theta >= cos_max or cos_theta <= cos_min:
-                    continue
-                for b in range(binedges.size - 1):
-                    if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
-                        bin_idx = b
-                        break
+            if cos_theta >= cos_max or cos_theta <= cos_min:
+                continue
+            for b in range(binedges.size - 1):
+                if cos_theta < cos_binedges[b] and cos_theta > cos_binedges[b + 1]:
+                    bin_idx = b
+                    break
 
             if bin_idx < 0:
                 continue
@@ -422,6 +378,8 @@ class Correlation:
             self.map_inds = np.where(mask)[0].astype(self.index_dtype, copy=False)
         else:
             self.map_inds = np.arange(hp.nside2npix(self.nside), dtype=self.index_dtype)
+        self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
+        self.map_mask[self.map_inds] = True
 
         self.backend = get_backend(device)
         self.device = device
@@ -449,6 +407,9 @@ class Correlation:
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
+        if "map_mask" not in self.__dict__:
+            self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
+            self.map_mask[self.map_inds] = True
         self.backend = get_backend(self.device)
         if "aperture_shear_all_patches" not in self.__dict__:
             self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
@@ -665,7 +626,7 @@ class Correlation:
         patch_inds = hp.query_disc(
             self.nside, vec=vec, radius=np.radians(self.patch_size / 60)
         )
-        pix_inds = np.intersect1d(patch_inds, self.map_inds)
+        pix_inds = patch_inds[self.map_mask[patch_inds]]
         ra, dec = pixel2RaDec(pix_inds, self.nside)
         (
             inds,
@@ -744,7 +705,7 @@ class Correlation:
         patch_inds = hp.query_disc(
             self.nside, vec=vec, radius=np.radians(5 * self.theta_Q / 60)
         )
-        Qpix_inds = np.intersect1d(patch_inds, self.map_inds)
+        Qpix_inds = patch_inds[self.map_mask[patch_inds]]
         Qpix_inds = Qpix_inds[Qpix_inds != pix_center]
 
         ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
