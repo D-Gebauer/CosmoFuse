@@ -68,7 +68,7 @@ def _compile_raw_cuda_kernel(module: Any, source: str, kernel_name: str) -> Any:
     return raw_kernel_ctor(source, kernel_name, options=_CUPY_FASTMATH_OPTIONS)
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_aperture_density_kernel(
     Q_inds: np.ndarray,
     Q_val: np.ndarray,
@@ -94,7 +94,7 @@ def _cpu_aperture_density_kernel(
         out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wdelta_q / sum_w
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_aperture_shear_kernel(
     Q_inds: np.ndarray,
     Q_cos: np.ndarray,
@@ -156,7 +156,7 @@ def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
     )
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_corr_kernel(
     density_a: np.ndarray,
     density_b: np.ndarray,
@@ -181,7 +181,7 @@ def _cpu_density_density_corr_kernel(
         out_w[b] = sum_w
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_shear_corr_kernel(
     density_lens: np.ndarray,
     g1_source: np.ndarray,
@@ -210,7 +210,7 @@ def _cpu_density_shear_corr_kernel(
         out_gt[b] = sum_gt
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_tomo_vectorized_kernel(
     density_map: np.ndarray,
     weights: np.ndarray,
@@ -259,7 +259,7 @@ def _cpu_density_density_tomo_vectorized_kernel(
             out_num[comb_idx, b] = sum_w
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_shear_tomo_vectorized_kernel(
     density_map: np.ndarray,
     shear_map: np.ndarray,
@@ -547,7 +547,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
     return _cupy_density_shear_tomo_vectorized_kernel
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_cross_corr_kernel_c64(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -599,7 +599,7 @@ def _cpu_xipm_cross_corr_kernel_c64(
         out_ba_m[b] = ba_m_acc
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_cross_corr_kernel_c128(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -706,7 +706,7 @@ def _cpu_xipm_cross_corr_kernel(
         )
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_auto_corr_kernel_c64(
     g11: np.ndarray,
     g21: np.ndarray,
@@ -743,7 +743,7 @@ def _cpu_xipm_auto_corr_kernel_c64(
         out_m[b] = m_acc
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_auto_corr_kernel_c128(
     g11: np.ndarray,
     g21: np.ndarray,
@@ -829,7 +829,7 @@ def _cpu_xipm_auto_corr_kernel(
         )
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_vectorized_tomo_kernel(
     shear_map: np.ndarray,
     weights: np.ndarray,
@@ -1014,7 +1014,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     return _cupy_tomo_vectorized_kernel
 
 
-@njit(fastmath=True, parallel=True)
+@njit(fastmath=True, parallel=True, cache=True)
 def _cpu_3x2pt_tomo_fused_kernel(
     density_map: np.ndarray,
     shear_map: np.ndarray,

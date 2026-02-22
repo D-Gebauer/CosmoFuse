@@ -270,7 +270,7 @@ def _get_pairs_numba_kernel(fastmath: bool) -> Any:
     if cached is not None:
         return cached
 
-    kernel = njit(fastmath=key, parallel=True)(_compute_pairs_impl)
+    kernel = njit(fastmath=key, parallel=True, cache=True)(_compute_pairs_impl)
     _compute_pairs_kernel_cache[key] = kernel
     return kernel
 
@@ -399,7 +399,7 @@ class Correlation:
         self.theta_center = theta_center
         self.n_patches = len(phi_center)
         self.fastmath = fastmath
-        self.aperture_shear_all_patches = njit(fastmath=fastmath)(
+        self.aperture_shear_all_patches = njit(fastmath=fastmath, cache=True)(
             _compute_aperture_shear_all_patches
         )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(fastmath)
@@ -451,7 +451,7 @@ class Correlation:
         self.__dict__.update(state)
         self.backend = get_backend(self.device)
         if "aperture_shear_all_patches" not in self.__dict__:
-            self.aperture_shear_all_patches = njit(fastmath=self.fastmath)(
+            self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
                 _compute_aperture_shear_all_patches
             )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
