@@ -1,6 +1,5 @@
 import hashlib
 import logging
-import warnings
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
@@ -34,10 +33,6 @@ logger = logging.getLogger(__name__)
 _ALLOWED_FLOAT_PRECISIONS = {
     "float32": np.float32,
     "float64": np.float64,
-}
-_ALLOWED_INDEX_PRECISIONS = {
-    "uint32": np.uint32,
-    "uint64": np.uint64,
 }
 _ROTATION_COMPLEX_PRECISION = {
     "float32": np.complex64,
@@ -277,7 +272,6 @@ class Correlation:
         device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
         map_precision: Float precision for map/shear/weight arrays.
         rotation_precision: Float precision for rotation/filter values.
-        index_precision: Integer precision for index/binned arrays.
     """
 
     def __init__(
@@ -295,7 +289,6 @@ class Correlation:
         device: Union[str, int] = "auto",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
-        index_precision: Union[str, np.dtype, type] = "uint32",
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -313,7 +306,6 @@ class Correlation:
             device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
             map_precision: One of float32/float64 for map-like arrays.
             rotation_precision: One of float32/float64 for rotation/filter arrays.
-            index_precision: One of uint32/uint64 for index-like arrays.
 
         Raises:
             ValueError: If input parameters are invalid
@@ -336,9 +328,7 @@ class Correlation:
         self.rotation_dtype = _normalize_precision(
             rotation_precision, _ALLOWED_FLOAT_PRECISIONS, "rotation_precision"
         )
-        self.index_dtype = _normalize_precision(
-            index_precision, _ALLOWED_INDEX_PRECISIONS, "index_precision"
-        )
+        self.index_dtype = np.dtype(np.int64)
         self.rotation_complex_dtype = np.dtype(
             _ROTATION_COMPLEX_PRECISION[self.rotation_dtype.name]
         )
@@ -775,10 +765,130 @@ class Correlation:
     def _prepare_aperture_flat(self) -> None:
         PairGeometry.prepare_aperture_flat(self)
 
+    def _invalidate_aperture_device_buffers(self) -> None:
+        self.compute_context.Q_inds_dev = None
+        self.compute_context.Q_cos_dev = None
+        self.compute_context.Q_sin_dev = None
+        self.compute_context.Q_val_dev = None
+        self.compute_context.Q_offsets_dev = None
+        self.compute_context.Q_patch_area_dev = None
+
+    def _prepare_aperture_device_buffers(self) -> None:
+        if self.Q_inds_flat is None:
+            self._invalidate_aperture_device_buffers()
+            return
+
+        module = self.backend.module
+        map_backend_dtype = getattr(module, self.map_dtype.name)
+
+        q_inds_u32 = np.asarray(self.Q_inds_flat, dtype=np.uint32)
+        self.compute_context.Q_inds_dev = module.ascontiguousarray(
+            self.backend.to_device(q_inds_u32)
+        )
+        self.compute_context.Q_cos_dev = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.map_dtype)).astype(
+                map_backend_dtype, copy=False
+            )
+        )
+        self.compute_context.Q_sin_dev = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.map_dtype)).astype(
+                map_backend_dtype, copy=False
+            )
+        )
+        self.compute_context.Q_val_dev = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.map_dtype)).astype(
+                map_backend_dtype, copy=False
+            )
+        )
+        self.compute_context.Q_offsets_dev = module.ascontiguousarray(
+            self.backend.to_device(np.asarray(self.Q_offsets, dtype=np.int64))
+        )
+        self.compute_context.Q_patch_area_dev = module.ascontiguousarray(
+            self.backend.to_device(
+                np.asarray(self.Q_patch_area_flat, dtype=self.map_dtype)
+            ).astype(map_backend_dtype, copy=False)
+        )
+
+    def _get_or_create_fused_input_buffers(
+        self,
+        npix: int,
+        n_density_bins: int,
+        n_shear_bins: int,
+        map_backend_dtype: Any,
+    ) -> Tuple[Any, Any, Any, Any]:
+        ctx = self.compute_context
+
+        if (
+            ctx.fused_density_soa is None
+            or ctx.fused_density_soa.shape != (npix, n_density_bins)
+            or getattr(ctx.fused_density_soa, "dtype", None) != map_backend_dtype
+        ):
+            ctx.fused_density_soa = self.backend.zeros(
+                (npix, n_density_bins), dtype=map_backend_dtype
+            )
+
+        if (
+            ctx.fused_shear_soa is None
+            or ctx.fused_shear_soa.shape != (npix, n_shear_bins, 2)
+            or getattr(ctx.fused_shear_soa, "dtype", None) != map_backend_dtype
+        ):
+            ctx.fused_shear_soa = self.backend.zeros(
+                (npix, n_shear_bins, 2), dtype=map_backend_dtype
+            )
+
+        if (
+            ctx.fused_density_w_soa is None
+            or ctx.fused_density_w_soa.shape != (npix, n_density_bins)
+            or getattr(ctx.fused_density_w_soa, "dtype", None) != map_backend_dtype
+        ):
+            ctx.fused_density_w_soa = self.backend.zeros(
+                (npix, n_density_bins), dtype=map_backend_dtype
+            )
+
+        if (
+            ctx.fused_shear_w_soa is None
+            or ctx.fused_shear_w_soa.shape != (npix, n_shear_bins)
+            or getattr(ctx.fused_shear_w_soa, "dtype", None) != map_backend_dtype
+        ):
+            ctx.fused_shear_w_soa = self.backend.zeros(
+                (npix, n_shear_bins), dtype=map_backend_dtype
+            )
+
+        return (
+            ctx.fused_density_soa,
+            ctx.fused_shear_soa,
+            ctx.fused_density_w_soa,
+            ctx.fused_shear_w_soa,
+        )
+
+    def _fill_fused_input_buffers(
+        self,
+        density_dev: Any,
+        shear_dev: Any,
+        density_w_dev: Any,
+        shear_w_dev: Any,
+        density_soa: Any,
+        shear_soa: Any,
+        density_w_soa: Any,
+        shear_w_soa: Any,
+    ) -> None:
+        n_density_bins = int(density_dev.shape[0])
+        n_shear_bins = int(shear_dev.shape[0])
+
+        for i in range(n_density_bins):
+            density_soa[:, i] = density_dev[i]
+            density_w_soa[:, i] = density_w_dev[i]
+
+        for i in range(n_shear_bins):
+            shear_soa[:, i, 0] = shear_dev[i, 0]
+            shear_soa[:, i, 1] = shear_dev[i, 1]
+            shear_w_soa[:, i] = shear_w_dev[i]
+
     def preprocess(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
         angle_method: str = "haversine",
+        release_host_pairs: bool = False,
     ) -> None:
         """
         Calculates the pairs and their angles for all patches for 2PCF & aperture mass.
@@ -791,26 +901,38 @@ class Correlation:
         logger.info("Calculating pairs for 2PCF")
         self.calculate_pairs_2PCF(angle_method=angle_method)
         logger.info("Preparing flattened pair arrays on backend device")
-        self.prepare()
+        self.prepare(release_host_pairs=release_host_pairs)
 
     def precompute(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
         angle_method: str = "haversine",
+        release_host_pairs: bool = False,
     ) -> None:
         """Backward-compatible alias for preprocess()."""
         self.preprocess(
             aperture_filter=aperture_filter,
             angle_method=angle_method,
+            release_host_pairs=release_host_pairs,
         )
 
     def save_pairs(self, filepath: str) -> None:
         PairIOHandler.save_pairs(self, filepath)
 
     def load_pairs(
-        self, filepath: str, start_ind: int = 0, stop_ind: Optional[int] = None
+        self,
+        filepath: str,
+        start_ind: int = 0,
+        stop_ind: Optional[int] = None,
+        release_host_pairs: bool = False,
     ) -> None:
-        PairIOHandler.load_pairs(self, filepath, start_ind=start_ind, stop_ind=stop_ind)
+        PairIOHandler.load_pairs(
+            self,
+            filepath,
+            start_ind=start_ind,
+            stop_ind=stop_ind,
+            release_host_pairs=release_host_pairs,
+        )
 
     def get_aperture_shear(
         self,
@@ -975,12 +1097,20 @@ class Correlation:
         )
 
         self.inds_dev = self.backend.to_device(temp_inds)
+        module = self.backend.module
+        self.compute_context.inds_i_dev = module.ascontiguousarray(
+            self.inds_dev[0].astype(module.int64, copy=False)
+        )
+        self.compute_context.inds_j_dev = module.ascontiguousarray(
+            self.inds_dev[1].astype(module.int64, copy=False)
+        )
         self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
         self.bins_dev = self.backend.to_device(temp_bins)
         self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
         self.tot_bins_reduceat_dev = self.backend.to_device(
             temp_bins_tot.astype(np.int64, copy=False)
         )
+        self._prepare_aperture_device_buffers()
         self.ntotpairs = size
         self.compute_context.prepare_version += 1
         if release_host_pairs:
@@ -2284,8 +2414,13 @@ class Correlation:
         comb_i = module.ascontiguousarray(comb_i_base)
         comb_j = module.ascontiguousarray(comb_j_base)
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        inds_i = self.compute_context.inds_i_dev
+        inds_j = self.compute_context.inds_j_dev
+        if inds_i is None or inds_j is None:
+            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
+            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+            self.compute_context.inds_i_dev = inds_i
+            self.compute_context.inds_j_dev = inds_j
         rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
         rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
         bin_offsets = module.ascontiguousarray(
@@ -2587,13 +2722,31 @@ class Correlation:
         density_w_dev = self._to_backend_array(density_w_np, dtype=self.map_dtype)
         shear_w_dev = self._to_backend_array(shear_w_np, dtype=self.map_dtype)
 
-        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
-        shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
-        density_w_soa = module.ascontiguousarray(module.transpose(density_w_dev, (1, 0)))
-        shear_w_soa = module.ascontiguousarray(module.transpose(shear_w_dev, (1, 0)))
-
         n_shear_bins = int(shear_np.shape[0])
         n_density_bins = int(density_np.shape[0])
+        npix = int(density_np.shape[1])
+        (
+            density_soa,
+            shear_soa,
+            density_w_soa,
+            shear_w_soa,
+        ) = self._get_or_create_fused_input_buffers(
+            npix,
+            n_density_bins,
+            n_shear_bins,
+            map_backend_dtype,
+        )
+        self._fill_fused_input_buffers(
+            density_dev,
+            shear_dev,
+            density_w_dev,
+            shear_w_dev,
+            density_soa,
+            shear_soa,
+            density_w_soa,
+            shear_w_soa,
+        )
+
         n_patches = int(self.n_patches)
         nbins_total = int(self.n_patches * self.nbins)
 
@@ -2622,23 +2775,14 @@ class Correlation:
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
 
-        q_inds_u32 = np.asarray(self.Q_inds_flat, dtype=np.uint32)
-        q_inds = module.ascontiguousarray(self.backend.to_device(q_inds_u32))
-        q_cos = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.map_dtype))
-        )
-        q_sin = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.map_dtype))
-        )
-        q_val = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.map_dtype))
-        )
-        q_offsets = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_offsets, dtype=np.int64))
-        )
-        q_patch_area = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_patch_area_flat, dtype=self.map_dtype))
-        )
+        if self.compute_context.Q_inds_dev is None:
+            self._prepare_aperture_device_buffers()
+        q_inds = self.compute_context.Q_inds_dev
+        q_cos = self.compute_context.Q_cos_dev
+        q_sin = self.compute_context.Q_sin_dev
+        q_val = self.compute_context.Q_val_dev
+        q_offsets = self.compute_context.Q_offsets_dev
+        q_patch_area = self.compute_context.Q_patch_area_dev
 
         out_ma_num = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
         out_ma_den = self.backend.zeros((n_shear_bins, n_patches), dtype=map_backend_dtype)
@@ -2812,25 +2956,32 @@ class Correlation:
                 "Both shear_maps and density_maps must be provided for get_3x2pt_tomo."
             )
 
-        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
+        shear_arr = self._coerce_map_input_array(shear_maps)
+        density_arr = self._coerce_map_input_array(density_maps)
+
+        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
+
+        def _ones(shape: Tuple[int, ...]) -> Any:
+            if self.backend.name == "cupy":
+                return self.backend.module.ones(shape, dtype=map_backend_dtype)
+            return np.ones(shape, dtype=self.map_dtype)
 
         shear_w = None
         density_w = None
         if weights is None:
-            shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
-            density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
+            shear_w = _ones((shear_arr.shape[0], shear_arr.shape[2]))
+            density_w = _ones((density_arr.shape[0], density_arr.shape[1]))
         elif isinstance(weights, dict):
             shear_w = weights.get("shear")
             density_w = weights.get("density")
         elif isinstance(weights, (tuple, list)) and len(weights) == 2:
             shear_w, density_w = weights
         else:
-            weight_arr = np.asarray(weights)
+            weight_arr = self._coerce_map_input_array(weights)
             if (
                 weight_arr.ndim == 2
-                and weight_arr.shape[0] == shear_np.shape[0]
-                and weight_arr.shape[0] == density_np.shape[0]
+                and weight_arr.shape[0] == shear_arr.shape[0]
+                and weight_arr.shape[0] == density_arr.shape[0]
             ):
                 shear_w = weight_arr
                 density_w = weight_arr
@@ -2840,15 +2991,15 @@ class Correlation:
                 )
 
         if shear_w is None:
-            shear_w = np.ones((shear_np.shape[0], shear_np.shape[2]), dtype=self.map_dtype)
+            shear_w = _ones((shear_arr.shape[0], shear_arr.shape[2]))
         if density_w is None:
-            density_w = np.ones((density_np.shape[0], density_np.shape[1]), dtype=self.map_dtype)
+            density_w = _ones((density_arr.shape[0], density_arr.shape[1]))
 
         return self._compute_3x2pt_tomo_fused(
-            shear_maps=shear_np,
-            density_maps=density_np,
-            shear_weights=np.asarray(shear_w, dtype=self.map_dtype),
-            density_weights=np.asarray(density_w, dtype=self.map_dtype),
+            shear_maps=shear_arr,
+            density_maps=density_arr,
+            shear_weights=self._coerce_map_input_array(shear_w),
+            density_weights=self._coerce_map_input_array(density_w),
             gc_auto_correlations_only=gc_auto_correlations_only,
             ggl_bin_combinations=ggl_bin_combinations,
             aperture_filter=aperture_filter,

@@ -137,12 +137,11 @@ class TestCorrelation(unittest.TestCase):
             theta_center=self.theta_center,
             map_precision="float32",
             rotation_precision="float32",
-            index_precision="uint64",
         )
         self.assertEqual(corr.map_dtype, np.dtype(np.float32))
         self.assertEqual(corr.rotation_dtype, np.dtype(np.float32))
         self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
-        self.assertEqual(corr.index_dtype, np.dtype(np.uint64))
+        self.assertEqual(corr.index_dtype, np.dtype(np.int64))
 
     def test_init_invalid_map_precision(self):
         """Test initialization with invalid map precision."""
@@ -164,9 +163,9 @@ class TestCorrelation(unittest.TestCase):
                 rotation_precision="bfloat16",
             )
 
-    def test_init_invalid_index_precision(self):
-        """Test initialization with invalid index precision."""
-        with self.assertRaises(ValueError):
+    def test_init_rejects_removed_index_precision_kwarg(self):
+        """index_precision has been removed from the public Correlation API."""
+        with self.assertRaises(TypeError):
             Correlation(
                 nside=self.nside,
                 phi_center=self.phi_center,

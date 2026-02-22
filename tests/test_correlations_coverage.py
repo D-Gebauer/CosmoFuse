@@ -1484,6 +1484,28 @@ class TestCorrelationCoverage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Both shear_maps and density_maps"):
             corr.get_3x2pt_tomo(density_maps=density_maps)
 
+    def test_preprocess_forwards_release_host_pairs(self):
+        corr = self._make_small_cpu_corr()
+        with patch.object(corr, "calculate_pairs_M_a") as spy_ma, patch.object(
+            corr, "calculate_pairs_2PCF"
+        ) as spy_2pcf, patch.object(corr, "prepare") as spy_prepare:
+            corr.preprocess(release_host_pairs=True)
+
+        spy_ma.assert_called_once()
+        spy_2pcf.assert_called_once()
+        spy_prepare.assert_called_once_with(release_host_pairs=True)
+
+    def test_precompute_forwards_release_host_pairs(self):
+        corr = self._make_small_cpu_corr()
+        with patch.object(corr, "preprocess") as spy_preprocess:
+            corr.precompute(release_host_pairs=True)
+
+        spy_preprocess.assert_called_once_with(
+            aperture_filter=None,
+            angle_method="haversine",
+            release_host_pairs=True,
+        )
+
     def test_get_3x2pt_tomo_both_maps_weights_variants(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
@@ -1534,6 +1556,84 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_maps=density_maps,
                 weights=np.ones((3, 12), dtype=np.float64),
             )
+
+    def test_get_3x2pt_tomo_preserves_backend_native_gpu_arrays(self):
+        corr = self._make_small_cpu_corr()
+
+        class _FakeGPUDevice:
+            def __init__(self, device_id: int):
+                self.id = device_id
+
+        class _FakeGPUArray:
+            def __init__(self, array: np.ndarray, device_id: int = 0):
+                self._array = np.asarray(array)
+                self.shape = self._array.shape
+                self.ndim = self._array.ndim
+                self.dtype = self._array.dtype
+                self.device = _FakeGPUDevice(device_id)
+
+            def astype(self, dtype, copy: bool = False):
+                target_dtype = np.dtype(dtype)
+                if target_dtype == self.dtype and not copy:
+                    return self
+                return _FakeGPUArray(
+                    self._array.astype(target_dtype, copy=copy),
+                    device_id=self.device.id,
+                )
+
+            def __array__(self, *_args, **_kwargs):
+                raise AssertionError("NumPy coercion should not be triggered for GPU inputs")
+
+        class _FakeGPUModule:
+            ndarray = _FakeGPUArray
+            float64 = np.float64
+
+            @staticmethod
+            def ones(shape, dtype=np.float64):
+                return _FakeGPUArray(np.ones(shape, dtype=dtype))
+
+        orig_name = corr.backend.name
+        orig_module = corr.backend.module
+        orig_device_id = getattr(corr.backend, "device_id", None)
+        corr.backend.name = "cupy"
+        corr.backend.module = _FakeGPUModule
+        corr.backend.device_id = 0
+
+        shear_maps = _FakeGPUArray(np.ones((2, 2, 12), dtype=np.float64))
+        density_maps = _FakeGPUArray(np.ones((2, 12), dtype=np.float64))
+        shear_w = _FakeGPUArray(np.full((2, 12), 2.0, dtype=np.float64))
+        density_w = _FakeGPUArray(np.full((2, 12), 3.0, dtype=np.float64))
+
+        fused_return = (
+            np.full((2, corr.n_patches), 1.0, dtype=np.float64),
+            np.full((2, corr.n_patches), 5.0, dtype=np.float64),
+            np.full((3, corr.n_patches, corr.nbins), 2.0, dtype=np.float64),
+            np.zeros((3, corr.n_patches, corr.nbins), dtype=np.float64),
+            np.full((3, corr.n_patches, corr.nbins), 6.0, dtype=np.float64),
+            np.full((4, corr.n_patches, corr.nbins), 7.0, dtype=np.float64),
+        )
+
+        try:
+            with patch.object(
+                corr,
+                "_compute_3x2pt_tomo_fused",
+                return_value=fused_return,
+            ) as spy_fused:
+                _ = corr.get_3x2pt_tomo(
+                    shear_maps=shear_maps,
+                    density_maps=density_maps,
+                    weights={"shear": shear_w, "density": density_w},
+                )
+        finally:
+            corr.backend.name = orig_name
+            corr.backend.module = orig_module
+            corr.backend.device_id = orig_device_id
+
+        self.assertEqual(spy_fused.call_count, 1)
+        self.assertIs(spy_fused.call_args.kwargs["shear_maps"], shear_maps)
+        self.assertIs(spy_fused.call_args.kwargs["density_maps"], density_maps)
+        self.assertIs(spy_fused.call_args.kwargs["shear_weights"], shear_w)
+        self.assertIs(spy_fused.call_args.kwargs["density_weights"], density_w)
 
     def test_get_3x2pt_tomo_forwards_flip_flags_to_wl_and_ggl(self):
         corr = self._make_small_cpu_corr()
@@ -1970,6 +2070,226 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_weights=np.ones((1, 12), dtype=np.float64),
                 density_weights=np.ones((1, 12), dtype=np.float64),
             )
+
+    def test_compute_3x2pt_tomo_fused_reuses_cached_aperture_device_arrays(self):
+        corr = self._make_small_cpu_corr()
+
+        corr.calculate_pairs_M_a()
+        corr._invalidate_aperture_device_buffers()
+
+        original_name = corr.backend.name
+        original_to_device = corr.backend.to_device
+        original_to_numpy = corr.backend.to_numpy
+        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
+
+        q_signatures = {
+            (np.asarray(corr.Q_inds_flat, dtype=np.uint32).shape, np.dtype(np.uint32).str),
+            (np.asarray(corr.Q_cos_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+            (np.asarray(corr.Q_sin_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+            (np.asarray(corr.Q_val_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+            (np.asarray(corr.Q_offsets, dtype=np.int64).shape, np.dtype(np.int64).str),
+            (np.asarray(corr.Q_patch_area_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+        }
+        q_upload_count = 0
+
+        def counting_to_device(arr):
+            nonlocal q_upload_count
+            arr_np = np.asarray(arr)
+            signature = (arr_np.shape, arr_np.dtype.str)
+            if signature in q_signatures:
+                q_upload_count += 1
+            return arr_np
+
+        captured_q_buffers = []
+
+        def launched_kernel(*args):
+            captured_q_buffers.append(args[9:15])
+            return True
+
+        try:
+            corr.backend.name = "cupy"
+            corr.backend.to_device = counting_to_device
+            corr.backend.to_numpy = lambda arr: np.asarray(arr)
+            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
+
+            corr.prepare()
+            q_uploads_after_prepare = q_upload_count
+            self.assertGreaterEqual(q_uploads_after_prepare, 6)
+
+            density_maps = np.ones((1, 12), dtype=np.float64)
+            shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+            density_w = np.ones((1, 12), dtype=np.float64)
+            shear_w = np.ones((1, 12), dtype=np.float64)
+
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+        finally:
+            corr.backend.name = original_name
+            corr.backend.to_device = original_to_device
+            corr.backend.to_numpy = original_to_numpy
+            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
+
+        self.assertEqual(q_upload_count, q_uploads_after_prepare)
+        self.assertEqual(len(captured_q_buffers), 2)
+        self.assertIs(captured_q_buffers[0][0], corr.compute_context.Q_inds_dev)
+        self.assertIs(captured_q_buffers[0][1], corr.compute_context.Q_cos_dev)
+        self.assertIs(captured_q_buffers[0][2], corr.compute_context.Q_sin_dev)
+        self.assertIs(captured_q_buffers[0][3], corr.compute_context.Q_val_dev)
+        self.assertIs(captured_q_buffers[0][4], corr.compute_context.Q_offsets_dev)
+        self.assertIs(captured_q_buffers[0][5], corr.compute_context.Q_patch_area_dev)
+        self.assertIs(captured_q_buffers[1][0], corr.compute_context.Q_inds_dev)
+
+    def test_compute_3x2pt_tomo_fused_reuses_cached_pair_index_buffers(self):
+        corr = self._make_small_cpu_corr()
+        corr.calculate_pairs_M_a()
+
+        original_name = corr.backend.name
+        original_to_device = corr.backend.to_device
+        original_to_numpy = corr.backend.to_numpy
+        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
+
+        captured_inds = []
+        pair_index_signatures = {
+            (np.asarray(corr.pair_inds[0][0], dtype=np.int64).shape, np.dtype(np.int64).str),
+            (np.asarray(corr.pair_inds[0][1], dtype=np.int64).shape, np.dtype(np.int64).str),
+        }
+        pair_index_upload_count = 0
+
+        def counting_to_device(arr):
+            nonlocal pair_index_upload_count
+            arr_np = np.asarray(arr)
+            if (arr_np.shape, arr_np.dtype.str) in pair_index_signatures:
+                pair_index_upload_count += 1
+            return arr_np
+
+        def launched_kernel(*args):
+            captured_inds.append((args[4], args[5]))
+            return True
+
+        try:
+            corr.backend.name = "cupy"
+            corr.backend.to_device = counting_to_device
+            corr.backend.to_numpy = lambda arr: np.asarray(arr)
+            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
+
+            corr.prepare()
+            pair_index_uploads_after_prepare = pair_index_upload_count
+
+            density_maps = np.ones((1, 12), dtype=np.float64)
+            shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+            density_w = np.ones((1, 12), dtype=np.float64)
+            shear_w = np.ones((1, 12), dtype=np.float64)
+
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+        finally:
+            corr.backend.name = original_name
+            corr.backend.to_device = original_to_device
+            corr.backend.to_numpy = original_to_numpy
+            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
+
+        self.assertEqual(len(captured_inds), 2)
+        self.assertEqual(pair_index_upload_count, pair_index_uploads_after_prepare)
+        self.assertEqual(captured_inds[0][0].dtype, np.int64)
+        self.assertEqual(captured_inds[0][1].dtype, np.int64)
+        self.assertEqual(captured_inds[1][0].dtype, np.int64)
+        self.assertEqual(captured_inds[1][1].dtype, np.int64)
+
+    def test_compute_3x2pt_tomo_fused_reuses_cached_input_staging_buffers_no_transpose(self):
+        corr = self._make_small_cpu_corr()
+        corr.calculate_pairs_M_a()
+
+        class _NoTransposeModule:
+            int64 = np.int64
+            float64 = np.float64
+
+            @staticmethod
+            def asarray(arr):
+                return np.asarray(arr)
+
+            @staticmethod
+            def ascontiguousarray(arr):
+                return np.ascontiguousarray(arr)
+
+            @staticmethod
+            def transpose(_arr, _axes=None):
+                raise AssertionError("transpose should not be called in fused 3x2pt path")
+
+        original_name = corr.backend.name
+        original_module = corr.backend.module
+        original_to_device = corr.backend.to_device
+        original_to_numpy = corr.backend.to_numpy
+        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
+
+        try:
+            corr.backend.name = "cupy"
+            corr.backend.module = _NoTransposeModule
+            corr.backend.to_device = lambda arr: np.asarray(arr)
+            corr.backend.to_numpy = lambda arr: np.asarray(arr)
+
+            captured_density_buffers = []
+            captured_shear_buffers = []
+
+            def launched_kernel(*args):
+                captured_density_buffers.append(args[0])
+                captured_shear_buffers.append(args[1])
+                return True
+
+            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
+            corr.prepare()
+
+            density_maps = np.ones((1, 12), dtype=np.float64)
+            shear_maps = np.ones((1, 2, 12), dtype=np.float64)
+            density_w = np.ones((1, 12), dtype=np.float64)
+            shear_w = np.ones((1, 12), dtype=np.float64)
+
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+            density_buf_first = corr.compute_context.fused_density_soa
+            shear_buf_first = corr.compute_context.fused_shear_soa
+
+            corr._compute_3x2pt_tomo_fused(
+                shear_maps=shear_maps,
+                density_maps=density_maps,
+                shear_weights=shear_w,
+                density_weights=density_w,
+            )
+        finally:
+            corr.backend.name = original_name
+            corr.backend.module = original_module
+            corr.backend.to_device = original_to_device
+            corr.backend.to_numpy = original_to_numpy
+            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
+
+        self.assertEqual(len(captured_density_buffers), 2)
+        self.assertIs(captured_density_buffers[0], density_buf_first)
+        self.assertIs(captured_density_buffers[1], density_buf_first)
+        self.assertIs(captured_shear_buffers[0], shear_buf_first)
+        self.assertIs(captured_shear_buffers[1], shear_buf_first)
 
     def test_compute_aperture_shear_all_patches_helper(self):
         vals = correlations_module._compute_aperture_shear_all_patches(
@@ -2532,7 +2852,6 @@ class TestCorrelationCoverage(unittest.TestCase):
             device="cpu",
             map_precision="float64",
             rotation_precision="float64",
-            index_precision="uint64",
         )
         high.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint64)]
         high.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
@@ -2558,14 +2877,13 @@ class TestCorrelationCoverage(unittest.TestCase):
                 device="cpu",
                 map_precision="float32",
                 rotation_precision="float32",
-                index_precision="uint32",
             )
             low.load_pairs(tmp.name)
 
-            self.assertEqual(low.pair_inds[0].dtype, np.uint32)
-            self.assertEqual(low.bins[0].dtype, np.uint32)
+            self.assertEqual(low.pair_inds[0].dtype, np.int64)
+            self.assertEqual(low.bins[0].dtype, np.int64)
             self.assertEqual(low.pair_exp2phi[0].dtype, np.complex64)
-            self.assertEqual(low.Q_inds[0].dtype, np.uint32)
+            self.assertEqual(low.Q_inds[0].dtype, np.int64)
             self.assertEqual(low.Q_cos[0].dtype, np.float32)
             self.assertEqual(low.Q_sin[0].dtype, np.float32)
             self.assertEqual(low.Q_val[0].dtype, np.float32)
@@ -2581,6 +2899,50 @@ class TestCorrelationCoverage(unittest.TestCase):
             xip, xim = low.compute_shear_shear(g11, g21, g12, g22, w1, w2)
             self.assertEqual(xip.dtype, np.float32)
             self.assertEqual(xim.dtype, np.float32)
+
+    def test_load_pairs_can_release_host_pairs(self):
+        high = Correlation(
+            nside=1,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([0.0]),
+            nbins=1,
+            theta_min=1.0,
+            theta_max=2.0,
+            patch_size=1.0,
+            theta_Q=1.0,
+            device="cpu",
+        )
+        high.pair_inds = [np.array([[0, 1], [1, 2]], dtype=np.uint32)]
+        high.pair_exp2phi = [np.ones((2, 2), dtype=np.complex128)]
+        high.bins = [np.array([2], dtype=np.uint32)]
+        high.Q_inds = [np.array([0, 1], dtype=np.uint32)]
+        high.Q_cos = [np.array([1.0, 1.0], dtype=np.float64)]
+        high.Q_sin = [np.array([0.0, 0.0], dtype=np.float64)]
+        high.Q_val = [np.array([1.0, 1.0], dtype=np.float64)]
+        high.Q_patch_area = [np.float64(2.0)]
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            high.save_pairs(tmp.name)
+
+            low = Correlation(
+                nside=1,
+                phi_center=np.array([0.0]),
+                theta_center=np.array([0.0]),
+                nbins=1,
+                theta_min=1.0,
+                theta_max=2.0,
+                patch_size=1.0,
+                theta_Q=1.0,
+                device="cpu",
+            )
+            low.load_pairs(tmp.name, release_host_pairs=True)
+
+            self.assertIsNone(low.pair_inds)
+            self.assertIsNone(low.pair_exp2phi)
+            self.assertIsNone(low.bins)
+            self.assertIsNotNone(low.inds_dev)
+            self.assertIsNotNone(low.exp2phi_dev)
+            self.assertIsNotNone(low.bins_dev)
 
     def test_prepare_aperture_flat_populates(self):
         """Ensure aperture inputs are flattened with correct offsets."""
@@ -3008,7 +3370,6 @@ class TestCorrelationCoverage(unittest.TestCase):
             device="cpu",
             map_precision="float32",
             rotation_precision="float32",
-            index_precision="uint64",
         )
 
         n_pairs = 6
@@ -3017,10 +3378,10 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.bins = [np.array([3, 3], dtype=np.uint64)]
 
         corr.prepare()
-        self.assertEqual(corr.inds_dev.dtype, np.uint64)
+        self.assertEqual(corr.inds_dev.dtype, np.int64)
         self.assertEqual(corr.exp2phi_dev.dtype, np.complex64)
-        self.assertEqual(corr.bins_dev.dtype, np.uint64)
-        self.assertEqual(corr.tot_bins_dev.dtype, np.uint64)
+        self.assertEqual(corr.bins_dev.dtype, np.int64)
+        self.assertEqual(corr.tot_bins_dev.dtype, np.int64)
 
         corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint64)]
         corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]

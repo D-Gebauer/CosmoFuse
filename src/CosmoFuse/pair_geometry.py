@@ -221,6 +221,7 @@ class PairGeometry:
             owner.Q_val_flat = None
             owner.Q_offsets = None
             owner.Q_patch_area_flat = None
+            owner._invalidate_aperture_device_buffers()
             return
 
         sizes = np.array([arr.size for arr in owner.Q_inds], dtype=np.int64)
@@ -245,3 +246,4 @@ class PairGeometry:
         owner.Q_val_flat = Q_val_flat
         owner.Q_offsets = offsets
         owner.Q_patch_area_flat = np.asarray(owner.Q_patch_area, dtype=owner.rotation_dtype)
+        owner._invalidate_aperture_device_buffers()

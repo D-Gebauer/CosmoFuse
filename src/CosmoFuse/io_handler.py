@@ -55,6 +55,7 @@ class PairIOHandler:
         filepath: str,
         start_ind: int = 0,
         stop_ind: Optional[int] = None,
+        release_host_pairs: bool = False,
     ) -> None:
         owner._invalidate_prepared_state()
         owner.pair_inds = []
@@ -101,4 +102,4 @@ class PairIOHandler:
                 owner.Q_val.append(gp["Q_val"][:].astype(owner.rotation_dtype, copy=False))
                 owner.Q_patch_area.append(owner.rotation_dtype.type(gp["Q_patch_area"][()]))
             owner._prepare_aperture_flat()
-        owner.prepare()
+        owner.prepare(release_host_pairs=release_host_pairs)

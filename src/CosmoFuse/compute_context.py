@@ -6,6 +6,8 @@ class ComputeContext:
 
     _PREPARED_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
         ("inds_dev", None),
+        ("inds_i_dev", None),
+        ("inds_j_dev", None),
         ("exp2phi_dev", None),
         ("bins_dev", None),
         ("tot_bins_dev", None),
@@ -28,18 +30,44 @@ class ComputeContext:
         ("Q_offsets", None),
         ("Q_patch_area_flat", None),
     )
+    _APERTURE_DEVICE_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
+        ("Q_inds_dev", None),
+        ("Q_cos_dev", None),
+        ("Q_sin_dev", None),
+        ("Q_val_dev", None),
+        ("Q_offsets_dev", None),
+        ("Q_patch_area_dev", None),
+    )
+    _FUSED_INPUT_BUFFER_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
+        ("fused_density_soa", None),
+        ("fused_shear_soa", None),
+        ("fused_density_w_soa", None),
+        ("fused_shear_w_soa", None),
+    )
 
     def __init__(self) -> None:
         self.tomo_combination_cache: Dict[Any, Any] = {}
         self.initialize_runtime_state()
 
     def initialize_runtime_state(self) -> None:
-        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+        for name, value in (
+            self._PREPARED_DEFAULTS
+            + self._WEIGHT_CACHE_DEFAULTS
+            + self._APERTURE_DEFAULTS
+            + self._APERTURE_DEVICE_DEFAULTS
+            + self._FUSED_INPUT_BUFFER_DEFAULTS
+        ):
             setattr(self, name, value)
         self.prepare_version = 0
 
     def ensure_runtime_state(self) -> None:
-        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+        for name, value in (
+            self._PREPARED_DEFAULTS
+            + self._WEIGHT_CACHE_DEFAULTS
+            + self._APERTURE_DEFAULTS
+            + self._APERTURE_DEVICE_DEFAULTS
+            + self._FUSED_INPUT_BUFFER_DEFAULTS
+        ):
             if name not in self.__dict__:
                 setattr(self, name, value)
         if "prepare_version" not in self.__dict__:
@@ -48,5 +76,11 @@ class ComputeContext:
             self.tomo_combination_cache = {}
 
     def invalidate_prepared_state(self) -> None:
-        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+        for name, value in (
+            self._PREPARED_DEFAULTS
+            + self._WEIGHT_CACHE_DEFAULTS
+            + self._APERTURE_DEFAULTS
+            + self._APERTURE_DEVICE_DEFAULTS
+            + self._FUSED_INPUT_BUFFER_DEFAULTS
+        ):
             setattr(self, name, value)

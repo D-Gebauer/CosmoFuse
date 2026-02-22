@@ -49,7 +49,6 @@ class TestEndToEnd(unittest.TestCase):
             fastmath=False,
             rotation_precision="float64",
             map_precision="float64",
-            index_precision="uint32",
         )
 
         self.shear_maps = np.zeros((2, 2, hp.nside2npix(self.nside)))

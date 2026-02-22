@@ -82,12 +82,15 @@ First create a Correlation object:
         device="auto",                      # "cpu", "gpu", "auto", or GPU id
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
-        index_precision="uint32",           # uint32 / uint64
     )
 
 Then Calculate pairs:
 
     correlation.preprocess()
+
+You can also release host-side pair arrays immediately after preprocessing:
+
+    correlation.preprocess(release_host_pairs=True)
 
 If host RAM is limited for large runs, you can optionally release host-side pair arrays after preparing backend buffers:
 
@@ -99,6 +102,12 @@ These can be saved & loaded using:
 
     correlation.save_pairs("/path/to/pairs.h5")
     correlation.load_pairs("/path/to/pairs.h5")
+
+To load pairs and immediately release host-side pair arrays after backend preparation:
+
+    correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
+
+Note: `index_precision` has been removed from the public API. Index buffers are now fixed to int64 internally.
 
 ### Measuring Correlations
 
