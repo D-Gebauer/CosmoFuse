@@ -26,12 +26,9 @@ def _load_cuda_source_file(filename: str) -> str:
 _COMMON_CUDA_SOURCE = _load_cuda_source_file("common.cuh")
 
 
-def _render_cuda_source_template(filename: str, replacements: dict[str, Any]) -> str:
+def _prepare_cuda_source(filename: str) -> str:
     source = _load_cuda_source_file(filename)
-    rendered = source.replace("__COMMON_CUDA_SOURCE__", _COMMON_CUDA_SOURCE)
-    for key, value in replacements.items():
-        rendered = rendered.replace(key, str(value))
-    return rendered
+    return source.replace("__COMMON_CUDA_SOURCE__", _COMMON_CUDA_SOURCE)
 
 
 def _has_raw_cuda_compiler(module: Any) -> bool:
@@ -41,31 +38,31 @@ def _has_raw_cuda_compiler(module: Any) -> bool:
     )
 
 
-def _compile_raw_cuda_kernel(module: Any, source: str, kernel_name: str) -> Any:
+def _compile_raw_cuda_kernel(module: Any, source: str, name_expression: str) -> Any:
     raw_module_ctor = getattr(module, "RawModule", None)
     if raw_module_ctor is not None:
         try:
             raw_module = raw_module_ctor(
                 code=source,
                 options=_CUPY_FASTMATH_OPTIONS,
-                name_expressions=(kernel_name,),
+                name_expressions=(name_expression,),
             )
         except TypeError:
             raw_module = raw_module_ctor(
                 source,
                 options=_CUPY_FASTMATH_OPTIONS,
-                name_expressions=(kernel_name,),
+                name_expressions=(name_expression,),
             )
 
         get_function = getattr(raw_module, "get_function", None)
         if get_function is not None:
-            return get_function(kernel_name)
+            return get_function(name_expression)
 
     raw_kernel_ctor = getattr(module, "RawKernel", None)
     if raw_kernel_ctor is None:
         raise AttributeError("Backend module does not provide RawModule or RawKernel")
 
-    return raw_kernel_ctor(source, kernel_name, options=_CUPY_FASTMATH_OPTIONS)
+    return raw_kernel_ctor(source, name_expression, options=_CUPY_FASTMATH_OPTIONS)
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -357,18 +354,11 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
         if cached is not None:
             return cached
 
-        kernel_name = f"gpu_fused_tomo_reduce_dd_{map_c_type}_{nzbins}"
-        source = _render_cuda_source_template(
-            "density_density_tomo_vectorized.cu",
-            {
-                "__KERNEL_NAME__": kernel_name,
-                "__MAP_C_TYPE__": map_c_type,
-                "__TOMO_BINS__": nzbins,
-            },
-        )
+        name_expression = f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}>"
+        source = _prepare_cuda_source("density_density_tomo_vectorized.cu")
 
         try:
-            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
                 "Vectorized density-density RawKernel compilation failed for %d bins; using legacy path: %s",
@@ -434,7 +424,6 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
-        complex_real_type: str,
         suffix: str,
         nlens_bins: int,
         nsource_bins: int,
@@ -444,24 +433,14 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         if cached is not None:
             return cached
 
-        kernel_name = (
-            f"gpu_fused_tomo_reduce_ds_{map_c_type}_{suffix}_"
-            f"{nlens_bins}_{nsource_bins}"
+        name_expression = (
+            f"gpu_fused_tomo_reduce_ds<{map_c_type}, {complex_c_type}, "
+            f"{nlens_bins}, {nsource_bins}>"
         )
-        source = _render_cuda_source_template(
-            "density_shear_tomo_vectorized.cu",
-            {
-                "__KERNEL_NAME__": kernel_name,
-                "__MAP_C_TYPE__": map_c_type,
-                "__COMPLEX_C_TYPE__": complex_c_type,
-                "__COMPLEX_REAL_TYPE__": complex_real_type,
-                "__LENS_TOMO_BINS__": nlens_bins,
-                "__SOURCE_TOMO_BINS__": nsource_bins,
-            },
-        )
+        source = _prepare_cuda_source("density_shear_tomo_vectorized.cu")
 
         try:
-            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
                 "Vectorized density-shear RawKernel compilation failed for lens/source bins (%d, %d); using legacy path: %s",
@@ -497,18 +476,15 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
 
         if rot_j.dtype == module.complex64:
             complex_c_type = "cuFloatComplex"
-            complex_real_type = "float"
             suffix = "c64"
         else:
             complex_c_type = "cuDoubleComplex"
-            complex_real_type = "double"
             suffix = "c128"
 
         map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
-            complex_real_type,
             suffix,
             nlens_bins,
             nsource_bins,
@@ -548,109 +524,6 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
 
 
 @njit(fastmath=True, parallel=True, cache=True)
-def _cpu_xipm_cross_corr_kernel_c64(
-    g1a: np.ndarray,
-    g2a: np.ndarray,
-    g1b: np.ndarray,
-    g2b: np.ndarray,
-    wa: np.ndarray,
-    wb: np.ndarray,
-    ind_i: np.ndarray,
-    ind_j: np.ndarray,
-    exp_i: np.ndarray,
-    exp_j: np.ndarray,
-    offsets: np.ndarray,
-    out_ab_p: np.ndarray,
-    out_ab_m: np.ndarray,
-    out_ba_p: np.ndarray,
-    out_ba_m: np.ndarray,
-) -> None:
-    nbins = offsets.shape[0] - 1
-    for b in prange(nbins):
-        ab_p_acc = np.complex64(0.0 + 0.0j)
-        ab_m_acc = np.complex64(0.0 + 0.0j)
-        ba_p_acc = np.complex64(0.0 + 0.0j)
-        ba_m_acc = np.complex64(0.0 + 0.0j)
-        start = offsets[b]
-        stop = offsets[b + 1]
-
-        for idx in range(start, stop):
-            i = ind_i[idx]
-            j = ind_j[idx]
-
-            ga_i = np.complex64(g1a[i] + 1j * g2a[i])
-            gb_i = np.complex64(g1b[i] + 1j * g2b[i])
-            ga_j = np.complex64(g1a[j] + 1j * g2a[j])
-            gb_j = np.complex64(g1b[j] + 1j * g2b[j])
-
-            ga_i_rot = wa[i] * ga_i * exp_i[idx]
-            gb_i_rot = wb[i] * gb_i * exp_i[idx]
-            ga_j_rot = wa[j] * ga_j * exp_j[idx]
-            gb_j_rot = wb[j] * gb_j * exp_j[idx]
-
-            ab_p_acc += gb_j_rot * np.conjugate(ga_i_rot)
-            ab_m_acc += gb_j_rot * ga_i_rot
-            ba_p_acc += ga_j_rot * np.conjugate(gb_i_rot)
-            ba_m_acc += ga_j_rot * gb_i_rot
-
-        out_ab_p[b] = ab_p_acc
-        out_ab_m[b] = ab_m_acc
-        out_ba_p[b] = ba_p_acc
-        out_ba_m[b] = ba_m_acc
-
-
-@njit(fastmath=True, parallel=True, cache=True)
-def _cpu_xipm_cross_corr_kernel_c128(
-    g1a: np.ndarray,
-    g2a: np.ndarray,
-    g1b: np.ndarray,
-    g2b: np.ndarray,
-    wa: np.ndarray,
-    wb: np.ndarray,
-    ind_i: np.ndarray,
-    ind_j: np.ndarray,
-    exp_i: np.ndarray,
-    exp_j: np.ndarray,
-    offsets: np.ndarray,
-    out_ab_p: np.ndarray,
-    out_ab_m: np.ndarray,
-    out_ba_p: np.ndarray,
-    out_ba_m: np.ndarray,
-) -> None:
-    nbins = offsets.shape[0] - 1
-    for b in prange(nbins):
-        ab_p_acc = np.complex128(0.0 + 0.0j)
-        ab_m_acc = np.complex128(0.0 + 0.0j)
-        ba_p_acc = np.complex128(0.0 + 0.0j)
-        ba_m_acc = np.complex128(0.0 + 0.0j)
-        start = offsets[b]
-        stop = offsets[b + 1]
-
-        for idx in range(start, stop):
-            i = ind_i[idx]
-            j = ind_j[idx]
-
-            ga_i = np.complex128(g1a[i] + 1j * g2a[i])
-            gb_i = np.complex128(g1b[i] + 1j * g2b[i])
-            ga_j = np.complex128(g1a[j] + 1j * g2a[j])
-            gb_j = np.complex128(g1b[j] + 1j * g2b[j])
-
-            ga_i_rot = wa[i] * ga_i * exp_i[idx]
-            gb_i_rot = wb[i] * gb_i * exp_i[idx]
-            ga_j_rot = wa[j] * ga_j * exp_j[idx]
-            gb_j_rot = wb[j] * gb_j * exp_j[idx]
-
-            ab_p_acc += gb_j_rot * np.conjugate(ga_i_rot)
-            ab_m_acc += gb_j_rot * ga_i_rot
-            ba_p_acc += ga_j_rot * np.conjugate(gb_i_rot)
-            ba_m_acc += ga_j_rot * gb_i_rot
-
-        out_ab_p[b] = ab_p_acc
-        out_ab_m[b] = ab_m_acc
-        out_ba_p[b] = ba_p_acc
-        out_ba_m[b] = ba_m_acc
-
-
 def _cpu_xipm_cross_corr_kernel(
     g1a: np.ndarray,
     g2a: np.ndarray,
@@ -668,64 +541,17 @@ def _cpu_xipm_cross_corr_kernel(
     out_ba_p: np.ndarray,
     out_ba_m: np.ndarray,
 ) -> None:
-    if exp_i.dtype == np.complex64:
-        _cpu_xipm_cross_corr_kernel_c64(
-            g1a,
-            g2a,
-            g1b,
-            g2b,
-            wa,
-            wb,
-            ind_i,
-            ind_j,
-            exp_i,
-            exp_j,
-            offsets,
-            out_ab_p,
-            out_ab_m,
-            out_ba_p,
-            out_ba_m,
-        )
-    else:
-        _cpu_xipm_cross_corr_kernel_c128(
-            g1a,
-            g2a,
-            g1b,
-            g2b,
-            wa,
-            wb,
-            ind_i,
-            ind_j,
-            exp_i,
-            exp_j,
-            offsets,
-            out_ab_p,
-            out_ab_m,
-            out_ba_p,
-            out_ba_m,
-        )
-
-
-@njit(fastmath=True, parallel=True, cache=True)
-def _cpu_xipm_auto_corr_kernel_c64(
-    g11: np.ndarray,
-    g21: np.ndarray,
-    g12: np.ndarray,
-    g22: np.ndarray,
-    w1: np.ndarray,
-    w2: np.ndarray,
-    ind_i: np.ndarray,
-    ind_j: np.ndarray,
-    exp_i: np.ndarray,
-    exp_j: np.ndarray,
-    offsets: np.ndarray,
-    out_p: np.ndarray,
-    out_m: np.ndarray,
-) -> None:
     nbins = offsets.shape[0] - 1
+    zero = wa[0] * 0.0
     for b in prange(nbins):
-        p_acc = np.complex64(0.0 + 0.0j)
-        m_acc = np.complex64(0.0 + 0.0j)
+        ab_p_re = zero
+        ab_p_im = zero
+        ab_m_re = zero
+        ab_m_im = zero
+        ba_p_re = zero
+        ba_p_im = zero
+        ba_m_re = zero
+        ba_m_im = zero
         start = offsets[b]
         stop = offsets[b + 1]
 
@@ -733,53 +559,46 @@ def _cpu_xipm_auto_corr_kernel_c64(
             i = ind_i[idx]
             j = ind_j[idx]
 
-            g2 = w1[i] * np.complex64(g11[i] + 1j * g21[i]) * exp_i[idx]
-            g1 = w2[j] * np.complex64(g12[j] + 1j * g22[j]) * exp_j[idx]
+            exp_ir = exp_i[idx].real
+            exp_ii = exp_i[idx].imag
+            exp_jr = exp_j[idx].real
+            exp_ji = exp_j[idx].imag
 
-            p_acc += g1 * np.conjugate(g2)
-            m_acc += g1 * g2
+            ga_i_r = g1a[i]
+            ga_i_i = g2a[i]
+            gb_i_r = g1b[i]
+            gb_i_i = g2b[i]
+            ga_j_r = g1a[j]
+            ga_j_i = g2a[j]
+            gb_j_r = g1b[j]
+            gb_j_i = g2b[j]
 
-        out_p[b] = p_acc
-        out_m[b] = m_acc
+            ga_i_rot_r = wa[i] * (ga_i_r * exp_ir - ga_i_i * exp_ii)
+            ga_i_rot_i = wa[i] * (ga_i_r * exp_ii + ga_i_i * exp_ir)
+            gb_i_rot_r = wb[i] * (gb_i_r * exp_ir - gb_i_i * exp_ii)
+            gb_i_rot_i = wb[i] * (gb_i_r * exp_ii + gb_i_i * exp_ir)
+            ga_j_rot_r = wa[j] * (ga_j_r * exp_jr - ga_j_i * exp_ji)
+            ga_j_rot_i = wa[j] * (ga_j_r * exp_ji + ga_j_i * exp_jr)
+            gb_j_rot_r = wb[j] * (gb_j_r * exp_jr - gb_j_i * exp_ji)
+            gb_j_rot_i = wb[j] * (gb_j_r * exp_ji + gb_j_i * exp_jr)
+
+            ab_p_re += gb_j_rot_r * ga_i_rot_r + gb_j_rot_i * ga_i_rot_i
+            ab_p_im += gb_j_rot_i * ga_i_rot_r - gb_j_rot_r * ga_i_rot_i
+            ab_m_re += gb_j_rot_r * ga_i_rot_r - gb_j_rot_i * ga_i_rot_i
+            ab_m_im += gb_j_rot_r * ga_i_rot_i + gb_j_rot_i * ga_i_rot_r
+
+            ba_p_re += ga_j_rot_r * gb_i_rot_r + ga_j_rot_i * gb_i_rot_i
+            ba_p_im += ga_j_rot_i * gb_i_rot_r - ga_j_rot_r * gb_i_rot_i
+            ba_m_re += ga_j_rot_r * gb_i_rot_r - ga_j_rot_i * gb_i_rot_i
+            ba_m_im += ga_j_rot_r * gb_i_rot_i + ga_j_rot_i * gb_i_rot_r
+
+        out_ab_p[b] = ab_p_re + 1j * ab_p_im
+        out_ab_m[b] = ab_m_re + 1j * ab_m_im
+        out_ba_p[b] = ba_p_re + 1j * ba_p_im
+        out_ba_m[b] = ba_m_re + 1j * ba_m_im
 
 
 @njit(fastmath=True, parallel=True, cache=True)
-def _cpu_xipm_auto_corr_kernel_c128(
-    g11: np.ndarray,
-    g21: np.ndarray,
-    g12: np.ndarray,
-    g22: np.ndarray,
-    w1: np.ndarray,
-    w2: np.ndarray,
-    ind_i: np.ndarray,
-    ind_j: np.ndarray,
-    exp_i: np.ndarray,
-    exp_j: np.ndarray,
-    offsets: np.ndarray,
-    out_p: np.ndarray,
-    out_m: np.ndarray,
-) -> None:
-    nbins = offsets.shape[0] - 1
-    for b in prange(nbins):
-        p_acc = np.complex128(0.0 + 0.0j)
-        m_acc = np.complex128(0.0 + 0.0j)
-        start = offsets[b]
-        stop = offsets[b + 1]
-
-        for idx in range(start, stop):
-            i = ind_i[idx]
-            j = ind_j[idx]
-
-            g2 = w1[i] * np.complex128(g11[i] + 1j * g21[i]) * exp_i[idx]
-            g1 = w2[j] * np.complex128(g12[j] + 1j * g22[j]) * exp_j[idx]
-
-            p_acc += g1 * np.conjugate(g2)
-            m_acc += g1 * g2
-
-        out_p[b] = p_acc
-        out_m[b] = m_acc
-
-
 def _cpu_xipm_auto_corr_kernel(
     g11: np.ndarray,
     g21: np.ndarray,
@@ -795,38 +614,37 @@ def _cpu_xipm_auto_corr_kernel(
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
-    if exp_i.dtype == np.complex64:
-        _cpu_xipm_auto_corr_kernel_c64(
-            g11,
-            g21,
-            g12,
-            g22,
-            w1,
-            w2,
-            ind_i,
-            ind_j,
-            exp_i,
-            exp_j,
-            offsets,
-            out_p,
-            out_m,
-        )
-    else:
-        _cpu_xipm_auto_corr_kernel_c128(
-            g11,
-            g21,
-            g12,
-            g22,
-            w1,
-            w2,
-            ind_i,
-            ind_j,
-            exp_i,
-            exp_j,
-            offsets,
-            out_p,
-            out_m,
-        )
+    nbins = offsets.shape[0] - 1
+    zero = w1[0] * 0.0
+    for b in prange(nbins):
+        p_acc_re = zero
+        p_acc_im = zero
+        m_acc_re = zero
+        m_acc_im = zero
+        start = offsets[b]
+        stop = offsets[b + 1]
+
+        for idx in range(start, stop):
+            i = ind_i[idx]
+            j = ind_j[idx]
+
+            exp_ir = exp_i[idx].real
+            exp_ii = exp_i[idx].imag
+            exp_jr = exp_j[idx].real
+            exp_ji = exp_j[idx].imag
+
+            g2r = w1[i] * (g11[i] * exp_ir - g21[i] * exp_ii)
+            g2i = w1[i] * (g11[i] * exp_ii + g21[i] * exp_ir)
+            g1r = w2[j] * (g12[j] * exp_jr - g22[j] * exp_ji)
+            g1i = w2[j] * (g12[j] * exp_ji + g22[j] * exp_jr)
+
+            p_acc_re += g1r * g2r + g1i * g2i
+            p_acc_im += g1i * g2r - g1r * g2i
+            m_acc_re += g1r * g2r - g1i * g2i
+            m_acc_im += g1r * g2i + g1i * g2r
+
+        out_p[b] = p_acc_re + 1j * p_acc_im
+        out_m[b] = m_acc_re + 1j * m_acc_im
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -904,9 +722,6 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
-        complex_real_type: str,
-        make_complex: str,
-        cmul_fn: str,
         suffix: str,
         nzbins: int,
     ) -> Optional[Any]:
@@ -915,22 +730,13 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         if cached is not None:
             return cached
 
-        kernel_name = f"gpu_fused_tomo_reduce_xipm_{map_c_type}_{suffix}_{nzbins}"
-        source = _render_cuda_source_template(
-            "tomo_vectorized_xipm.cu",
-            {
-                "__KERNEL_NAME__": kernel_name,
-                "__MAP_C_TYPE__": map_c_type,
-                "__COMPLEX_C_TYPE__": complex_c_type,
-                "__COMPLEX_REAL_TYPE__": complex_real_type,
-                "__MAKE_COMPLEX__": make_complex,
-                "__CMUL_FN__": cmul_fn,
-                "__TOMO_BINS__": nzbins,
-            },
+        name_expression = (
+            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}>"
         )
+        source = _prepare_cuda_source("tomo_vectorized_xipm.cu")
 
         try:
-            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
                 "Vectorized tomography RawKernel compilation failed for %d bins; using legacy path: %s",
@@ -961,24 +767,15 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
 
         if rot_i.dtype == module.complex64:
             complex_c_type = "cuFloatComplex"
-            complex_real_type = "float"
-            make_complex = "make_cuFloatComplex"
-            cmul_fn = "cuCmulf"
             suffix = "c64"
         else:
             complex_c_type = "cuDoubleComplex"
-            complex_real_type = "double"
-            make_complex = "make_cuDoubleComplex"
-            cmul_fn = "cuCmul"
             suffix = "c128"
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
-            complex_real_type,
-            make_complex,
-            cmul_fn,
             suffix,
             nzbins,
         )
@@ -1213,18 +1010,11 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         if cached is not None:
             return cached
 
-        kernel_name = f"gpu_3x2pt_tomo_fused_{map_c_type}_{suffix}"
-        source = _render_cuda_source_template(
-            "tomo_fused_3x2pt.cu",
-            {
-                "__KERNEL_NAME__": kernel_name,
-                "__MAP_C_TYPE__": map_c_type,
-                "__COMPLEX_C_TYPE__": complex_c_type,
-            },
-        )
+        name_expression = f"gpu_3x2pt_tomo_fused<{map_c_type}, {complex_c_type}>"
+        source = _prepare_cuda_source("tomo_fused_3x2pt.cu")
 
         try:
-            kernel = _compile_raw_cuda_kernel(module, source, kernel_name)
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
                 "Fused 3x2pt RawKernel compilation failed; using unfused path: %s",

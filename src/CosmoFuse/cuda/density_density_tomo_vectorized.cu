@@ -1,17 +1,15 @@
 __COMMON_CUDA_SOURCE__
 
-#define TOMO_BINS __TOMO_BINS__
-
-extern "C" __global__
-void __KERNEL_NAME__(
-    const __MAP_C_TYPE__* density,
-    const __MAP_C_TYPE__* weights,
+template<typename T, int TOMO_BINS>
+__global__ void gpu_fused_tomo_reduce_dd(
+    const T* density,
+    const T* weights,
     const long long* ind_i,
     const long long* ind_j,
     const long long* bin_offsets,
     const int* comb_i,
     const int* comb_j,
-    __MAP_C_TYPE__* out_num,
+    T* out_num,
     const int ncomb,
     const long long nbins_total,
     const long long npairs)
@@ -34,7 +32,7 @@ void __KERNEL_NAME__(
     const long long start = bin_offsets[bin_flat];
     const long long stop = bin_offsets[bin_flat + 1];
 
-    __MAP_C_TYPE__ sum_val = (__MAP_C_TYPE__)0.0;
+    T sum_val = (T)0.0;
 
     for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
         const long long idx_a = ind_i[tid];
@@ -58,7 +56,7 @@ void __KERNEL_NAME__(
         );
     }
 
-    sum_val = block_reduce_sum(sum_val);
+    sum_val = block_reduce_sum<T>(sum_val);
 
     if (lane == 0) {
         const long long out_idx =

@@ -990,61 +990,55 @@ class TestBackend(unittest.TestCase):
         )
         self.assertTrue(ok)
 
-    def test_cupy_density_density_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
+    def test_cupy_density_density_tomo_vectorized_kernel_failure_modes_return_false(self):
+        cases = [
+            {
+                "name": "missing-rawkernel",
+                "module": type("FakeModule", (), {"float32": np.float32}),
+                "density_bins": 1,
+            },
+            {
+                "name": "compile-failure",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                        ),
+                    },
+                ),
+                "density_bins": 1,
+            },
+            {
+                "name": "too-many-bins",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                    },
+                ),
+                "density_bins": _MAX_VECTOR_TOMO_BINS + 1,
+            },
+        ]
 
-        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_density_density_tomo_vectorized_kernel_compile_failure_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-
-            @staticmethod
-            def RawKernel(*_args, **_kwargs):
-                raise RuntimeError("compile failed")
-
-        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_density_density_tomo_vectorized_kernel_too_many_bins_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
-
-        kernel = _build_cupy_density_density_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                kernel = _build_cupy_density_density_tomo_vectorized_kernel(case["module"])
+                ok = kernel(
+                    np.zeros((1, case["density_bins"]), dtype=np.float32),
+                    np.zeros((1, case["density_bins"]), dtype=np.float32),
+                    np.zeros(1, dtype=np.int64),
+                    np.zeros(1, dtype=np.int64),
+                    np.array([0, 1], dtype=np.int64),
+                    np.array([0], dtype=np.int32),
+                    np.array([0], dtype=np.int32),
+                    np.zeros((2, 1), dtype=np.float32),
+                )
+                self.assertFalse(ok)
 
     def test_cupy_density_density_tomo_vectorized_kernel_success_and_source(self):
         compiled_sources = []
@@ -1088,79 +1082,69 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(ok_cached)
         self.assertEqual(len(compiled_sources), 1)
         self.assertEqual(compile_calls["count"], 1)
-        self.assertNotIn("cuComplex", compiled_sources[0][0])
+        self.assertEqual(
+            compiled_sources[0][1],
+            "gpu_fused_tomo_reduce_dd<float, 2>",
+        )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
 
-    def test_cupy_density_shear_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
+    def test_cupy_density_shear_tomo_vectorized_kernel_failure_modes_return_false(self):
+        cases = [
+            {
+                "name": "missing-rawkernel",
+                "module": type(
+                    "FakeModule", (), {"float32": np.float32, "complex64": np.complex64}
+                ),
+                "density_bins": 1,
+            },
+            {
+                "name": "too-many-bins",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "complex64": np.complex64,
+                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                    },
+                ),
+                "density_bins": _MAX_VECTOR_TOMO_BINS + 1,
+            },
+            {
+                "name": "compile-failure",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "complex64": np.complex64,
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                        ),
+                    },
+                ),
+                "density_bins": 1,
+            },
+        ]
 
-        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_density_shear_tomo_vectorized_kernel_too_many_bins_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
-            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
-
-        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1, 2), dtype=np.float32),
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_density_shear_tomo_vectorized_kernel_compile_failure_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
-
-            @staticmethod
-            def RawKernel(*_args, **_kwargs):
-                raise RuntimeError("compile failed")
-
-        kernel = _build_cupy_density_shear_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                kernel = _build_cupy_density_shear_tomo_vectorized_kernel(case["module"])
+                ok = kernel(
+                    np.zeros((1, case["density_bins"]), dtype=np.float32),
+                    np.zeros((1, case["density_bins"], 2), dtype=np.float32),
+                    np.zeros((1, case["density_bins"]), dtype=np.float32),
+                    np.zeros((1, case["density_bins"]), dtype=np.float32),
+                    np.zeros(1, dtype=np.int64),
+                    np.zeros(1, dtype=np.int64),
+                    np.zeros(1, dtype=np.complex64),
+                    np.zeros(1, dtype=np.complex64),
+                    np.array([0, 1], dtype=np.int64),
+                    np.array([0], dtype=np.int32),
+                    np.array([0], dtype=np.int32),
+                    np.zeros((1, 1), dtype=np.float32),
+                )
+                self.assertFalse(ok)
 
     def test_cupy_density_shear_tomo_vectorized_kernel_success_and_source(self):
         compiled_sources = []
@@ -1195,8 +1179,10 @@ class TestBackend(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(len(compiled_sources), 1)
-        self.assertIn("rot_i", compiled_sources[0][0])
-        self.assertIn("rot_j", compiled_sources[0][0])
+        self.assertEqual(
+            compiled_sources[0][1],
+            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2>",
+        )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
 
     def test_cupy_density_shear_tomo_vectorized_kernel_cache_reuse(self):
@@ -1264,70 +1250,61 @@ class TestBackend(unittest.TestCase):
         )
         self.assertTrue(ok)
 
-    def test_cupy_tomo_vectorized_kernel_missing_rawkernel_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
+    def test_cupy_tomo_vectorized_kernel_failure_modes_return_false(self):
+        cases = [
+            {
+                "name": "missing-rawkernel",
+                "module": type(
+                    "FakeModule", (), {"float32": np.float32, "complex64": np.complex64}
+                ),
+                "shear_bins": 1,
+            },
+            {
+                "name": "too-many-bins",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "complex64": np.complex64,
+                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                    },
+                ),
+                "shear_bins": _MAX_VECTOR_TOMO_BINS + 1,
+            },
+            {
+                "name": "compile-failure",
+                "module": type(
+                    "FakeModule",
+                    (),
+                    {
+                        "float32": np.float32,
+                        "complex64": np.complex64,
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                        ),
+                    },
+                ),
+                "shear_bins": 1,
+            },
+        ]
 
-        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 2, 1), dtype=np.complex64),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_tomo_vectorized_kernel_too_many_bins_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
-            RawKernel = staticmethod(lambda *_args, **_kwargs: MagicMock())
-
-        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1, 2), dtype=np.float32),
-            np.zeros((1, _MAX_VECTOR_TOMO_BINS + 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 2, 1), dtype=np.complex64),
-        )
-        self.assertFalse(ok)
-
-    def test_cupy_tomo_vectorized_kernel_compile_failure_returns_false(self):
-        class FakeModule:
-            float32 = np.float32
-            complex64 = np.complex64
-
-            @staticmethod
-            def RawKernel(*_args, **_kwargs):
-                raise RuntimeError("compile failed")
-
-        kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((2, 2, 1), dtype=np.complex64),
-        )
-        self.assertFalse(ok)
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                kernel = _build_cupy_tomo_vectorized_kernel(case["module"])
+                ok = kernel(
+                    np.zeros((1, case["shear_bins"], 2), dtype=np.float32),
+                    np.zeros((1, case["shear_bins"]), dtype=np.float32),
+                    np.zeros(1, dtype=np.int64),
+                    np.zeros(1, dtype=np.int64),
+                    np.zeros(1, dtype=np.complex64),
+                    np.zeros(1, dtype=np.complex64),
+                    np.array([0, 1], dtype=np.int64),
+                    np.array([0], dtype=np.int32),
+                    np.array([0], dtype=np.int32),
+                    np.zeros((2, 2, 1), dtype=np.complex64),
+                )
+                self.assertFalse(ok)
 
     def test_cupy_tomo_vectorized_kernel_success_and_cache(self):
         rawkernel_calls = {"count": 0}
@@ -1509,10 +1486,15 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(ok_3)
         self.assertTrue(ok_2_cached)
         self.assertEqual(len(compiled_sources), 2)
-        self.assertIn("#define TOMO_BINS 2", compiled_sources[0][0])
-        self.assertIn("#define TOMO_BINS 3", compiled_sources[1][0])
-        for source, _kernel_name, options in compiled_sources:
-            self.assertNotIn("MAX_TOMO_BINS", source)
+        self.assertEqual(
+            compiled_sources[0][1],
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2>",
+        )
+        self.assertEqual(
+            compiled_sources[1][1],
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3>",
+        )
+        for _source, _kernel_name, options in compiled_sources:
             self.assertEqual(options, ("--use_fast_math",))
 
 if __name__ == "__main__":

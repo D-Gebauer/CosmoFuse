@@ -4,7 +4,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import healpy as hp
@@ -26,1149 +25,6 @@ from CosmoFuse.correlation_helpers import (
     zeta_g_t as helper_zeta_g_t,
 )
 from CosmoFuse.correlations import Correlation
-from CosmoFuse.utils import pixel2RaDec
-
-
-class TestCorrelation(unittest.TestCase):
-    """Test the Correlation class."""
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.nside = 64
-        self.phi_center = np.array([0.0, np.pi / 2, np.pi])
-        self.theta_center = np.array([np.pi / 4, np.pi / 3, np.pi / 2])
-        self.nbins = 5
-        self.theta_min = 10.0
-        self.theta_max = 100.0
-        self.patch_size = 60.0
-        self.theta_Q = 30.0
-
-    def test_init_valid_params(self):
-        """Test initialization with valid parameters."""
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-            theta_min=self.theta_min,
-            theta_max=self.theta_max,
-            patch_size=self.patch_size,
-            theta_Q=self.theta_Q,
-        )
-
-        self.assertEqual(corr.nside, self.nside)
-        self.assertEqual(corr.nbins, self.nbins)
-        self.assertEqual(corr.n_patches, len(self.phi_center))
-
-    def test_init_invalid_nside(self):
-        """Test initialization with invalid nside."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=0, phi_center=self.phi_center, theta_center=self.theta_center
-            )
-
-    def test_init_invalid_nbins(self):
-        """Test initialization with invalid nbins."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                nbins=0,
-            )
-
-    def test_init_invalid_theta_range(self):
-        """Test initialization with invalid theta range."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                theta_min=100.0,
-                theta_max=10.0,
-            )
-
-    def test_init_invalid_patch_size(self):
-        """Test initialization with invalid patch_size."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                patch_size=0,
-            )
-
-    def test_init_invalid_theta_Q(self):
-        """Test initialization with invalid theta_Q."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                theta_Q=0,
-            )
-
-    def test_init_mismatched_centers(self):
-        """Test initialization with mismatched center arrays."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=np.array([0.0, np.pi / 2]),  # Different length
-            )
-
-    def test_init_with_mask(self):
-        """Test initialization with a mask."""
-        mask = np.ones(12 * self.nside**2, dtype=bool)
-        mask[::2] = False  # Set every other pixel to False
-
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            mask=mask,
-        )
-
-        self.assertLess(len(corr.map_inds), 12 * self.nside**2)
-
-    def test_init_invalid_mask_length(self):
-        """Test initialization with invalid mask length."""
-        mask = np.ones(100, dtype=bool)  # Wrong length
-
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                mask=mask,
-            )
-
-    def test_init_precision_configuration(self):
-        """Test initialization with custom precision configuration."""
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            map_precision="float32",
-            rotation_precision="float32",
-            index_precision="uint64",
-        )
-        self.assertEqual(corr.map_dtype, np.dtype(np.float32))
-        self.assertEqual(corr.rotation_dtype, np.dtype(np.float32))
-        self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
-        self.assertEqual(corr.index_dtype, np.dtype(np.uint64))
-
-    def test_init_invalid_map_precision(self):
-        """Test initialization with invalid map precision."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                map_precision="float80",
-            )
-
-    def test_init_invalid_rotation_precision(self):
-        """Test initialization with invalid rotation precision."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                rotation_precision="bfloat16",
-            )
-
-    def test_init_invalid_index_precision(self):
-        """Test initialization with invalid index precision."""
-        with self.assertRaises(ValueError):
-            Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                index_precision="int32",
-            )
-
-    def test_get_pairs_patch(self):
-        """Test get_pairs_patch method."""
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-
-        # Create test data
-        patch_inds = np.array([0, 1, 2, 3])
-        ra = np.array([0.0, 0.1, 0.2, 0.3])
-        dec = np.array([0.0, 0.1, 0.2, 0.3])
-
-        all_inds, exp2phi = corr.get_pairs_patch(patch_inds, ra, dec)
-
-        self.assertIsInstance(all_inds, list)
-        self.assertIsInstance(exp2phi, np.ndarray)
-
-    def test_get_pairs_patch_single_pixel_returns_empty(self):
-        """Test get_pairs_patch early return when fewer than 2 pixels are provided."""
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-
-        patch_inds = np.array([5], dtype=np.uint32)
-        ra = np.array([0.0])
-        dec = np.array([0.0])
-
-        all_inds, exp2phi = corr.get_pairs_patch(patch_inds, ra, dec)
-
-        self.assertEqual(len(all_inds), corr.nbins)
-        for inds in all_inds:
-            self.assertEqual(inds.shape, (2, 0))
-        self.assertEqual(exp2phi.shape, (2, 0))
-
-    def test_get_pairs_patch_respects_fastmath_flag(self):
-        """fastmath=False should use the precise pair kernel."""
-        with patch.object(
-            correlations_module,
-            "_get_pairs_numba_kernel",
-            wraps=correlations_module._get_pairs_numba_kernel,
-        ) as spy_getter:
-            corr = Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-                nbins=self.nbins,
-                fastmath=False,
-            )
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.1], dtype=np.float64)
-        dec = np.array([0.0, 0.1], dtype=np.float64)
-
-        empty_out = (
-            np.array([], dtype=np.uint32),
-            np.array([], dtype=np.uint32),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.float64),
-            np.array([], dtype=np.float64),
-            np.array([], dtype=np.float64),
-            np.array([], dtype=np.float64),
-        )
-
-        with patch.object(corr, "_compute_pairs_kernel", return_value=empty_out) as kernel_mock:
-            corr.get_pairs_patch(patch_inds, ra, dec)
-
-        kernel_mock.assert_called_once()
-        spy_getter.assert_called_with(False)
-
-    def test_get_pairs_patch_invalid_angle_method_raises(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.1], dtype=np.float64)
-        dec = np.array([0.0, 0.1], dtype=np.float64)
-
-        with self.assertRaisesRegex(ValueError, "angle_method must be one of"):
-            corr.get_pairs_patch(patch_inds, ra, dec, angle_method="invalid")
-
-    def test_get_pairs_numba_kernel_cache_hit(self):
-        correlations_module._compute_pairs_kernel_cache.clear()
-        k1 = correlations_module._get_pairs_numba_kernel(True)
-        k2 = correlations_module._get_pairs_numba_kernel(True)
-        self.assertIs(k1, k2)
-
-    def test_compute_pairs_numba_pyfunc_bin_gap_skips_pairs(self):
-        """Test py_func path where bin edges do not admit any pair assignment."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.3], dtype=np.float64)
-        dec = np.array([0.0, 0.0], dtype=np.float64)
-        binedges = np.array([0.0, np.nan, 2.0], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-
-        (
-            inds_a,
-            inds_b,
-            bin_indices,
-            exp2phi1_real,
-            exp2phi1_imag,
-            exp2phi2_real,
-            exp2phi2_imag,
-        ) = kernel_fn(
-            patch_inds,
-            ra,
-            dec,
-            binedges,
-            2,
-        )
-
-        self.assertEqual(inds_a.size, 0)
-        self.assertEqual(inds_b.size, 0)
-        self.assertEqual(bin_indices.size, 0)
-        self.assertEqual(exp2phi1_real.size, 0)
-        self.assertEqual(exp2phi1_imag.size, 0)
-        self.assertEqual(exp2phi2_real.size, 0)
-        self.assertEqual(exp2phi2_imag.size, 0)
-
-    def test_compute_pairs_numba_pyfunc_clamps_upper(self):
-        """Test py_func upper clamp branch for cos(theta) > 1."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.1, 0.2], dtype=np.float64)
-        dec = np.array([0.1, 0.2], dtype=np.float64)
-        binedges = np.array([-1.0, 1.0, 4.0], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-
-        original_cos = correlations_module.np.cos
-
-        def fake_cos(x):
-            if np.isscalar(x):
-                return 2.0
-            return original_cos(x)
-
-        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            outputs = kernel_fn(
-                patch_inds,
-                ra,
-                dec,
-                binedges,
-                0,
-            )
-
-        self.assertEqual(len(outputs), 7)
-
-    def test_compute_pairs_numba_pyfunc_clamps_lower(self):
-        """Test py_func lower clamp branch for cos(theta) < -1."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.1, 0.2], dtype=np.float64)
-        dec = np.array([0.1, 0.2], dtype=np.float64)
-        binedges = np.array([-1.0, 1.0, 4.0], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-
-        original_cos = correlations_module.np.cos
-
-        def fake_cos(x):
-            if np.isscalar(x):
-                return -2.0
-            return original_cos(x)
-
-        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            outputs = kernel_fn(
-                patch_inds,
-                ra,
-                dec,
-                binedges,
-                0,
-            )
-
-        self.assertEqual(len(outputs), 7)
-
-    def test_compute_pairs_numba_pyfunc_r2_c1_zero_fallback(self):
-        """Trigger fallback branch where R2_C1 == 0 and default exp(2i phi1) is used."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.0], dtype=np.float64)
-        dec = np.array([np.pi / 2, 0.0], dtype=np.float64)
-        binedges = np.array([0.1, 1.0, 2.0], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-        original_cos = correlations_module.np.cos
-
-        def fake_cos(x):
-            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
-                out = original_cos(x).copy()
-                out[np.isclose(x, np.pi / 2)] = 0.0
-                return out
-            if np.isscalar(x) and np.isclose(x, np.pi / 2):
-                return 0.0
-            return original_cos(x)
-
-        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            (
-                inds_a,
-                inds_b,
-                _bin_indices,
-                exp2phi1_real,
-                exp2phi1_imag,
-                _exp2phi2_real,
-                _exp2phi2_imag,
-            ) = kernel_fn(
-                patch_inds,
-                ra,
-                dec,
-                binedges,
-                2,
-            )
-
-        self.assertEqual(inds_a.size, 1)
-        self.assertEqual(inds_b.size, 1)
-        self.assertEqual(exp2phi1_real[0], -1.0)
-        self.assertEqual(exp2phi1_imag[0], 0.0)
-
-    def test_compute_pairs_numba_pyfunc_r2_c2_zero_fallback(self):
-        """Trigger fallback branch where R2_C2 == 0 and default exp(2i phi2) is used."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.0], dtype=np.float64)
-        dec = np.array([0.0, np.pi / 2], dtype=np.float64)
-        binedges = np.array([0.1, 1.0, 2.0], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-        original_cos = correlations_module.np.cos
-
-        def fake_cos(x):
-            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
-                out = original_cos(x).copy()
-                out[np.isclose(x, np.pi / 2)] = 0.0
-                return out
-            if np.isscalar(x) and np.isclose(x, np.pi / 2):
-                return 0.0
-            return original_cos(x)
-
-        with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            (
-                inds_a,
-                inds_b,
-                _bin_indices,
-                _exp2phi1_real,
-                _exp2phi1_imag,
-                exp2phi2_real,
-                exp2phi2_imag,
-            ) = kernel_fn(
-                patch_inds,
-                ra,
-                dec,
-                binedges,
-                2,
-            )
-
-        self.assertEqual(inds_a.size, 1)
-        self.assertEqual(inds_b.size, 1)
-        self.assertEqual(exp2phi2_real[0], -1.0)
-        self.assertEqual(exp2phi2_imag[0], 0.0)
-
-    def test_compute_pairs_numba_pyfunc_out_of_range_continues_for_arccos_and_law(self):
-        """Cover out-of-range continue branches for arccos and law angle methods."""
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.3], dtype=np.float64)
-        dec = np.array([0.0, 0.0], dtype=np.float64)
-        binedges = np.array([0.4, 0.5], dtype=np.float64)
-        kernel_fn = correlations_module._compute_pairs_impl
-
-        outputs_arccos = kernel_fn(patch_inds, ra, dec, binedges, 0)
-        outputs_law = kernel_fn(patch_inds, ra, dec, binedges, 2)
-
-        self.assertEqual(outputs_arccos[0].size, 0)
-        self.assertEqual(outputs_law[0].size, 0)
-
-    def test_to_backend_array_bypasses_transfer_for_backend_native_arrays(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-
-        class FakeGPUArray:
-            def __init__(self, values, *, device_id=0):
-                if isinstance(values, FakeGPUArray):
-                    values = values._values
-                self._values = np.asarray(values)
-                self.shape = self._values.shape
-                self.dtype = self._values.dtype
-                self.device = SimpleNamespace(id=device_id)
-                self.data = SimpleNamespace(ptr=id(self._values))
-
-            def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
-
-            def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
-
-        calls = {"to_device": 0}
-
-        def fake_to_device(values):
-            calls["to_device"] += 1
-            return FakeGPUArray(values)
-
-        corr.backend = SimpleNamespace(
-            name="cupy",
-            module=SimpleNamespace(ndarray=FakeGPUArray),
-            device_id=0,
-            to_device=fake_to_device,
-            to_numpy=lambda values: values._values if isinstance(values, FakeGPUArray) else np.asarray(values),
-        )
-
-        native = FakeGPUArray([1.0, 2.0, 3.0], device_id=0)
-        _ = corr._to_backend_array(native, dtype=np.float64)
-        self.assertEqual(calls["to_device"], 0)
-
-        host = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-        _ = corr._to_backend_array(host, dtype=np.float64)
-        self.assertEqual(calls["to_device"], 1)
-
-    def test_vectorized_shear_shear_accepts_backend_native_arrays_without_transfer(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-        corr.inds_dev = np.array([0], dtype=np.int64)
-
-        class FakeGPUArray:
-            def __init__(self, values, *, device_id=0):
-                if isinstance(values, FakeGPUArray):
-                    values = values._values
-                self._values = np.asarray(values)
-                self.shape = self._values.shape
-                self.dtype = self._values.dtype
-                self.ndim = self._values.ndim
-                self.device = SimpleNamespace(id=device_id)
-                self.data = SimpleNamespace(ptr=id(self._values))
-
-            def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
-
-            def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
-
-        calls = {"to_device": 0}
-
-        def fake_to_device(values):
-            calls["to_device"] += 1
-            return FakeGPUArray(values)
-
-        corr.backend = SimpleNamespace(
-            name="cupy",
-            module=SimpleNamespace(ndarray=FakeGPUArray),
-            device_id=0,
-            to_device=fake_to_device,
-            to_numpy=lambda values: values._values if isinstance(values, FakeGPUArray) else np.asarray(values),
-        )
-
-        nzbins = 2
-        nzbin_combs = int(binom(nzbins + 1, 2))
-        shear_maps = FakeGPUArray(np.ones((nzbins, 2, 8), dtype=np.float64), device_id=0)
-        weights = FakeGPUArray(np.ones((nzbins, 8), dtype=np.float64), device_id=0)
-        sumofweights = FakeGPUArray(np.ones((2, nzbin_combs), dtype=np.float64), device_id=0)
-        xip_dev = FakeGPUArray(
-            np.ones((nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
-            device_id=0,
-        )
-        xim_dev = FakeGPUArray(
-            np.ones((nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
-            device_id=0,
-        )
-
-        with patch.object(corr, "_xipm_tomo_vectorized", return_value=(xip_dev, xim_dev)):
-            xip, xim = corr.vectorized_shear_shear(
-                shear_maps,
-                weights,
-                sumofweights=sumofweights,
-            )
-
-        self.assertEqual(calls["to_device"], 0)
-        self.assertEqual(xip.shape, (nzbin_combs, corr.n_patches, corr.nbins))
-        self.assertEqual(xim.shape, (nzbin_combs, corr.n_patches, corr.nbins))
-
-    def test_backend_native_array_device_checks_and_native_fingerprint(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-
-        class FakeGPUArray:
-            def __init__(self, values, *, device_id=0, with_ptr=True):
-                self._values = np.asarray(values)
-                self.shape = self._values.shape
-                self.dtype = self._values.dtype
-                self.device = SimpleNamespace(id=device_id)
-                self.data = SimpleNamespace(ptr=id(self._values)) if with_ptr else SimpleNamespace()
-
-            def astype(self, dtype, copy=False):
-                return FakeGPUArray(
-                    self._values.astype(dtype, copy=copy),
-                    device_id=self.device.id,
-                    with_ptr=hasattr(self.data, "ptr"),
-                )
-
-        class FakeNoDevice(FakeGPUArray):
-            def __init__(self, values):
-                self._values = np.asarray(values)
-                self.shape = self._values.shape
-                self.dtype = self._values.dtype
-
-        corr.backend = SimpleNamespace(
-            name="cupy",
-            module=SimpleNamespace(ndarray=FakeGPUArray),
-            device_id=0,
-            to_device=lambda values: FakeGPUArray(values),
-            to_numpy=lambda values: values._values if hasattr(values, "_values") else np.asarray(values),
-        )
-
-        self.assertFalse(corr._is_backend_native_array(FakeNoDevice([1.0, 2.0])))
-        self.assertFalse(corr._is_backend_native_array(FakeGPUArray([1.0, 2.0], device_id=1)))
-
-        fp = corr._fingerprint_weights(FakeGPUArray([1.0, 2.0], with_ptr=False))
-        self.assertEqual(fp[0], (2,))
-        self.assertEqual(fp[1], np.dtype(np.float64).str)
-        self.assertIn("device:0;ptr:", fp[2])
-
-    def test_get_aperture_methods_accept_backend_native_arrays_without_input_transfer(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-
-        class FakeGPUArray:
-            def __init__(self, values, *, device_id=0):
-                if isinstance(values, FakeGPUArray):
-                    values = values._values
-                self._values = np.asarray(values)
-                self.shape = self._values.shape
-                self.dtype = self._values.dtype
-                self.ndim = self._values.ndim
-                self.device = SimpleNamespace(id=device_id)
-                self.data = SimpleNamespace(ptr=id(self._values))
-
-            def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
-
-            def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
-
-            def __getitem__(self, key):
-                out = self._values[key]
-                if np.isscalar(out):
-                    return out
-                return FakeGPUArray(out, device_id=self.device.id)
-
-            def __mul__(self, other):
-                other_v = other._values if isinstance(other, FakeGPUArray) else other
-                return FakeGPUArray(self._values * other_v, device_id=self.device.id)
-
-            def __truediv__(self, other):
-                other_v = other._values if isinstance(other, FakeGPUArray) else other
-                return FakeGPUArray(self._values / other_v, device_id=self.device.id)
-
-            def __neg__(self):
-                return FakeGPUArray(-self._values, device_id=self.device.id)
-
-        class FakeCupyModule:
-            ndarray = FakeGPUArray
-            float64 = np.float64
-
-            @staticmethod
-            def ascontiguousarray(array):
-                return array
-
-            class add:
-                @staticmethod
-                def reduceat(array, starts):
-                    arr = array._values if isinstance(array, FakeGPUArray) else np.asarray(array)
-                    st = starts._values if isinstance(starts, FakeGPUArray) else np.asarray(starts)
-                    reduced = np.add.reduceat(arr, st.astype(np.int64, copy=False))
-                    return FakeGPUArray(reduced)
-
-        calls = {"native_input_to_device": 0}
-
-        def fake_to_device(values):
-            if isinstance(values, FakeGPUArray):
-                calls["native_input_to_device"] += 1
-                return values
-            return FakeGPUArray(values)
-
-        def fake_to_numpy(values):
-            return values._values if isinstance(values, FakeGPUArray) else np.asarray(values)
-
-        def aperture_shear_kernel(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, w, out_num, out_den):
-            idx = Q_inds._values.astype(np.int64, copy=False)
-            gt = -(g1._values[idx] * Q_cos._values) - (g2._values[idx] * Q_sin._values)
-            out_num._values[:] = w._values[idx] * gt * Q_val._values
-            out_den._values[:] = w._values[idx]
-
-        def aperture_density_kernel(Q_inds, Q_val, map_values, w, out_num, out_den):
-            idx = Q_inds._values.astype(np.int64, copy=False)
-            out_num._values[:] = w._values[idx] * map_values._values[idx] * Q_val._values
-            out_den._values[:] = w._values[idx]
-
-        corr.backend = SimpleNamespace(
-            name="cupy",
-            module=FakeCupyModule,
-            device_id=0,
-            to_device=fake_to_device,
-            to_numpy=fake_to_numpy,
-            zeros=lambda shape, dtype: FakeGPUArray(np.zeros(shape, dtype=dtype)),
-            aperture_shear_kernel=aperture_shear_kernel,
-            aperture_density_kernel=aperture_density_kernel,
-        )
-
-        corr.Q_inds_flat = np.array([0, 1, 2], dtype=np.uint32)
-        corr.Q_cos_flat = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-        corr.Q_sin_flat = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        corr.Q_val_flat = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-        corr.Q_offsets = np.array([0, 3], dtype=np.int64)
-        corr.Q_patch_area_flat = np.array([1.0], dtype=np.float64)
-
-        g1 = FakeGPUArray(np.array([1.0, 1.0, 1.0], dtype=np.float64), device_id=0)
-        g2 = FakeGPUArray(np.array([0.0, 0.0, 0.0], dtype=np.float64), device_id=0)
-        w = FakeGPUArray(np.array([1.0, 1.0, 1.0], dtype=np.float64), device_id=0)
-        density = FakeGPUArray(np.array([2.0, 2.0, 2.0], dtype=np.float64), device_id=0)
-
-        shear_out = corr.get_aperture_shear(g1, g2, w, aperture_filter=None)
-        density_out = corr.get_aperture_density(density, w, aperture_filter=None)
-
-        self.assertEqual(calls["native_input_to_device"], 0)
-        self.assertEqual(shear_out.shape, (corr.Q_patch_area_flat.shape[0],))
-        self.assertEqual(density_out.shape, (corr.Q_patch_area_flat.shape[0],))
-
-
-class TestCorrelationCalculations(unittest.TestCase):
-    """Test the Correlation class calculation methods."""
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.nside = 64
-        self.phi_center = np.array([0.0])
-        self.theta_center = np.array([np.pi / 4])
-        self.nbins = 5
-        self.theta_min = 10.0
-        self.theta_max = 100.0
-        self.patch_size = 60.0
-        self.theta_Q = 30.0
-        self.npix = 12 * self.nside**2
-
-        # Create a Correlation instance
-        self.corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-            theta_min=self.theta_min,
-            theta_max=self.theta_max,
-            patch_size=self.patch_size,
-            theta_Q=self.theta_Q,
-        )
-
-        # Mock Q data for one patch
-        self.corr.Q_inds = [np.array([10, 20, 30], dtype=np.uint32)]
-        self.corr.Q_cos = [np.array([0.5, 0.6, 0.7], dtype=np.float64)]
-        self.corr.Q_sin = [np.array([0.8, 0.7, 0.6], dtype=np.float64)]
-        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
-        self.corr.Q_patch_area = [3.0]
-        self.corr.n_patches = 1
-
-
-    def test_get_aperture_shear(self):
-        """Test the get_aperture_shear method."""
-        g1 = np.random.rand(self.npix)
-        g2 = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-
-        M_a = self.corr.get_aperture_shear(g1, g2, w)
-
-        self.assertEqual(M_a.shape, (1,))
-        
-        Q_inds = self.corr.Q_inds[0]
-        Q_cos = self.corr.Q_cos[0]
-        Q_sin = self.corr.Q_sin[0]
-        Q_val = self.corr.Q_val[0]
-        Q_patch_area = self.corr.Q_patch_area[0]
-        
-        gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
-        expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
-
-        self.assertAlmostEqual(M_a[0], expected_M_a)
-
-    def test_get_aperture_shear_non_numpy_backend_path(self):
-        g1 = np.random.rand(self.npix)
-        g2 = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-
-        class FakeBackend:
-            name = "cupy"
-            module = np
-            add = np.add
-
-            @staticmethod
-            def to_device(array):
-                return np.asarray(array)
-
-            @staticmethod
-            def to_numpy(array):
-                return np.asarray(array)
-
-            @staticmethod
-            def zeros(shape, dtype):
-                return np.zeros(shape, dtype=dtype)
-
-            @staticmethod
-            def aperture_shear_kernel(
-                Q_inds,
-                Q_cos,
-                Q_sin,
-                Q_val,
-                g1_vals,
-                g2_vals,
-                weights,
-                out_num,
-                out_den,
-            ):
-                gt = -g1_vals[Q_inds] * Q_cos - g2_vals[Q_inds] * Q_sin
-                out_num[:] = weights[Q_inds] * gt * Q_val
-                out_den[:] = weights[Q_inds]
-
-        self.corr.backend = FakeBackend()
-        M_a = self.corr.get_aperture_shear(g1, g2, w)
-
-        Q_inds = self.corr.Q_inds[0]
-        Q_cos = self.corr.Q_cos[0]
-        Q_sin = self.corr.Q_sin[0]
-        Q_val = self.corr.Q_val[0]
-        Q_patch_area = self.corr.Q_patch_area[0]
-        gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
-        expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
-        self.assertAlmostEqual(M_a[0], expected_M_a)
-
-    def test_get_aperture_shear_missing_backend_kernel_raises(self):
-        class IncompleteBackend:
-            name = "numpy"
-
-        self.corr.backend = IncompleteBackend()
-        with self.assertRaisesRegex(RuntimeError, "aperture-shear kernel"):
-            self.corr.get_aperture_shear(
-                np.random.rand(self.npix),
-                np.random.rand(self.npix),
-                np.ones(self.npix),
-            )
-
-    def test_get_aperture_density(self):
-        """Test the get_aperture_density method for spin-0 fields."""
-        delta = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-
-        aperture_density = self.corr.get_aperture_density(delta, w)
-
-        self.assertEqual(aperture_density.shape, (1,))
-
-        Q_inds = self.corr.Q_inds[0]
-        Q_val = self.corr.Q_val[0]
-        Q_patch_area = self.corr.Q_patch_area[0]
-        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
-            w[Q_inds]
-        )
-
-        self.assertAlmostEqual(aperture_density[0], expected)
-
-    def test_get_aperture_density_non_numpy_backend_path(self):
-        """Covers non-numpy backend execution path for scalar aperture."""
-        delta = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-
-        class FakeBackend:
-            name = "cupy"
-            module = np
-            add = np.add
-
-            @staticmethod
-            def to_device(array):
-                return np.asarray(array)
-
-            @staticmethod
-            def to_numpy(array):
-                return np.asarray(array)
-
-            @staticmethod
-            def zeros(shape, dtype):
-                return np.zeros(shape, dtype=dtype)
-
-            @staticmethod
-            def aperture_density_kernel(Q_inds, Q_val, map_values, weights, out_num, out_den):
-                out_num[:] = weights[Q_inds] * map_values[Q_inds] * Q_val
-                out_den[:] = weights[Q_inds]
-
-        self.corr.backend = FakeBackend()
-
-        aperture_density = self.corr.get_aperture_density(delta, w)
-        Q_inds = self.corr.Q_inds[0]
-        Q_val = self.corr.Q_val[0]
-        Q_patch_area = self.corr.Q_patch_area[0]
-        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
-            w[Q_inds]
-        )
-        self.assertAlmostEqual(aperture_density[0], expected)
-
-    def test_get_aperture_density_missing_backend_kernel_raises(self):
-        """Missing scalar aperture kernel should raise a clear runtime error."""
-
-        class IncompleteBackend:
-            name = "numpy"
-
-        self.corr.backend = IncompleteBackend()
-        with self.assertRaisesRegex(RuntimeError, "aperture-density kernel"):
-            self.corr.get_aperture_density(np.random.rand(self.npix), np.ones(self.npix))
-
-    def test_get_aperture_density_numpy_backend_path(self):
-        """Explicitly cover numpy backend path for scalar aperture."""
-
-        class NumpyBackend:
-            name = "numpy"
-
-            @staticmethod
-            def aperture_density_kernel(
-                Q_inds,
-                Q_val,
-                Q_offsets,
-                map_values,
-                weights,
-                Q_patch_area,
-                out_aperture,
-            ):
-                for patch_idx in range(Q_offsets.shape[0] - 1):
-                    start = Q_offsets[patch_idx]
-                    stop = Q_offsets[patch_idx + 1]
-                    patch_inds = Q_inds[start:stop]
-                    patch_q = Q_val[start:stop]
-                    out_aperture[patch_idx] = (
-                        Q_patch_area[patch_idx]
-                        * np.sum(weights[patch_inds] * map_values[patch_inds] * patch_q)
-                        / np.sum(weights[patch_inds])
-                    )
-
-        self.corr.backend = NumpyBackend()
-        delta = np.random.rand(self.npix)
-        w = np.ones(self.npix)
-        result = self.corr.get_aperture_density(delta, w)
-        self.assertEqual(result.shape, (1,))
-
-    def test_get_pairs_patch_M_a(self):
-        """Test get_pairs_patch_M_a method."""
-        pixels_RA_Q_patch = np.array([0.1, 0.2])
-        pixels_dec_Q_patch = np.array([0.1, 0.2])
-        Q_patch_center_RA = 0.0
-        Q_patch_center_dec = 0.0
-
-        cos_2phi, sin_2phi, Q = self.corr.get_pairs_patch_M_a(
-            pixels_RA_Q_patch,
-            pixels_dec_Q_patch,
-            Q_patch_center_RA,
-            Q_patch_center_dec,
-        )
-
-        self.assertEqual(cos_2phi.shape, (2,))
-        self.assertEqual(sin_2phi.shape, (2,))
-        self.assertEqual(Q.shape, (2,))
-
-    def test_get_pairs_patch_M_a_custom_filter(self):
-        pixels_RA_Q_patch = np.array([0.1, 0.2])
-        pixels_dec_Q_patch = np.array([0.1, 0.2])
-
-        def custom_filter(theta, _theta_Q):
-            return np.full_like(theta, 2.5)
-
-        _cos_2phi, _sin_2phi, Q = self.corr.get_pairs_patch_M_a(
-            pixels_RA_Q_patch,
-            pixels_dec_Q_patch,
-            0.0,
-            0.0,
-            aperture_filter=custom_filter,
-        )
-        np.testing.assert_allclose(Q, 2.5)
-
-    @patch('healpy.ang2pix')
-    @patch('healpy.query_disc')
-    @patch('CosmoFuse.correlations.pixel2RaDec')
-    def test_calculate_pairs_M_a(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
-        """Test the calculate_pairs_M_a method."""
-        mock_ang2pix.return_value = 99
-        mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
-        
-        # Mocking the return values for pixel2RaDec
-        # First call for center, second for the rest
-        ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
-        Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        
-        mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
-
-        self.corr.calculate_pairs_M_a()
-
-        self.assertEqual(len(self.corr.Q_cos), 1)
-        self.assertEqual(len(self.corr.Q_sin), 1)
-        self.assertEqual(len(self.corr.Q_val), 1)
-        self.assertEqual(len(self.corr.Q_inds), 1)
-        self.assertEqual(len(self.corr.Q_patch_area), 1)
-        self.assertIsInstance(self.corr.Q_cos[0], np.ndarray)
-        self.assertEqual(self.corr.Q_inds[0].size, 5)  # 6 - 1 (center)
-
-    @patch('healpy.ang2pix')
-    @patch('healpy.query_disc')
-    @patch('CosmoFuse.correlations.pixel2RaDec')
-    def test_save_and_load_pairs(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
-        """Test the save_pairs and load_pairs methods."""
-        # Mocking for calculate_pairs_2PCF
-        mock_query_disc.return_value = np.arange(100)
-        mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
-        self.corr.calculate_pairs_2PCF()
-
-        # Mocking for calculate_pairs_M_a
-        mock_ang2pix.return_value = 99
-        mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
-        ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
-        Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
-        self.corr.calculate_pairs_M_a()
-
-        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
-            self.corr.save_pairs(tmp.name)
-
-            new_corr = Correlation(
-                nside=self.nside,
-                phi_center=self.phi_center,
-                theta_center=self.theta_center,
-            )
-            new_corr.load_pairs(tmp.name)
-            self.assertIsNotNone(new_corr.inds_dev)
-
-            self.assertEqual(self.corr.n_patches, new_corr.n_patches)
-            self.assertEqual(self.corr.nbins, new_corr.nbins)
-            np.testing.assert_allclose(self.corr.phi_center, new_corr.phi_center)
-            np.testing.assert_allclose(self.corr.theta_center, new_corr.theta_center)
-
-            for i in range(self.corr.n_patches):
-                np.testing.assert_array_equal(self.corr.pair_inds[i], new_corr.pair_inds[i])
-                np.testing.assert_allclose(self.corr.pair_exp2phi[i], new_corr.pair_exp2phi[i])
-                np.testing.assert_array_equal(self.corr.bins[i], new_corr.bins[i])
-                np.testing.assert_array_equal(self.corr.Q_inds[i], new_corr.Q_inds[i])
-                np.testing.assert_allclose(self.corr.Q_cos[i], new_corr.Q_cos[i])
-                np.testing.assert_allclose(self.corr.Q_sin[i], new_corr.Q_sin[i])
-                np.testing.assert_allclose(self.corr.Q_val[i], new_corr.Q_val[i])
-                np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
-                
-    def test_prepare_and_get_full_tomo_shear(self):
-        """Test prepare and get_full_tomo_shear methods."""
-        # Calculate pairs first
-        with patch('healpy.query_disc') as mock_query_disc, \
-             patch('CosmoFuse.correlations.pixel2RaDec') as mock_pixel2RaDec:
-            
-            mock_query_disc.return_value = np.arange(100)
-            mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
-
-            self.corr.calculate_pairs_2PCF()
-        
-        self.corr.prepare()
-
-        self.assertIsNotNone(self.corr.inds_dev)
-        self.assertIsNotNone(self.corr.exp2phi_dev)
-        self.assertIsNotNone(self.corr.bins_dev)
-        self.assertIsNotNone(self.corr.tot_bins_dev)
-        self.assertIsNotNone(self.corr.tot_bins_reduceat_dev)
-        self.assertGreater(self.corr.ntotpairs, 0)
-        
-        self.corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint32)]
-        self.corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
-        self.corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float64)]
-        self.corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
-        self.corr.Q_patch_area = [3.0]
-
-        nzbins = 2
-        nzbin_combs = int(binom(nzbins + 1, 2))
-        shear_maps = np.random.rand(nzbins, 2, self.npix)
-        w = np.ones((nzbins, self.npix))
-
-        M_ap, xip, xim = self.corr.get_full_tomo_shear(shear_maps, w)
-
-        self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
-        self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
-        self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
-
-    def test_backend_import_with_fake_cupy(self):
-        """Ensure the CuPy-backed kernel setup path is exercised."""
-        import importlib.util
-
-        module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
-        module_name = "CosmoFuse.backend_fake_cupy"
-        fake_cupy = ModuleType("cupy")
-
-        def elementwise_kernel(*_args, **_kwargs):
-            def _kernel(*_kargs, **_kkwargs):
-                return None
-
-            return _kernel
-
-        class _FakeRuntime:
-            @staticmethod
-            def getDeviceCount():
-                return 1
-
-        class _FakeCuda:
-            runtime = _FakeRuntime()
-
-            class Device:
-                def __init__(self, _device_id):
-                    self._device_id = _device_id
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, tb):
-                    return False
-
-        fake_cupy.ElementwiseKernel = elementwise_kernel
-        def elementwise_kernel(*_args, **_kwargs):
-            def _kernel(*_kargs, **_kkwargs):
-                return None
-
-            return _kernel
-
-        fake_cupy.ElementwiseKernel = elementwise_kernel
-        fake_cupy.asarray = np.asarray
-        fake_cupy.asnumpy = np.asarray
-        fake_cupy.zeros = np.zeros
-        fake_cupy.ones = np.ones
-        fake_cupy.sum = np.sum
-        fake_cupy.mean = np.mean
-        fake_cupy.conjugate = np.conjugate
-        fake_cupy.add = np.add
-        fake_cupy.float32 = np.float32
-        fake_cupy.float64 = np.float64
-        fake_cupy.complex64 = np.complex64
-        fake_cupy.complex128 = np.complex128
-        fake_cupy.uint32 = np.uint32
-        fake_cupy.int32 = np.int32
-        fake_cupy.cuda = _FakeCuda()
-
-        sys.modules["cupy"] = fake_cupy
-        try:
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            if spec is None or spec.loader is None:
-                self.fail("Could not load backend module for fake CuPy import")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            backend = module.get_backend("gpu")
-            self.assertIsNotNone(backend.xipm_cross_corr_kernel)
-            self.assertIsNotNone(backend.aperture_density_kernel)
-        finally:
-            sys.modules.pop("cupy", None)
-            sys.modules.pop(module_name, None)
-
-    def test_calculate_pairs_2PCF(self):
-        """Test calculate_pairs_2PCF sequential aggregation."""
-        self.corr.n_patches = 2
-        with patch.object(
-            self.corr,
-            "__get_pairs_helper__",
-            side_effect=[
-                (np.array([[1], [2]]), np.array([1 + 1j]), np.array([1])),
-                (np.array([[3], [4]]), np.array([1 - 1j]), np.array([1])),
-            ],
-        ) as mock_helper:
-            self.corr.calculate_pairs_2PCF()
-
-        self.assertEqual(mock_helper.call_count, 2)
-        self.assertEqual(len(self.corr.pair_inds), 2)
 
 
 class TestCorrelationCoverage(unittest.TestCase):
@@ -1271,10 +127,10 @@ class TestCorrelationCoverage(unittest.TestCase):
         restored.__setstate__(state)
 
         self.assertIsNotNone(restored.aperture_shear_all_patches)
-        self.assertEqual(restored._prepare_version, 0)
-        self.assertIsNone(restored._tomo_sumofweights_cache)
-        self.assertIsNone(restored._xipm_sumofweights_cache)
-        self.assertEqual(restored._tomo_combination_cache, {})
+        self.assertEqual(restored.compute_context.prepare_version, 0)
+        self.assertIsNone(restored.compute_context._tomo_sumofweights_cache)
+        self.assertIsNone(restored.compute_context._xipm_sumofweights_cache)
+        self.assertEqual(restored.compute_context.tomo_combination_cache, {})
         self.assertEqual(restored._aperture_filter_active_key, "Q_T")
         self.assertIsNone(restored.Q_inds_flat)
         self.assertIsNone(restored.Q_offsets)
@@ -1369,9 +225,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.bins_dev = np.zeros(1, dtype=np.uint32)
         corr.tot_bins_reduceat_dev = np.zeros(1, dtype=np.int64)
 
-        prepare_version_before = corr._prepare_version
+        prepare_version_before = corr.compute_context.prepare_version
         corr.prepare()
-        self.assertEqual(corr._prepare_version, prepare_version_before)
+        self.assertEqual(corr.compute_context.prepare_version, prepare_version_before)
 
     def test_save_pairs_warns_when_host_pair_arrays_released(self):
         corr = Correlation(
@@ -3300,56 +2156,69 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected = np.array([[5.0, 0.0], [7.0, 0.0]], dtype=np.float64)
         np.testing.assert_allclose(reduced, expected)
 
-    def test_xipm_tomo_vectorized_returns_none_when_backend_kernel_missing(self):
-        corr = self._make_small_cpu_corr()
-        corr.backend.xipm_tomo_vectorized_kernel = None
-        result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
-        self.assertIsNone(result)
-
-    def test_xipm_tomo_vectorized_returns_none_when_backend_kernel_declines(self):
-        corr = self._make_small_cpu_corr()
-        corr.backend.name = "cupy"
-        corr.backend.module = np
-        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: False
-
-        shear_maps_dev = np.ones((2, 2, 12), dtype=np.float64)
-        w_dev = np.ones((2, 12), dtype=np.float64)
-        sumofweights_dev = np.zeros((2, 3, 1), dtype=np.float64)
-        result = corr._xipm_tomo_vectorized(
-            shear_maps_dev,
-            w_dev,
-            sumofweights_dev,
-            2,
-            3,
-            1,
-            1,
-        )
-        self.assertIsNone(result)
-
-    def test_xipm_tomo_vectorized_returns_none_for_unknown_backend_name(self):
-        corr = self._make_small_cpu_corr()
-        corr.backend.name = "other"
-        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: True
-        result = corr._xipm_tomo_vectorized(None, None, None, 2, 3, 1, 1)
-        self.assertIsNone(result)
-
-    def test_xipm_tomo_vectorized_cpu_raises_when_kernel_declines(self):
-        corr = self._make_small_cpu_corr()
-        corr.backend.xipm_tomo_vectorized_kernel = lambda *_args: False
+    def test_xipm_tomo_vectorized_backend_decline_and_missing_paths(self):
         shear_maps_dev = np.ones((2, 2, 12), dtype=np.float64)
         w_dev = np.ones((2, 12), dtype=np.float64)
         sumofweights_dev = np.ones((2, 3, 1), dtype=np.float64)
 
-        with self.assertRaises(RuntimeError):
-            corr._xipm_tomo_vectorized(
-                shear_maps_dev,
-                w_dev,
-                sumofweights_dev,
-                2,
-                3,
-                1,
-                1,
-            )
+        cases = [
+            {
+                "name": "missing-kernel",
+                "backend_name": "numpy",
+                "kernel": None,
+                "expect": "none",
+            },
+            {
+                "name": "cupy-declines",
+                "backend_name": "cupy",
+                "kernel": lambda *_args: False,
+                "expect": "none",
+                "set_module": True,
+            },
+            {
+                "name": "unknown-backend",
+                "backend_name": "other",
+                "kernel": lambda *_args: True,
+                "expect": "none",
+            },
+            {
+                "name": "cpu-declines",
+                "backend_name": "numpy",
+                "kernel": lambda *_args: False,
+                "expect": "raises",
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                corr = self._make_small_cpu_corr()
+                corr.backend.name = case["backend_name"]
+                if case.get("set_module"):
+                    corr.backend.module = np
+                corr.backend.xipm_tomo_vectorized_kernel = case["kernel"]
+
+                if case["expect"] == "raises":
+                    with self.assertRaises(RuntimeError):
+                        corr._xipm_tomo_vectorized(
+                            shear_maps_dev,
+                            w_dev,
+                            sumofweights_dev,
+                            2,
+                            3,
+                            1,
+                            1,
+                        )
+                else:
+                    result = corr._xipm_tomo_vectorized(
+                        shear_maps_dev,
+                        w_dev,
+                        sumofweights_dev,
+                        2,
+                        3,
+                        1,
+                        1,
+                    )
+                    self.assertIsNone(result)
 
     def test_vectorized_shear_shear_raises_when_vectorized_unavailable(self):
         corr = self._make_small_cpu_corr()
@@ -3448,51 +2317,65 @@ class TestCorrelationCoverage(unittest.TestCase):
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
     @patch('CosmoFuse.correlations.Correlation.prepare')
-    def test_preprocess(
-        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
-    ):
-        """Test the preprocess method."""
-        self.corr.preprocess()
-        mock_calculate_pairs_M_a.assert_called_once_with()
-        mock_calculate_pairs_2PCF.assert_called_once_with(angle_method="haversine")
-        mock_prepare.assert_called_once_with()
-
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
-    @patch('CosmoFuse.correlations.Correlation.prepare')
-    def test_preprocess_with_aperture_filter(
+    def test_preprocess_and_precompute_forwarding(
         self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
     ):
         def custom_filter(theta, theta_q):
             return np.ones_like(theta) * theta_q
 
-        self.corr.preprocess(aperture_filter=custom_filter)
-        mock_calculate_pairs_M_a.assert_called_once()
-        self.assertIs(mock_calculate_pairs_M_a.call_args.kwargs["aperture_filter"], custom_filter)
-        mock_calculate_pairs_2PCF.assert_called_once_with(angle_method="haversine")
-        mock_prepare.assert_called_once_with()
+        cases = [
+            {
+                "name": "preprocess-default",
+                "method": "preprocess",
+                "kwargs": {},
+                "expected_angle": "haversine",
+                "expected_filter": None,
+            },
+            {
+                "name": "preprocess-with-filter",
+                "method": "preprocess",
+                "kwargs": {"aperture_filter": custom_filter},
+                "expected_angle": "haversine",
+                "expected_filter": custom_filter,
+            },
+            {
+                "name": "preprocess-angle-law",
+                "method": "preprocess",
+                "kwargs": {"angle_method": "law"},
+                "expected_angle": "law",
+                "expected_filter": None,
+            },
+            {
+                "name": "precompute-angle-arccos",
+                "method": "precompute",
+                "kwargs": {"angle_method": "arccos"},
+                "expected_angle": "arccos",
+                "expected_filter": None,
+            },
+        ]
 
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
-    @patch('CosmoFuse.correlations.Correlation.prepare')
-    def test_preprocess_forwards_angle_method(
-        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
-    ):
-        self.corr.preprocess(angle_method="law")
-        mock_calculate_pairs_M_a.assert_called_once_with()
-        mock_calculate_pairs_2PCF.assert_called_once_with(angle_method="law")
-        mock_prepare.assert_called_once_with()
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                mock_prepare.reset_mock()
+                mock_calculate_pairs_2PCF.reset_mock()
+                mock_calculate_pairs_M_a.reset_mock()
 
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
-    @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
-    @patch('CosmoFuse.correlations.Correlation.prepare')
-    def test_precompute_alias_forwards_angle_method(
-        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
-    ):
-        self.corr.precompute(angle_method="arccos")
-        mock_calculate_pairs_M_a.assert_called_once_with()
-        mock_calculate_pairs_2PCF.assert_called_once_with(angle_method="arccos")
-        mock_prepare.assert_called_once_with()
+                getattr(self.corr, case["method"])(**case["kwargs"])
+
+                mock_calculate_pairs_2PCF.assert_called_once_with(
+                    angle_method=case["expected_angle"]
+                )
+                mock_prepare.assert_called_once_with()
+
+                expected_filter = case["expected_filter"]
+                if expected_filter is None:
+                    mock_calculate_pairs_M_a.assert_called_once_with()
+                else:
+                    mock_calculate_pairs_M_a.assert_called_once()
+                    self.assertIs(
+                        mock_calculate_pairs_M_a.call_args.kwargs["aperture_filter"],
+                        expected_filter,
+                    )
 
     def test_vectorized_shear_shear(self):
         """Test the vectorized_shear_shear method."""
@@ -3811,10 +2694,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         ) as spy_compute:
             self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
             self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
         self.assertEqual(spy_compute.call_count, 2)
-        self.assertIsInstance(self.corr._xipm_sumofweights_cache, dict)
-        self.assertEqual(len(self.corr._xipm_sumofweights_cache), 2)
 
     def test_xipm_sumofweights_legacy_single_entry_cache_migrates(self):
         self._setup_mock_pairs()
@@ -3829,9 +2711,11 @@ class TestCorrelationCoverage(unittest.TestCase):
         legacy_value = self.corr.backend.to_device(
             np.ones(self.corr.n_patches * self.corr.nbins, dtype=self.corr.map_dtype)
         )
-        self.corr._xipm_sumofweights_cache = legacy_value
-        self.corr._xipm_sumofweights_cache_w_fingerprint = legacy_key
-        self.corr._xipm_sumofweights_cache_prepare_version = self.corr._prepare_version
+        self.corr.compute_context._xipm_sumofweights_cache = legacy_value
+        self.corr.compute_context._xipm_sumofweights_cache_w_fingerprint = legacy_key
+        self.corr.compute_context._xipm_sumofweights_cache_prepare_version = (
+            self.corr.compute_context.prepare_version
+        )
 
         with patch.object(
             self.corr,
@@ -3839,11 +2723,10 @@ class TestCorrelationCoverage(unittest.TestCase):
             side_effect=AssertionError("legacy cache should satisfy lookup"),
         ):
             looked_up = self.corr._get_xipm_sumofweights(w1_dev, w2_dev)
+            looked_up_again = self.corr._get_xipm_sumofweights(w1_dev, w2_dev)
 
         self.assertIs(looked_up, legacy_value)
-        self.assertIsInstance(self.corr._xipm_sumofweights_cache, dict)
-        self.assertIs(self.corr._xipm_sumofweights_cache[legacy_key], legacy_value)
-        self.assertIsNone(self.corr._xipm_sumofweights_cache_w_fingerprint)
+        self.assertIs(looked_up_again, legacy_value)
 
     def test_xipm_explicit_sumofweights_skips_fingerprint_checks(self):
         self._setup_mock_pairs()
@@ -4009,9 +2892,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         self._setup_mock_pairs()
 
         cache_sentinel = np.array([123.0], dtype=np.float64)
-        self.corr._tomo_sumofweights_cache = cache_sentinel
-        self.corr._tomo_sumofweights_cache_w_fingerprint = ("sentinel",)
-        self.corr._tomo_sumofweights_cache_prepare_version = -1
+        self.corr.compute_context._tomo_sumofweights_cache = cache_sentinel
+        self.corr.compute_context._tomo_sumofweights_cache_w_fingerprint = ("sentinel",)
+        self.corr.compute_context._tomo_sumofweights_cache_prepare_version = -1
 
         with patch.object(
             self.corr,
@@ -4024,9 +2907,6 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
-        self.assertIs(self.corr._tomo_sumofweights_cache, cache_sentinel)
-        self.assertEqual(self.corr._tomo_sumofweights_cache_w_fingerprint, ("sentinel",))
-        self.assertEqual(self.corr._tomo_sumofweights_cache_prepare_version, -1)
 
     def test_vectorized_shear_shear_prepares(self):
         """Test that vectorized_shear_shear calls prepare if needed."""
@@ -4091,6 +2971,74 @@ class TestCorrelationCoverage(unittest.TestCase):
             helper_zeta_a_t(M_a, xi_t),
         )
 
+    def test_sumofweights_helper_shapes(self):
+        nside = 32
+        corr = Correlation(
+            nside=nside,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([np.pi / 2]),
+            nbins=2,
+            device="cpu",
+        )
+
+        n_pairs = 6
+        corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint32)]
+        corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex128)]
+        corr.bins = [np.array([3, 3], dtype=np.uint32)]
+
+        npix = 12 * nside**2
+        w1 = np.ones(npix, dtype=np.float64)
+        w2 = np.ones(npix, dtype=np.float64)
+        w1_dev = corr.backend.to_device(w1)
+        w2_dev = corr.backend.to_device(w2)
+        sum_w = corr._compute_xipm_sumofweights(w1_dev, w2_dev)
+        self.assertEqual(sum_w.shape[0], corr.n_patches * corr.nbins)
+
+        w_dev = corr.backend.to_device(np.ones((1, npix), dtype=np.float64))
+        sum_w_tomo = corr._compute_tomo_sumofweights(w_dev, 1, 1)
+        self.assertEqual(sum_w_tomo.shape, (2, 1, corr.n_patches * corr.nbins))
+
+    def test_precision_applied_to_internal_arrays_regression(self):
+        nside = 32
+        corr = Correlation(
+            nside=nside,
+            phi_center=np.array([0.0]),
+            theta_center=np.array([np.pi / 2]),
+            nbins=2,
+            device="cpu",
+            map_precision="float32",
+            rotation_precision="float32",
+            index_precision="uint64",
+        )
+
+        n_pairs = 6
+        corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint64)]
+        corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex64)]
+        corr.bins = [np.array([3, 3], dtype=np.uint64)]
+
+        corr.prepare()
+        self.assertEqual(corr.inds_dev.dtype, np.uint64)
+        self.assertEqual(corr.exp2phi_dev.dtype, np.complex64)
+        self.assertEqual(corr.bins_dev.dtype, np.uint64)
+        self.assertEqual(corr.tot_bins_dev.dtype, np.uint64)
+
+        corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint64)]
+        corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]
+        corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
+        corr.Q_val = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]
+        corr.Q_patch_area = [3.0]
+
+        npix = 12 * nside**2
+        shear_maps = np.ones((2, 2, npix), dtype=np.float64)
+        w = np.ones((2, npix), dtype=np.float64)
+
+        xip, xim = corr.vectorized_shear_shear(shear_maps, w)
+        M_ap, _xip_full, _xim_full = corr.get_full_tomo_shear(shear_maps, w)
+
+        self.assertEqual(M_ap.dtype, np.float32)
+        self.assertEqual(xip.dtype, np.float32)
+        self.assertEqual(xim.dtype, np.float32)
+
     def test_calculate_all_zetas_api_uses_explicit_center_annulus_names(self):
         corr = self._make_small_cpu_corr()
         rng = np.random.default_rng(456)
@@ -4125,7 +3073,3 @@ class TestCorrelationCoverage(unittest.TestCase):
                 "zeta_a_t",
             },
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

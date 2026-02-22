@@ -31,36 +31,22 @@ class ComputeContext:
 
     def __init__(self) -> None:
         self.tomo_combination_cache: Dict[Any, Any] = {}
+        self.initialize_runtime_state()
 
-    def initialize_runtime_state(self, owner: Any) -> None:
-        for name, value in (
-            self._PREPARED_DEFAULTS
-            + self._WEIGHT_CACHE_DEFAULTS
-            + self._APERTURE_DEFAULTS
-        ):
-            setattr(owner, name, value)
-        owner._prepare_version = 0
-        owner._tomo_combination_cache = self.tomo_combination_cache
+    def initialize_runtime_state(self) -> None:
+        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+            setattr(self, name, value)
+        self.prepare_version = 0
 
-    def ensure_runtime_state(self, owner: Any) -> None:
-        for name, value in (
-            self._PREPARED_DEFAULTS
-            + self._WEIGHT_CACHE_DEFAULTS
-            + self._APERTURE_DEFAULTS
-        ):
-            if name not in owner.__dict__:
-                setattr(owner, name, value)
-        if "_prepare_version" not in owner.__dict__:
-            owner._prepare_version = 0
-        if "_tomo_combination_cache" not in owner.__dict__:
-            owner._tomo_combination_cache = self.tomo_combination_cache
-        else:
-            self.tomo_combination_cache = owner._tomo_combination_cache
+    def ensure_runtime_state(self) -> None:
+        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+            if name not in self.__dict__:
+                setattr(self, name, value)
+        if "prepare_version" not in self.__dict__:
+            self.prepare_version = 0
+        if "tomo_combination_cache" not in self.__dict__:
+            self.tomo_combination_cache = {}
 
-    def invalidate_prepared_state(self, owner: Any) -> None:
-        for name, value in (
-            self._PREPARED_DEFAULTS
-            + self._WEIGHT_CACHE_DEFAULTS
-            + self._APERTURE_DEFAULTS
-        ):
-            setattr(owner, name, value)
+    def invalidate_prepared_state(self) -> None:
+        for name, value in self._PREPARED_DEFAULTS + self._WEIGHT_CACHE_DEFAULTS + self._APERTURE_DEFAULTS:
+            setattr(self, name, value)

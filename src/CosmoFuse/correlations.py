@@ -12,6 +12,8 @@ from tqdm import trange
 
 from .backend import get_backend
 from .compute_context import ComputeContext
+from .io_handler import PairIOHandler
+from .pair_geometry import PairGeometry
 from .correlation_helpers import (
     Q_T,
     calculate_all_zetas as _calculate_all_zetas_helper,
@@ -383,12 +385,12 @@ class Correlation:
 
         self.backend = get_backend(device)
         self.device = device
-        self._compute_context = ComputeContext()
+        self.compute_context = ComputeContext()
 
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
-        self._compute_context.initialize_runtime_state(self)
+        self.compute_context.initialize_runtime_state()
         self._aperture_filter_active_key = "Q_T"
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -399,6 +401,8 @@ class Correlation:
             del state['_compute_pairs_kernel']
         if '_pair_finder' in state:
             del state['_pair_finder']
+        if 'compute_context' in state:
+            del state['compute_context']
         if '_compute_context' in state:
             del state['_compute_context']
         if '_tomo_combination_cache' in state:
@@ -425,19 +429,142 @@ class Correlation:
             kernel=self._compute_pairs_kernel,
             resolve_angle_method_code=_resolve_angle_method_code,
         )
-        self._compute_context = ComputeContext()
-        self._compute_context.ensure_runtime_state(self)
+        self.compute_context = ComputeContext()
+        legacy_context_fields = (
+            "inds_dev",
+            "exp2phi_dev",
+            "bins_dev",
+            "tot_bins_dev",
+            "tot_bins_reduceat_dev",
+            "ntotpairs",
+            "_tomo_sumofweights_cache",
+            "_tomo_sumofweights_cache_w_fingerprint",
+            "_tomo_sumofweights_cache_prepare_version",
+            "_xipm_sumofweights_cache",
+            "_xipm_sumofweights_cache_w_fingerprint",
+            "_xipm_sumofweights_cache_prepare_version",
+            "Q_inds_flat",
+            "Q_cos_flat",
+            "Q_sin_flat",
+            "Q_val_flat",
+            "Q_offsets",
+            "Q_patch_area_flat",
+        )
+        for field_name in legacy_context_fields:
+            if field_name in self.__dict__:
+                setattr(self.compute_context, field_name, self.__dict__.pop(field_name))
+        if "_prepare_version" in self.__dict__:
+            self.compute_context.prepare_version = self.__dict__.pop("_prepare_version")
+        if "_tomo_combination_cache" in self.__dict__:
+            self.compute_context.tomo_combination_cache = self.__dict__.pop("_tomo_combination_cache")
+        self.compute_context.ensure_runtime_state()
         if "_aperture_filter_active_key" not in self.__dict__:
             self._aperture_filter_active_key = "Q_T"
 
     def _invalidate_prepared_state(self) -> None:
         """Clears prepared backend buffers and cached tomographic weights."""
-        self._compute_context.invalidate_prepared_state(self)
+        self.compute_context.invalidate_prepared_state()
+
+    @property
+    def inds_dev(self) -> Any:
+        return self.compute_context.inds_dev
+
+    @inds_dev.setter
+    def inds_dev(self, value: Any) -> None:
+        self.compute_context.inds_dev = value
+
+    @property
+    def exp2phi_dev(self) -> Any:
+        return self.compute_context.exp2phi_dev
+
+    @exp2phi_dev.setter
+    def exp2phi_dev(self, value: Any) -> None:
+        self.compute_context.exp2phi_dev = value
+
+    @property
+    def bins_dev(self) -> Any:
+        return self.compute_context.bins_dev
+
+    @bins_dev.setter
+    def bins_dev(self, value: Any) -> None:
+        self.compute_context.bins_dev = value
+
+    @property
+    def tot_bins_dev(self) -> Any:
+        return self.compute_context.tot_bins_dev
+
+    @tot_bins_dev.setter
+    def tot_bins_dev(self, value: Any) -> None:
+        self.compute_context.tot_bins_dev = value
+
+    @property
+    def tot_bins_reduceat_dev(self) -> Any:
+        return self.compute_context.tot_bins_reduceat_dev
+
+    @tot_bins_reduceat_dev.setter
+    def tot_bins_reduceat_dev(self, value: Any) -> None:
+        self.compute_context.tot_bins_reduceat_dev = value
+
+    @property
+    def ntotpairs(self) -> int:
+        return self.compute_context.ntotpairs
+
+    @ntotpairs.setter
+    def ntotpairs(self, value: int) -> None:
+        self.compute_context.ntotpairs = value
+
+    @property
+    def Q_inds_flat(self) -> Any:
+        return self.compute_context.Q_inds_flat
+
+    @Q_inds_flat.setter
+    def Q_inds_flat(self, value: Any) -> None:
+        self.compute_context.Q_inds_flat = value
+
+    @property
+    def Q_cos_flat(self) -> Any:
+        return self.compute_context.Q_cos_flat
+
+    @Q_cos_flat.setter
+    def Q_cos_flat(self, value: Any) -> None:
+        self.compute_context.Q_cos_flat = value
+
+    @property
+    def Q_sin_flat(self) -> Any:
+        return self.compute_context.Q_sin_flat
+
+    @Q_sin_flat.setter
+    def Q_sin_flat(self, value: Any) -> None:
+        self.compute_context.Q_sin_flat = value
+
+    @property
+    def Q_val_flat(self) -> Any:
+        return self.compute_context.Q_val_flat
+
+    @Q_val_flat.setter
+    def Q_val_flat(self, value: Any) -> None:
+        self.compute_context.Q_val_flat = value
+
+    @property
+    def Q_offsets(self) -> Any:
+        return self.compute_context.Q_offsets
+
+    @Q_offsets.setter
+    def Q_offsets(self, value: Any) -> None:
+        self.compute_context.Q_offsets = value
+
+    @property
+    def Q_patch_area_flat(self) -> Any:
+        return self.compute_context.Q_patch_area_flat
+
+    @Q_patch_area_flat.setter
+    def Q_patch_area_flat(self, value: Any) -> None:
+        self.compute_context.Q_patch_area_flat = value
 
     def _get_tomo_combination_indices(
         self, nzbins: int, nzbin_combs: int
     ) -> Tuple[Any, Any, np.ndarray]:
-        cached = self._tomo_combination_cache.get(nzbins)
+        cached = self.compute_context.tomo_combination_cache.get(nzbins)
         if cached is not None:
             return cached
 
@@ -456,14 +583,14 @@ class Correlation:
         comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
         comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
         cached_tuple = (comb_i_dev, comb_j_dev, auto_comb_np)
-        self._tomo_combination_cache[nzbins] = cached_tuple
+        self.compute_context.tomo_combination_cache[nzbins] = cached_tuple
         return cached_tuple
 
     def _get_tomo_cross_combination_indices(
         self, nlens_bins: int, nsource_bins: int
     ) -> Tuple[Any, Any]:
         cache_key = ("cross", nlens_bins, nsource_bins)
-        cached = self._tomo_combination_cache.get(cache_key)
+        cached = self.compute_context.tomo_combination_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -481,46 +608,30 @@ class Correlation:
         comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
         comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
         cached_tuple = (comb_i_dev, comb_j_dev)
-        self._tomo_combination_cache[cache_key] = cached_tuple
+        self.compute_context.tomo_combination_cache[cache_key] = cached_tuple
         return cached_tuple
 
     def _resolve_aperture_filter(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Callable[..., Any]:
-        return Q_T if aperture_filter is None else aperture_filter
+        return PairGeometry.resolve_aperture_filter(aperture_filter)
 
     def _aperture_filter_key(self, aperture_filter: Callable[..., Any]) -> Any:
-        if aperture_filter is Q_T:
-            return "Q_T"
-        return id(aperture_filter)
+        return PairGeometry.aperture_filter_key(aperture_filter)
 
     def _evaluate_aperture_filter(
         self,
         aperture_filter: Callable[..., Any],
         theta: np.ndarray,
     ) -> np.ndarray:
-        try:
-            values = aperture_filter(theta, self.theta_Q)
-        except TypeError:
-            values = aperture_filter(theta)
-        return np.asarray(values, dtype=self.rotation_dtype)
+        return PairGeometry.evaluate_aperture_filter(self, aperture_filter, theta)
 
     def _ensure_aperture_pairs(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
-        filter_fn = self._resolve_aperture_filter(aperture_filter)
-        filter_key = self._aperture_filter_key(filter_fn)
-        if self.Q_inds_flat is None:
-            if self.Q_inds and self._aperture_filter_active_key == filter_key:
-                self._prepare_aperture_flat()
-                return
-            self.calculate_pairs_M_a(aperture_filter=filter_fn)
-            return
-
-        if self._aperture_filter_active_key != filter_key:
-            self.calculate_pairs_M_a(aperture_filter=filter_fn)
+        PairGeometry.ensure_aperture_pairs(self, aperture_filter=aperture_filter)
 
     def _get_selected_tomo_density_combination_indices(
         self,
@@ -528,7 +639,7 @@ class Correlation:
         gc_auto_correlations_only: bool = False,
     ) -> Tuple[Any, Any, np.ndarray, int]:
         cache_key = ("density", nzbins, bool(gc_auto_correlations_only))
-        cached = self._tomo_combination_cache.get(cache_key)
+        cached = self.compute_context.tomo_combination_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -554,7 +665,7 @@ class Correlation:
         comb_i_dev = module.ascontiguousarray(module.asarray(comb_i_np))
         comb_j_dev = module.ascontiguousarray(module.asarray(comb_j_np))
         cached_tuple = (comb_i_dev, comb_j_dev, auto_comb_np, ncomb)
-        self._tomo_combination_cache[cache_key] = cached_tuple
+        self.compute_context.tomo_combination_cache[cache_key] = cached_tuple
         return cached_tuple
 
     def _get_selected_tomo_cross_combination_indices(
@@ -609,8 +720,8 @@ class Correlation:
         dec: np.ndarray,
         angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
-        self._pair_finder.kernel = self._compute_pairs_kernel
-        return self._pair_finder.get_pairs_patch(
+        return PairGeometry.get_pairs_patch(
+            self,
             patch_inds,
             ra,
             dec,
@@ -622,44 +733,10 @@ class Correlation:
         i: int,
         angle_method: str = "haversine",
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
-        patch_inds = hp.query_disc(
-            self.nside, vec=vec, radius=np.radians(self.patch_size / 60)
-        )
-        pix_inds = patch_inds[self.map_mask[patch_inds]]
-        ra, dec = pixel2RaDec(pix_inds, self.nside)
-        (
-            inds,
-            exp2theta,
-        ) = self.get_pairs_patch(
-            pix_inds,
-            ra,
-            dec,
-            angle_method=angle_method,
-        )
-        ninds = np.array([len(inds[i][0]) for i in range(self.nbins)], dtype=self.index_dtype)
-        all_inds = np.zeros((2, int(ninds.sum())), dtype=self.index_dtype)
-        for bin_idx in range(self.nbins):
-            start_idx = np.sum(ninds[:bin_idx])
-            end_idx = np.sum(ninds[: bin_idx + 1])
-            all_inds[0, start_idx:end_idx] = inds[bin_idx][0]
-            all_inds[1, start_idx:end_idx] = inds[bin_idx][1]
-
-        return all_inds, exp2theta.astype(self.rotation_complex_dtype, copy=False), ninds
+        return PairGeometry.get_pairs_helper(self, i, angle_method=angle_method)
 
     def calculate_pairs_2PCF(self, angle_method: str = "haversine") -> None:
-        pair_inds, pair_exp2phi, bins = [], [], []
-        for i in trange(self.n_patches, desc="2PCF pairs", unit=" patches"):
-            result = self.__get_pairs_helper__(i, angle_method=angle_method)
-
-            pair_inds.append(result[0])
-            pair_exp2phi.append(result[1])
-            bins.append(result[2])
-
-        self.pair_inds = pair_inds
-        self.pair_exp2phi = pair_exp2phi
-        self.bins = bins
-        self._invalidate_prepared_state()
+        PairGeometry.calculate_pairs_2PCF(self, angle_method=angle_method)
 
     def get_pairs_patch_M_a(
         self,
@@ -669,125 +746,34 @@ class Correlation:
         Q_patch_center_dec: float,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        cos_vartheta = np.cos(pixels_RA_Q_patch - Q_patch_center_RA) * np.cos(
-            Q_patch_center_dec
-        ) * np.cos(pixels_dec_Q_patch) + np.sin(Q_patch_center_dec) * np.sin(
-            pixels_dec_Q_patch
+        return PairGeometry.get_pairs_patch_M_a(
+            self,
+            pixels_RA_Q_patch,
+            pixels_dec_Q_patch,
+            Q_patch_center_RA,
+            Q_patch_center_dec,
+            aperture_filter=aperture_filter,
         )
-        vartheta = np.arccos(cos_vartheta)
-        sin_vartheta = np.sqrt(1 - cos_vartheta**2)
-        cos_phi = (
-            np.sin(pixels_RA_Q_patch - Q_patch_center_RA)
-            * np.cos(pixels_dec_Q_patch)
-            / sin_vartheta
-        )
-        sin_phi = (
-            np.cos(pixels_dec_Q_patch) * np.sin(Q_patch_center_dec)
-            - np.sin(pixels_dec_Q_patch)
-            * np.cos(Q_patch_center_dec)
-            * np.cos(pixels_RA_Q_patch - Q_patch_center_RA)
-        ) / sin_vartheta
-        cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
-        sin_2phi = 2 * sin_phi * cos_phi
-
-        filter_fn = self._resolve_aperture_filter(aperture_filter)
-        Q = self._evaluate_aperture_filter(filter_fn, vartheta)
-
-        return cos_2phi, sin_2phi, Q
 
     def __get_pairs_M_a_helper__(
         self,
         i: int,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
-        vec = hp.ang2vec(self.theta_center[i], self.phi_center[i])
-        pix_center = hp.ang2pix(self.nside, self.theta_center[i], self.phi_center[i])
-        patch_inds = hp.query_disc(
-            self.nside, vec=vec, radius=np.radians(5 * self.theta_Q / 60)
-        )
-        Qpix_inds = patch_inds[self.map_mask[patch_inds]]
-        Qpix_inds = Qpix_inds[Qpix_inds != pix_center]
-
-        ra_center, dec_center = pixel2RaDec([pix_center], self.nside)
-        Q_ra, Q_dec = pixel2RaDec(Qpix_inds, self.nside)
-        Q_cos, Q_sin, Q_val = self.get_pairs_patch_M_a(
-            Q_ra,
-            Q_dec,
-            ra_center,
-            dec_center,
+        return PairGeometry.get_pairs_M_a_helper(
+            self,
+            i,
             aperture_filter=aperture_filter,
-        )
-
-        Q_patch_area = self.rotation_dtype.type(
-            Qpix_inds.size * hp.nside2pixarea(self.nside)
-        )
-        return (
-            Q_cos.astype(self.rotation_dtype, copy=False),
-            Q_sin.astype(self.rotation_dtype, copy=False),
-            Q_val.astype(self.rotation_dtype, copy=False),
-            Qpix_inds.astype(self.index_dtype, copy=False),
-            Q_patch_area,
         )
 
     def calculate_pairs_M_a(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
-        filter_fn = self._resolve_aperture_filter(aperture_filter)
-        self.Q_cos, self.Q_sin, self.Q_val, self.Q_inds, self.Q_patch_area = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
-
-        for i in trange(self.n_patches, desc="M_a data", unit=" patches"):
-            Q_cos, Q_sin, Q_val, Q_inds, Q_patch_area = self.__get_pairs_M_a_helper__(
-                i,
-                aperture_filter=filter_fn,
-            )
-            self.Q_cos.append(Q_cos)
-            self.Q_sin.append(Q_sin)
-            self.Q_val.append(Q_val)
-            self.Q_inds.append(Q_inds)
-            self.Q_patch_area.append(Q_patch_area)
-
-        self._prepare_aperture_flat()
-        self._aperture_filter_active_key = self._aperture_filter_key(filter_fn)
+        PairGeometry.calculate_pairs_M_a(self, aperture_filter=aperture_filter)
 
     def _prepare_aperture_flat(self) -> None:
-        if not self.Q_inds:
-            self.Q_inds_flat = None
-            self.Q_cos_flat = None
-            self.Q_sin_flat = None
-            self.Q_val_flat = None
-            self.Q_offsets = None
-            self.Q_patch_area_flat = None
-            return
-
-        sizes = np.array([arr.size for arr in self.Q_inds], dtype=np.int64)
-        offsets = np.zeros(len(sizes) + 1, dtype=np.int64)
-        offsets[1:] = np.cumsum(sizes)
-        total = int(offsets[-1])
-
-        Q_inds_flat = np.zeros(total, dtype=self.index_dtype)
-        Q_cos_flat = np.zeros(total, dtype=self.rotation_dtype)
-        Q_sin_flat = np.zeros(total, dtype=self.rotation_dtype)
-        Q_val_flat = np.zeros(total, dtype=self.rotation_dtype)
-
-        for i, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
-            Q_inds_flat[start:end] = self.Q_inds[i]
-            Q_cos_flat[start:end] = self.Q_cos[i]
-            Q_sin_flat[start:end] = self.Q_sin[i]
-            Q_val_flat[start:end] = self.Q_val[i]
-
-        self.Q_inds_flat = Q_inds_flat
-        self.Q_cos_flat = Q_cos_flat
-        self.Q_sin_flat = Q_sin_flat
-        self.Q_val_flat = Q_val_flat
-        self.Q_offsets = offsets
-        self.Q_patch_area_flat = np.asarray(self.Q_patch_area, dtype=self.rotation_dtype)
+        PairGeometry.prepare_aperture_flat(self)
 
     def preprocess(
         self,
@@ -819,90 +805,12 @@ class Correlation:
         )
 
     def save_pairs(self, filepath: str) -> None:
-        if (
-            self.pair_inds is None
-            or self.pair_exp2phi is None
-            or self.bins is None
-        ):
-            warnings.warn(
-                "Cannot save pairs because host pair arrays were released. "
-                "Reload or recompute pairs before calling save_pairs().",
-                RuntimeWarning,
-            )
-            return
-
-        with h5py.File(filepath, "w") as fp:
-            fp.attrs["nside"] = self.nside
-            fp.attrs["nbins"] = self.nbins
-            fp.attrs["theta_min"] = self.theta_min
-            fp.attrs["theta_max"] = self.theta_max
-            fp.attrs["patch_size"] = self.patch_size
-            fp.attrs["theta_Q"] = self.theta_Q
-            fp.attrs["n_patches"] = self.n_patches
-            fp.create_dataset("map_inds", data=self.map_inds)
-            fp.create_dataset("phi_center", data=self.phi_center)
-            fp.create_dataset("theta_center", data=self.theta_center)
-
-            for i in range(self.n_patches):
-                gp = fp.create_group(f"patch_{i:02d}")
-
-                gp.create_dataset(f"pair_inds", data=self.pair_inds[i])
-                gp.create_dataset(f"pair_exp2phi", data=self.pair_exp2phi[i])
-                gp.create_dataset(f"bins", data=self.bins[i])
-
-                gp.create_dataset(f"Q_inds", data=self.Q_inds[i])
-                gp.create_dataset(f"Q_cos", data=self.Q_cos[i])
-                gp.create_dataset(f"Q_sin", data=self.Q_sin[i])
-                gp.create_dataset(f"Q_val", data=self.Q_val[i])
-                gp.create_dataset(f"Q_patch_area", data=self.Q_patch_area[i])
+        PairIOHandler.save_pairs(self, filepath)
 
     def load_pairs(
         self, filepath: str, start_ind: int = 0, stop_ind: Optional[int] = None
     ) -> None:
-        self._invalidate_prepared_state()
-        self.pair_inds = []
-        self.pair_exp2phi = []
-        self.bins = []
-        self.Q_inds = []
-        self.Q_cos = []
-        self.Q_sin = []
-        self.Q_val = []
-        self.Q_patch_area = []
-
-        with h5py.File(filepath, "r") as fp:
-            if stop_ind is None:
-                stop_ind = fp.attrs["n_patches"]
-            self.nside = fp.attrs["nside"]
-            self.nbins = fp.attrs["nbins"]
-            self.theta_min = fp.attrs["theta_min"]
-            self.theta_max = fp.attrs["theta_max"]
-            self.binedges = np.geomspace(self.theta_min, self.theta_max, self.nbins + 1)
-            self.bincenters = (
-                np.sqrt(self.binedges[1:] * self.binedges[:-1]) * 60 * 180 / np.pi
-            )
-            self.patch_size = fp.attrs["patch_size"]
-            self.theta_Q = fp.attrs["theta_Q"]
-            self.n_patches = stop_ind - start_ind
-            self.map_inds = fp["map_inds"][:].astype(self.index_dtype, copy=False)
-            self.phi_center = fp["phi_center"][start_ind:stop_ind]
-            self.theta_center = fp["theta_center"][start_ind:stop_ind]
-
-            for i in range(start_ind, stop_ind):
-                gp = fp[f"patch_{i:02d}"]
-                self.pair_inds.append(
-                    gp["pair_inds"][:].astype(self.index_dtype, copy=False)
-                )
-                self.pair_exp2phi.append(
-                    gp["pair_exp2phi"][:].astype(self.rotation_complex_dtype, copy=False)
-                )
-                self.bins.append(gp["bins"][:].astype(self.index_dtype, copy=False))
-                self.Q_inds.append(gp["Q_inds"][:].astype(self.index_dtype, copy=False))
-                self.Q_cos.append(gp["Q_cos"][:].astype(self.rotation_dtype, copy=False))
-                self.Q_sin.append(gp["Q_sin"][:].astype(self.rotation_dtype, copy=False))
-                self.Q_val.append(gp["Q_val"][:].astype(self.rotation_dtype, copy=False))
-                self.Q_patch_area.append(self.rotation_dtype.type(gp["Q_patch_area"][()]))
-            self._prepare_aperture_flat()
-        self.prepare()
+        PairIOHandler.load_pairs(self, filepath, start_ind=start_ind, stop_ind=stop_ind)
 
     def get_aperture_shear(
         self,
@@ -1074,7 +982,7 @@ class Correlation:
             temp_bins_tot.astype(np.int64, copy=False)
         )
         self.ntotpairs = size
-        self._prepare_version += 1
+        self.compute_context.prepare_version += 1
         if release_host_pairs:
             self.pair_inds = None
             self.pair_exp2phi = None
@@ -1708,22 +1616,30 @@ class Correlation:
             self._fingerprint_weights(w2_np),
         )
 
-        cache = self._xipm_sumofweights_cache
+        cache = self.compute_context._xipm_sumofweights_cache
         if not isinstance(cache, dict):
             migrated_cache: Dict[Any, Any] = {}
             if (
                 cache is not None
-                and self._xipm_sumofweights_cache_w_fingerprint is not None
-                and self._xipm_sumofweights_cache_prepare_version == self._prepare_version
+                and self.compute_context._xipm_sumofweights_cache_w_fingerprint is not None
+                and self.compute_context._xipm_sumofweights_cache_prepare_version
+                == self.compute_context.prepare_version
             ):
-                migrated_cache[self._xipm_sumofweights_cache_w_fingerprint] = cache
-            self._xipm_sumofweights_cache = migrated_cache
-            self._xipm_sumofweights_cache_w_fingerprint = None
+                migrated_cache[
+                    self.compute_context._xipm_sumofweights_cache_w_fingerprint
+                ] = cache
+            self.compute_context._xipm_sumofweights_cache = migrated_cache
+            self.compute_context._xipm_sumofweights_cache_w_fingerprint = None
             cache = migrated_cache
 
-        if self._xipm_sumofweights_cache_prepare_version != self._prepare_version:
+        if (
+            self.compute_context._xipm_sumofweights_cache_prepare_version
+            != self.compute_context.prepare_version
+        ):
             cache.clear()
-            self._xipm_sumofweights_cache_prepare_version = self._prepare_version
+            self.compute_context._xipm_sumofweights_cache_prepare_version = (
+                self.compute_context.prepare_version
+            )
 
         cached = cache.get(w_fingerprint)
         if cached is not None:
@@ -1964,12 +1880,13 @@ class Correlation:
 
         if sumofweights is None:
             w_fingerprint = self._fingerprint_weights(w_arr)
-            cache = self._tomo_sumofweights_cache
+            cache = self.compute_context._tomo_sumofweights_cache
             cache_is_valid = (
                 cache is not None
-                and self._tomo_sumofweights_cache_w_fingerprint == w_fingerprint
-                and self._tomo_sumofweights_cache_prepare_version
-                == self._prepare_version
+                and self.compute_context._tomo_sumofweights_cache_w_fingerprint
+                == w_fingerprint
+                and self.compute_context._tomo_sumofweights_cache_prepare_version
+                == self.compute_context.prepare_version
                 and len(cache.shape) >= 2
                 and cache.shape[0] == 2
                 and cache.shape[1] == nzbin_combs
@@ -1980,9 +1897,13 @@ class Correlation:
                 sumofweights_dev = self._compute_tomo_sumofweights(
                     w_dev, nzbins, nzbin_combs
                 )
-                self._tomo_sumofweights_cache = sumofweights_dev
-                self._tomo_sumofweights_cache_w_fingerprint = w_fingerprint
-                self._tomo_sumofweights_cache_prepare_version = self._prepare_version
+                self.compute_context._tomo_sumofweights_cache = sumofweights_dev
+                self.compute_context._tomo_sumofweights_cache_w_fingerprint = (
+                    w_fingerprint
+                )
+                self.compute_context._tomo_sumofweights_cache_prepare_version = (
+                    self.compute_context.prepare_version
+                )
         else:
             sumofweights_arr = (
                 sumofweights
