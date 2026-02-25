@@ -68,6 +68,9 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.package-data]
+"CosmoFuse" = ["cuda/*.cu", "cuda/*.cuh"]
+
 [tool.black]
 line-length = 88
 target-version = ['py310']
