@@ -328,7 +328,8 @@ class Correlation:
         self.rotation_dtype = _normalize_precision(
             rotation_precision, _ALLOWED_FLOAT_PRECISIONS, "rotation_precision"
         )
-        self.index_dtype = np.dtype(np.int64)
+        npix = hp.nside2npix(nside)
+        self.index_dtype = np.dtype(np.int32) if npix < 2**31 else np.dtype(np.int64)
         self.rotation_complex_dtype = np.dtype(
             _ROTATION_COMPLEX_PRECISION[self.rotation_dtype.name]
         )
@@ -1059,6 +1060,7 @@ class Correlation:
         g2: np.ndarray,
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        return_device: bool = True,
     ) -> np.ndarray:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
         g1_arr = self._coerce_map_input_array(g1)
@@ -1089,14 +1091,22 @@ class Correlation:
         module = self.backend.module
         backend_dtype = getattr(module, self.map_dtype.name)
 
-        Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
-        Q_cos_dev = self.backend.to_device(self.Q_cos_flat).astype(backend_dtype, copy=False)
-        Q_sin_dev = self.backend.to_device(self.Q_sin_flat).astype(backend_dtype, copy=False)
-        Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
-        Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
-        Q_patch_area_dev = self.backend.to_device(
-            self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
-        ).astype(backend_dtype, copy=False)
+        if self.compute_context.Q_inds_dev is not None:
+            Q_inds_dev = self.compute_context.Q_inds_dev
+            Q_cos_dev = self.compute_context.Q_cos_dev
+            Q_sin_dev = self.compute_context.Q_sin_dev
+            Q_val_dev = self.compute_context.Q_val_dev
+            Q_offsets_dev = self.compute_context.Q_offsets_dev
+            Q_patch_area_dev = self.compute_context.Q_patch_area_dev
+        else:
+            Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
+            Q_cos_dev = self.backend.to_device(self.Q_cos_flat).astype(backend_dtype, copy=False)
+            Q_sin_dev = self.backend.to_device(self.Q_sin_flat).astype(backend_dtype, copy=False)
+            Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
+            Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
+            Q_patch_area_dev = self.backend.to_device(
+                self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
+            ).astype(backend_dtype, copy=False)
         g1_dev = self._to_backend_array(g1_arr, dtype=backend_dtype)
         g2_dev = self._to_backend_array(g2_arr, dtype=backend_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
@@ -1108,6 +1118,8 @@ class Correlation:
         weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
         weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
         aperture_shear = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        if return_device and self.backend.name == "cupy":
+            return aperture_shear
         return self.backend.to_numpy(aperture_shear)
 
     def get_aperture_density(
@@ -1115,6 +1127,7 @@ class Correlation:
         map_values: np.ndarray,
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        return_device: bool = True,
     ) -> np.ndarray:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
@@ -1142,12 +1155,18 @@ class Correlation:
         module = self.backend.module
         backend_dtype = getattr(module, self.map_dtype.name)
 
-        Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
-        Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
-        Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
-        Q_patch_area_dev = self.backend.to_device(
-            self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
-        ).astype(backend_dtype, copy=False)
+        if self.compute_context.Q_inds_dev is not None:
+            Q_inds_dev = self.compute_context.Q_inds_dev
+            Q_val_dev = self.compute_context.Q_val_dev
+            Q_offsets_dev = self.compute_context.Q_offsets_dev
+            Q_patch_area_dev = self.compute_context.Q_patch_area_dev
+        else:
+            Q_inds_dev = self.backend.to_device(self.Q_inds_flat)
+            Q_val_dev = self.backend.to_device(self.Q_val_flat).astype(backend_dtype, copy=False)
+            Q_offsets_dev = self.backend.to_device(self.Q_offsets.astype(np.int64, copy=False))
+            Q_patch_area_dev = self.backend.to_device(
+                self.Q_patch_area_flat.astype(self.map_dtype, copy=False)
+            ).astype(backend_dtype, copy=False)
         map_values_dev = self._to_backend_array(map_values_arr, dtype=backend_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
 
@@ -1158,6 +1177,8 @@ class Correlation:
         weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
         weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
         aperture_density = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        if return_device and self.backend.name == "cupy":
+            return aperture_density
         return self.backend.to_numpy(aperture_density)
 
     def prepare(self, release_host_pairs: bool = False) -> None:
@@ -1217,11 +1238,12 @@ class Correlation:
 
         self.inds_dev = self.backend.to_device(temp_inds)
         module = self.backend.module
+        _index_device_dtype = getattr(module, self.index_dtype.name)
         self.compute_context.inds_i_dev = module.ascontiguousarray(
-            self.inds_dev[0].astype(module.int64, copy=False)
+            self.inds_dev[0].astype(_index_device_dtype, copy=False)
         )
         self.compute_context.inds_j_dev = module.ascontiguousarray(
-            self.inds_dev[1].astype(module.int64, copy=False)
+            self.inds_dev[1].astype(_index_device_dtype, copy=False)
         )
         self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
         self.bins_dev = self.backend.to_device(temp_bins)
@@ -1246,6 +1268,7 @@ class Correlation:
         w1: np.ndarray,
         w2: np.ndarray,
         sumofweights: Optional[Union[np.ndarray, float]] = None,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute xi+/xi- for one map pair.
 
@@ -1254,8 +1277,9 @@ class Correlation:
         """
         if self.inds_dev is None:
             self.prepare()
+        return_numpy = not (return_device and self.backend.name == "cupy")
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
-            return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights)
+            return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy)
 
         return self._xipm_cross(
             g11,
@@ -1266,6 +1290,7 @@ class Correlation:
             w2,
             sumofweights_ab=sumofweights,
             sumofweights_ba=sumofweights,
+            return_numpy=return_numpy,
         )
 
     def compute_density_density(
@@ -1275,6 +1300,7 @@ class Correlation:
         w1: np.ndarray,
         w2: np.ndarray,
         sumofweights: Optional[Union[np.ndarray, float]] = None,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray]:
         """Compute scalar density-density 2PCF (w(theta)) for one map pair."""
         if self.inds_dev is None:
@@ -1354,6 +1380,8 @@ class Correlation:
         w_ab = self._normalize_scalar_pairs(w_ab_num, sum_ab)
         w_ba = self._normalize_scalar_pairs(w_ba_num, sum_ba)
         w_theta = 0.5 * (w_ab + w_ba)
+        if return_device and self.backend.name == "cupy":
+            return (self.backend.module.real(w_theta),)
         return (np.real(self.backend.to_numpy(w_theta)),)
 
     def compute_density_shear(
@@ -1364,6 +1392,7 @@ class Correlation:
         w_lens: np.ndarray,
         w_source: np.ndarray,
         sumofweights: Optional[Union[np.ndarray, float]] = None,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray]:
         """Compute scalar-shear 2PCF (gamma_t) for one lens/source map pair."""
         if self.inds_dev is None:
@@ -1448,6 +1477,8 @@ class Correlation:
             gamma_num = self._reduce_pairs(out_ab) + self._reduce_pairs(out_ba)
 
         gamma_t = self._normalize_scalar_pairs(gamma_num, sumofweights_dev)
+        if return_device and self.backend.name == "cupy":
+            return (self.backend.module.real(gamma_t),)
         return (np.real(self.backend.to_numpy(gamma_t)),)
 
     def _xipm_auto(
@@ -1755,6 +1786,11 @@ class Correlation:
             return array.astype(self.map_dtype, copy=False)
         return np.asarray(array, dtype=self.map_dtype)
 
+    @property
+    def _index_device_dtype(self) -> Any:
+        """Backend-native dtype matching self.index_dtype (e.g. cupy.int32 or numpy.int64)."""
+        return getattr(self.backend.module, self.index_dtype.name)
+
     def _fingerprint_weights(
         self, w_np: Any
     ) -> Tuple[Tuple[int, ...], str, str]:
@@ -1793,7 +1829,13 @@ class Correlation:
         starts = self.tot_bins_reduceat_dev[:-1]
         values_dev = self.backend.to_device(values)
         values_ndim = int(getattr(values_dev, "ndim", np.ndim(values_dev)))
-        starts_np = np.asarray(self.backend.to_numpy(starts), dtype=np.int64)
+        cached = getattr(self, "_reduce_pairs_cache", None)
+        pv = self.compute_context.prepare_version
+        if cached is not None and cached[0] == pv:
+            starts_np = cached[1]
+        else:
+            starts_np = np.asarray(self.backend.to_numpy(starts), dtype=np.int64)
+            self._reduce_pairs_cache = (pv, starts_np)
         nstarts = starts_np.size
         if values_ndim <= 1:
             nvals = int(getattr(values_dev, "size", np.size(values_dev)))
@@ -1858,11 +1900,9 @@ class Correlation:
         return self._reduce_pairs(w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]])
 
     def _get_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
-        w1_np = self.backend.to_numpy(w1_dev)
-        w2_np = self.backend.to_numpy(w2_dev)
         w_fingerprint = (
-            self._fingerprint_weights(w1_np),
-            self._fingerprint_weights(w2_np),
+            self._fingerprint_weights(w1_dev),
+            self._fingerprint_weights(w2_dev),
         )
 
         cache = self.compute_context._xipm_sumofweights_cache
@@ -1969,8 +2009,8 @@ class Correlation:
         )
         shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_scaled, w_dev)
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
         exp_i = module.ascontiguousarray(self.exp2phi_dev[0])
         exp_j = module.ascontiguousarray(self.exp2phi_dev[1])
         bin_offsets = module.ascontiguousarray(
@@ -2110,6 +2150,7 @@ class Correlation:
         sumofweights: Optional[np.ndarray] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute tomographic shear 2PCFs xi+/xi-.
 
@@ -2192,6 +2233,8 @@ class Correlation:
             )
 
         xi_p, xi_m = vectorized_xipm
+        if return_device and self.backend.name == "cupy":
+            return self.backend.module.real(xi_p), self.backend.module.real(xi_m)
         return np.real(self.backend.to_numpy(xi_p)), np.real(self.backend.to_numpy(xi_m))
 
     def _compute_tomo_aperture_shear(
@@ -2201,10 +2244,11 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = True,
     ) -> np.ndarray:
-        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
-        nzbins = shear_maps_np.shape[0]
+        shear_maps_arr = self._coerce_map_input_array(shear_maps)
+        w_arr = self._coerce_map_input_array(w)
+        nzbins = shear_maps_arr.shape[0]
 
         g1_fac, g2_fac = 1, 1
         if flip_g1:
@@ -2214,13 +2258,20 @@ class Correlation:
 
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
-        M_a = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        keep_on_device = return_device and self.backend.name == "cupy"
+        if keep_on_device:
+            module = self.backend.module
+            map_backend_dtype = getattr(module, self.map_dtype.name)
+            M_a = module.zeros([nzbins, self.n_patches], dtype=map_backend_dtype)
+        else:
+            M_a = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
         for i in range(nzbins):
             M_a[i] = self.get_aperture_shear(
-                g1_fac * shear_maps_np[i, 0],
-                g2_fac * shear_maps_np[i, 1],
-                w_np[i],
+                g1_fac * shear_maps_arr[i, 0],
+                g2_fac * shear_maps_arr[i, 1],
+                w_arr[i],
                 aperture_filter=None,
+                return_device=keep_on_device,
             )
         return M_a
 
@@ -2229,18 +2280,26 @@ class Correlation:
         density_maps: np.ndarray,
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        return_device: bool = True,
     ) -> np.ndarray:
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
+        density_arr = self._coerce_map_input_array(density_maps)
+        w_arr = self._coerce_map_input_array(w)
 
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
-        M_g = np.zeros((density_np.shape[0], self.n_patches), dtype=self.map_dtype)
-        for i in range(density_np.shape[0]):
+        keep_on_device = return_device and self.backend.name == "cupy"
+        if keep_on_device:
+            module = self.backend.module
+            map_backend_dtype = getattr(module, self.map_dtype.name)
+            M_g = module.zeros((density_arr.shape[0], self.n_patches), dtype=map_backend_dtype)
+        else:
+            M_g = np.zeros((density_arr.shape[0], self.n_patches), dtype=self.map_dtype)
+        for i in range(density_arr.shape[0]):
             M_g[i] = self.get_aperture_density(
-                density_np[i],
-                w_np[i],
+                density_arr[i],
+                w_arr[i],
                 aperture_filter=None,
+                return_device=keep_on_device,
             )
         return M_g
 
@@ -2252,23 +2311,26 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute full shear tomography outputs: M_a, xi_p, xi_m."""
-        shear_maps_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
+        shear_maps_arr = self._coerce_map_input_array(shear_maps)
+        w_arr = self._coerce_map_input_array(w)
         M_a = self._compute_tomo_aperture_shear(
-            shear_maps_np,
-            w_np,
+            shear_maps_arr,
+            w_arr,
             aperture_filter=aperture_filter,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
+            return_device=return_device,
         )
         xi_p, xi_m = self.vectorized_shear_shear(
-            shear_maps_np,
-            w_np,
+            shear_maps_arr,
+            w_arr,
             sumofweights=sumofweights,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
+            return_device=return_device,
         )
         return M_a, xi_p, xi_m
 
@@ -2279,20 +2341,23 @@ class Correlation:
         sumofweights: Optional[np.ndarray] = None,
         gc_auto_correlations_only: bool = False,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute full density tomography outputs: M_g, xi_g."""
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        w_np = np.asarray(w, dtype=self.map_dtype)
+        density_arr = self._coerce_map_input_array(density_maps)
+        w_arr = self._coerce_map_input_array(w)
         M_g = self._compute_tomo_aperture_density(
-            density_np,
-            w_np,
+            density_arr,
+            w_arr,
             aperture_filter=aperture_filter,
+            return_device=return_device,
         )
         xi_g = self.vectorized_density_density(
-            density_np,
-            w_np,
+            density_arr,
+            w_arr,
             sumofweights=sumofweights,
             gc_auto_correlations_only=gc_auto_correlations_only,
+            return_device=return_device,
         )
         return M_g, xi_g
 
@@ -2309,6 +2374,7 @@ class Correlation:
         return_M_ap: bool = False,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = True,
     ) -> Union[
         np.ndarray,
         Tuple[np.ndarray, np.ndarray],
@@ -2326,42 +2392,45 @@ class Correlation:
             - ``(xi_t, M_a)`` if ``return_M_ap=True``.
             - ``(xi_t, M_g, M_a)`` if both flags are ``True``.
         """
-        density_np = np.asarray(density_maps, dtype=self.map_dtype)
-        shear_np = np.asarray(shear_maps, dtype=self.map_dtype)
-        density_w_np = np.asarray(density_weights, dtype=self.map_dtype)
-        shear_w_np = np.asarray(shear_weights, dtype=self.map_dtype)
+        density_arr = self._coerce_map_input_array(density_maps)
+        shear_arr = self._coerce_map_input_array(shear_maps)
+        density_w_arr = self._coerce_map_input_array(density_weights)
+        shear_w_arr = self._coerce_map_input_array(shear_weights)
 
         xi_t = self.vectorized_density_shear(
-            density_np,
-            shear_np,
-            density_w_np,
-            shear_w_np,
+            density_arr,
+            shear_arr,
+            density_w_arr,
+            shear_w_arr,
             sumofweights=sumofweights,
             ggl_bin_combinations=ggl_bin_combinations,
             flip_g1=flip_g1,
             flip_g2=flip_g2,
+            return_device=return_device,
         )
 
         if not return_N_ap and not return_M_ap:
             return xi_t
 
-        outputs: List[np.ndarray] = [xi_t]
+        outputs: List[Any] = [xi_t]
         if return_N_ap:
             outputs.append(
                 self._compute_tomo_aperture_density(
-                    density_np,
-                    density_w_np,
+                    density_arr,
+                    density_w_arr,
                     aperture_filter=aperture_filter,
+                    return_device=return_device,
                 )
             )
         if return_M_ap:
             outputs.append(
                 self._compute_tomo_aperture_shear(
-                    shear_np,
-                    shear_w_np,
+                    shear_arr,
+                    shear_w_arr,
                     aperture_filter=aperture_filter,
                     flip_g1=flip_g1,
                     flip_g2=flip_g2,
+                    return_device=return_device,
                 )
             )
 
@@ -2430,8 +2499,8 @@ class Correlation:
                 sumofweights, nzbin_combs
             )
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
@@ -2536,8 +2605,8 @@ class Correlation:
         inds_i = self.compute_context.inds_i_dev
         inds_j = self.compute_context.inds_j_dev
         if inds_i is None or inds_j is None:
-            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
-            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
+            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
             self.compute_context.inds_i_dev = inds_i
             self.compute_context.inds_j_dev = inds_j
         rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
@@ -2620,6 +2689,7 @@ class Correlation:
         w: np.ndarray,
         sumofweights: Optional[np.ndarray] = None,
         gc_auto_correlations_only: bool = False,
+        return_device: bool = True,
     ) -> np.ndarray:
         """Compute tomographic galaxy clustering w(theta).
 
@@ -2637,6 +2707,8 @@ class Correlation:
             nzbins,
             gc_auto_correlations_only,
         )
+        if return_device and self.backend.name == "cupy":
+            return self.backend.module.real(wtheta)
         return np.real(self.backend.to_numpy(wtheta))
 
     def vectorized_density_shear(
@@ -2649,6 +2721,7 @@ class Correlation:
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
+        return_device: bool = True,
     ) -> np.ndarray:
         """Compute tomographic density-shear correlation with directional Lens->Source ordering.
 
@@ -2717,6 +2790,8 @@ class Correlation:
             nsource_bins,
             ggl_bin_combinations=ggl_bin_combinations,
         )
+        if return_device and self.backend.name == "cupy":
+            return self.backend.module.real(gammat)
         return np.real(self.backend.to_numpy(gammat))
 
     def zeta_g_plus(self, M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
@@ -2781,7 +2856,7 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
-        return_device: bool = False,
+        return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
         if fused_kernel is None:
@@ -2887,8 +2962,8 @@ class Correlation:
             ggl_bin_combinations=ggl_bin_combinations,
         )
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(module.int64, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(module.int64, copy=False))
+        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
+        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
         rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
         rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
         pair_offsets = module.ascontiguousarray(
@@ -3163,7 +3238,7 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
-        return_device: bool = False,
+        return_device: bool = True,
     ) -> Tuple[
         Optional[np.ndarray],
         Optional[np.ndarray],

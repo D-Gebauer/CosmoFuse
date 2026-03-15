@@ -1,3 +1,18 @@
+"""
+Patch-level pair discovery for 2-point correlation functions.
+
+For a given HEALPix sky patch, finds all unique pixel pairs whose
+angular separation falls within the configured θ bins.  For each
+pair, computes the rotation factors e^{2iφ} that rotate the spin-2
+shear field into the coordinate frame defined by the great-circle
+connecting the two pixels.  These rotation factors are essential for
+computing ξ+/ξ- and γ_t from the (γ₁, γ₂) shear components defined
+in the global RA/Dec frame.
+
+Pairs are sorted by angular bin for cache-efficient access during
+the correlation measurement kernels.
+"""
+
 from typing import Any, Callable, List, Tuple
 
 import numpy as np
@@ -32,6 +47,14 @@ class PairFinder:
         dec: np.ndarray,
         angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
+        """Find all pixel pairs within angular separation bins for a patch.
+
+        Returns:
+            all_inds: List of (2, npairs_in_bin) index arrays, one per θ bin.
+            exp2phi:  (2, total_npairs) complex rotation factors.
+                      Row 0 = e^{2iφ_i}, row 1 = e^{2iφ_j}, where φ is the
+                      position angle used to rotate shear into the pair frame.
+        """
         ra_local = np.asarray(ra, dtype=self.rotation_dtype)
         dec_local = np.asarray(dec, dtype=self.rotation_dtype)
         binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
@@ -42,6 +65,7 @@ class PairFinder:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
             return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
 
+        # Compute angular separations and rotation angles for all pixel pairs
         (
             inds_a,
             inds_b,
@@ -63,6 +87,7 @@ class PairFinder:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
             return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
 
+        # Sort by angular bin for contiguous memory access in correlation kernels
         order = np.argsort(bin_indices, kind="stable")
         inds_a = inds_a[order]
         inds_b = inds_b[order]
@@ -72,6 +97,7 @@ class PairFinder:
         exp2phi2_real = exp2phi2_real[order]
         exp2phi2_imag = exp2phi2_imag[order]
 
+        # Assemble complex rotation factors e^{2iφ} for each pair member
         exp2phi1 = (
             exp2phi1_real.astype(self.rotation_dtype, copy=False)
             + 1j * exp2phi1_imag.astype(self.rotation_dtype, copy=False)
@@ -84,6 +110,7 @@ class PairFinder:
             self.rotation_complex_dtype, copy=False
         )
 
+        # Split pairs into per-bin groups
         all_inds = []
         for bin_idx in range(self.nbins):
             in_bin = np.where(bin_indices == bin_idx)[0]

@@ -141,7 +141,7 @@ class TestCorrelation(unittest.TestCase):
         self.assertEqual(corr.map_dtype, np.dtype(np.float32))
         self.assertEqual(corr.rotation_dtype, np.dtype(np.float32))
         self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
-        self.assertEqual(corr.index_dtype, np.dtype(np.int64))
+        self.assertEqual(corr.index_dtype, np.dtype(np.int32))
 
     def test_init_invalid_map_precision(self):
         """Test initialization with invalid map precision."""
@@ -524,7 +524,10 @@ class TestCorrelation(unittest.TestCase):
 
         corr.backend = SimpleNamespace(
             name="cupy",
-            module=SimpleNamespace(ndarray=FakeGPUArray),
+            module=SimpleNamespace(
+                ndarray=FakeGPUArray,
+                real=lambda x: FakeGPUArray(np.real(x._values if isinstance(x, FakeGPUArray) else x)),
+            ),
             device_id=0,
             to_device=fake_to_device,
             to_numpy=lambda values: values._values if isinstance(values, FakeGPUArray) else np.asarray(values),

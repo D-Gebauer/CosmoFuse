@@ -1,3 +1,23 @@
+"""
+Integrated three-point correlation function (i3PCF) helpers.
+
+Implements the eight i3PCF estimators (zeta functions) following
+Halder et al. notation.  Each zeta is the covariance between a
+"central" aperture quantity (M_ap or M_g) measured at the centre of
+a sky patch and an "annular" two-point correlation (ξ+, ξ-, ξ_g, or
+γ_t) measured on annuli around that centre:
+
+    ζ(θ) = ⟨ central · annular_2PCF(θ) ⟩ - ⟨central⟩·⟨annular_2PCF(θ)⟩
+
+The eight estimators are:
+    ζ_g+, ζ_g-  — galaxy density centre × cosmic shear annulus
+    ζ_a+, ζ_a-  — aperture mass centre × cosmic shear annulus
+    ζ_gg        — galaxy density centre × galaxy clustering annulus
+    ζ_ag        — aperture mass centre × galaxy clustering annulus
+    ζ_gt        — galaxy density centre × galaxy-galaxy lensing annulus
+    ζ_at        — aperture mass centre × galaxy-galaxy lensing annulus
+"""
+
 import itertools
 from typing import Tuple, Dict, Optional
 
@@ -5,13 +25,20 @@ import numpy as np
 
 
 def Q_T(theta: float, theta_Q: float = 90) -> float:
-    """The compensated filter used for aperture mass.
+    """Compensated filter for aperture mass M_ap (Schneider et al. 1998).
+
+    Q_T(θ) = θ² / (4π θ_Q⁴) · exp(-θ² / (2θ_Q²))
+
+    This filter has zero integral (compensated), so M_ap is insensitive
+    to the mass-sheet degeneracy.  θ_Q sets the characteristic smoothing
+    scale of the aperture.
 
     Args:
-        theta (float): Great Circle distance to center of filter.
+        theta: Angular distance to the aperture centre (radians).
+        theta_Q: Aperture filter scale (arcminutes, default 90').
 
     Returns:
-        (float): Value of compensated filter.
+        Filter value Q_T(θ).
     """
 
     theta_Q = np.radians(theta_Q / 60)
@@ -84,10 +111,21 @@ def _zeta_from_fields(
     central_field: np.ndarray,
     annulus_field: np.ndarray,
 ) -> np.ndarray:
-    """Compute i3PCF covariance between a central field and annular 2PCF field."""
+    """Compute i3PCF: covariance between a central aperture field and an
+    annular 2PCF field.
+
+    The i3PCF for a triplet of tomographic bins (z_center, z2, z3) is:
+
+        ζ(θ) = ⟨ C_{z_center} · A_{z2,z3}(θ) ⟩_patches
+             - ⟨ C_{z_center} ⟩ · ⟨ A_{z2,z3}(θ) ⟩
+
+    where C is the central field (M_ap or M_g) and A is the annular
+    2PCF (ξ+, ξ-, ξ_g) evaluated in angular bins.
+    """
     central, annulus = _validate_and_cast_fields(central_field, annulus_field)
     nmaps, nzbins, _ = central.shape
     nbins = annulus.shape[3]
+    # All unique triplets of tomo bins (z_center, z2, z3) with z2 ≤ z3
     zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
 
     out = np.zeros(
@@ -113,7 +151,12 @@ def _zeta_from_cross_fields(
     central_field: np.ndarray,
     annulus_field: np.ndarray,
 ) -> np.ndarray:
-    """Compute i3PCF covariance for central field vs cross-correlation annulus field.
+    """Compute i3PCF covariance for cross-correlation annulus fields.
+
+    Used for ζ_gt and ζ_at where the annular 2PCF (galaxy-galaxy
+    lensing γ_t) has distinct lens and source tomographic bins,
+    so the number of annulus combinations may differ from the
+    standard upper-triangular count.
 
     Supports any number of annulus tomographic combinations:
     - If annulus combinations match upper-triangular size for ``nzbins``, preserves
@@ -181,42 +224,71 @@ def _zeta_from_cross_fields(
 
 
 def zeta_g_plus(M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
-    """g at center, xi+ at annulus."""
+    """i3PCF: galaxy density M_g at centre × cosmic shear ξ+ on annulus.
+
+    Correlates the smoothed galaxy overdensity with the parity-even
+    shear-shear correlation, probing the galaxy-matter-matter bispectrum.
+    """
     return _zeta_from_fields(M_g, xi_p)
 
 
 def zeta_g_minus(M_g: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
-    """g at center, xi- at annulus."""
+    """i3PCF: galaxy density M_g at centre × cosmic shear ξ- on annulus.
+
+    Like ζ_g+ but using the parity-odd shear correlation ξ-; sensitive
+    to B-mode contamination.
+    """
     return _zeta_from_fields(M_g, xi_m)
 
 
 def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
-    """a at center, xi+ at annulus."""
+    """i3PCF: aperture mass M_ap at centre × cosmic shear ξ+ on annulus.
+
+    Correlates the aperture mass (a pure E-mode measure of projected
+    mass) with the shear-shear correlation ξ+.
+    """
     return _zeta_from_fields(M_a, xi_p)
 
 
 def zeta_a_minus(M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
-    """a at center, xi- at annulus."""
+    """i3PCF: aperture mass M_ap at centre × cosmic shear ξ- on annulus."""
     return _zeta_from_fields(M_a, xi_m)
 
 
 def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
-    """g at center, galaxy auto-correlation at annulus."""
+    """i3PCF: galaxy density M_g at centre × galaxy clustering ξ_g on annulus.
+
+    Probes the galaxy-galaxy-galaxy three-point function — the excess
+    probability of finding three galaxies in a specific triangular
+    configuration.
+    """
     return _zeta_from_fields(M_g, xi_g)
 
 
 def zeta_a_g(M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
-    """a at center, galaxy auto-correlation at annulus."""
+    """i3PCF: aperture mass M_ap at centre × galaxy clustering ξ_g on annulus.
+
+    Cross-correlates the projected mass (via lensing) with galaxy
+    clustering, probing the matter-galaxy-galaxy bispectrum.
+    """
     return _zeta_from_fields(M_a, xi_g)
 
 
 def zeta_g_t(M_g: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
-    """g at center, tangential shear gamma_t at annulus."""
+    """i3PCF: galaxy density M_g at centre × tangential shear γ_t on annulus.
+
+    Uses the galaxy-galaxy lensing signal as the annular field; probes
+    the galaxy-galaxy-matter bispectrum.
+    """
     return _zeta_from_cross_fields(M_g, xi_t)
 
 
 def zeta_a_t(M_a: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
-    """a at center, tangential shear gamma_t at annulus."""
+    """i3PCF: aperture mass M_ap at centre × tangential shear γ_t on annulus.
+
+    Correlates lensing mass with galaxy-galaxy lensing; probes the
+    matter-galaxy-matter bispectrum.
+    """
     return _zeta_from_cross_fields(M_a, xi_t)
 
 

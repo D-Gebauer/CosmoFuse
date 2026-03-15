@@ -1,3 +1,18 @@
+"""
+Pair geometry and aperture filter calculations.
+
+Handles the spatial geometry needed for 2-point and aperture statistics:
+
+- **2PCF pair geometry**: For each HEALPix sky patch, finds all pixel pairs
+  within the configured angular separation bins and computes the rotation
+  factors e^{2iφ} needed to rotate the spin-2 shear field into the pair frame.
+
+- **Aperture geometry**: For the aperture mass M_ap, computes for each pixel
+  within a patch the angular distance θ to the patch centre, the compensated
+  filter Q(θ), and the cos(2φ)/sin(2φ) factors needed to project the shear
+  into tangential and cross components.
+"""
+
 from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING
 
 import healpy as hp
@@ -122,6 +137,18 @@ class PairGeometry:
         Q_patch_center_dec: float,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute the aperture geometry for pixels relative to a patch centre.
+
+        For each pixel, calculates:
+        - ϑ: angular distance to the patch centre (great-circle)
+        - φ: position angle of the pixel relative to the centre
+        - cos(2φ), sin(2φ): needed to project shear into tangential component
+          γ_t = -γ₁·cos(2φ) - γ₂·sin(2φ)
+        - Q(ϑ): the compensated aperture filter value
+
+        Returns (cos_2phi, sin_2phi, Q).
+        """
+        # Great-circle angular distance ϑ via spherical law of cosines
         cos_vartheta = np.cos(pixels_RA_Q_patch - Q_patch_center_RA) * np.cos(
             Q_patch_center_dec
         ) * np.cos(pixels_dec_Q_patch) + np.sin(Q_patch_center_dec) * np.sin(
@@ -129,6 +156,8 @@ class PairGeometry:
         )
         vartheta = np.arccos(cos_vartheta)
         sin_vartheta = np.sqrt(1 - cos_vartheta**2)
+        # Position angle φ of each pixel relative to patch centre
+        # (components from the spherical bearing formula)
         cos_phi = (
             np.sin(pixels_RA_Q_patch - Q_patch_center_RA)
             * np.cos(pixels_dec_Q_patch)
@@ -140,9 +169,11 @@ class PairGeometry:
             * np.cos(Q_patch_center_dec)
             * np.cos(pixels_RA_Q_patch - Q_patch_center_RA)
         ) / sin_vartheta
+        # Double-angle identities for the spin-2 shear projection
         cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
         sin_2phi = 2 * sin_phi * cos_phi
 
+        # Evaluate the compensated aperture filter Q(ϑ)
         filter_fn = PairGeometry.resolve_aperture_filter(aperture_filter)
         Q = PairGeometry.evaluate_aperture_filter(owner, filter_fn, vartheta)
 

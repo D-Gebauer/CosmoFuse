@@ -48,6 +48,34 @@ class TestBackend(unittest.TestCase):
     def test_get_memory_pool_numpy(self):
         self.assertIsNone(self.numpy_backend.get_memory_pool())
 
+    def test_to_device_with_stream_none_numpy(self):
+        arr = np.array([1, 2, 3])
+        dev_arr = self.numpy_backend.to_device(arr, stream=None)
+        np.testing.assert_array_equal(arr, dev_arr)
+
+    def test_to_numpy_with_stream_none_numpy(self):
+        arr = np.array([1, 2, 3])
+        np_arr = self.numpy_backend.to_numpy(arr, stream=None)
+        np.testing.assert_array_equal(arr, np_arr)
+
+    def test_create_stream_numpy_returns_none(self):
+        self.assertIsNone(self.numpy_backend.create_stream())
+
+    def test_synchronize_stream_numpy_noop(self):
+        self.numpy_backend.synchronize_stream()
+        self.numpy_backend.synchronize_stream(stream=None)
+
+    def test_use_stream_numpy_returns_context_manager(self):
+        ctx = self.numpy_backend.use_stream(None)
+        with ctx:
+            pass
+
+    def test_alloc_pinned_numpy_returns_ndarray(self):
+        arr = self.numpy_backend.alloc_pinned((3, 4), np.float64)
+        self.assertIsInstance(arr, np.ndarray)
+        self.assertEqual(arr.shape, (3, 4))
+        self.assertEqual(arr.dtype, np.float64)
+
     def test_to_device_unknown_backend(self):
         backend = Backend("other", np)
         arr = np.array([1, 2, 3])
@@ -797,6 +825,7 @@ class TestBackend(unittest.TestCase):
     def test_cupy_3x2pt_tomo_fused_kernel_missing_rawkernel_returns_false(self):
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
         kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
@@ -839,6 +868,7 @@ class TestBackend(unittest.TestCase):
     def test_cupy_3x2pt_tomo_fused_kernel_compile_failure_returns_false(self):
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -892,6 +922,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -946,6 +977,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
             complex128 = np.complex128
 
@@ -1004,6 +1036,7 @@ class TestBackend(unittest.TestCase):
                     (),
                     {
                         "float32": np.float32,
+                        "int32": np.int32,
                         "RawKernel": staticmethod(
                             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
                         ),
@@ -1050,6 +1083,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
 
             @staticmethod
             def RawKernel(source, kernel_name, options=None):
@@ -1084,7 +1118,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(compile_calls["count"], 1)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_dd<float, 2>",
+            "gpu_fused_tomo_reduce_dd<float, 2, long long>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
 
@@ -1117,6 +1151,7 @@ class TestBackend(unittest.TestCase):
                     (),
                     {
                         "float32": np.float32,
+                        "int32": np.int32,
                         "complex64": np.complex64,
                         "RawKernel": staticmethod(
                             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
@@ -1155,6 +1190,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -1181,7 +1217,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(len(compiled_sources), 1)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2>",
+            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
 
@@ -1194,6 +1230,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -1227,6 +1264,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -1279,6 +1317,7 @@ class TestBackend(unittest.TestCase):
                     (),
                     {
                         "float32": np.float32,
+                        "int32": np.int32,
                         "complex64": np.complex64,
                         "RawKernel": staticmethod(
                             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
@@ -1316,6 +1355,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -1372,6 +1412,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
             # complex128 needs to be present for checks, though not used in fake
             complex128 = np.complex128
@@ -1419,6 +1460,7 @@ class TestBackend(unittest.TestCase):
 
         class FakeModule:
             float32 = np.float32
+            int32 = np.int32
             complex64 = np.complex64
 
             @staticmethod
@@ -1488,11 +1530,11 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(len(compiled_sources), 2)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2>",
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, long long>",
         )
         self.assertEqual(
             compiled_sources[1][1],
-            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3>",
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3, long long>",
         )
         for _source, _kernel_name, options in compiled_sources:
             self.assertEqual(options, ("--use_fast_math",))

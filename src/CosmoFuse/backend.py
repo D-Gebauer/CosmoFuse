@@ -1,4 +1,18 @@
+"""
+Backend abstraction layer for CPU (NumPy/Numba) and GPU (CuPy/CUDA) execution.
+
+All correlation measurement kernels exist in two forms:
+  - **CPU**: Numba @njit functions with parallel=True for multi-core execution
+  - **GPU**: CuPy ElementwiseKernels for simple per-pair operations, and
+    compiled CUDA RawKernels (.cu files in cuda/) for fused/vectorised
+    tomographic operations
+
+The Backend class holds references to the active kernel set and provides
+to_device()/to_numpy() for transparent data movement between host and device.
+"""
+
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 import warnings
 from typing import Any, Optional, Union
@@ -65,6 +79,11 @@ def _compile_raw_cuda_kernel(module: Any, source: str, name_expression: str) -> 
     return raw_kernel_ctor(source, name_expression, options=_CUPY_FASTMATH_OPTIONS)
 
 
+# ── Aperture statistics kernels ──────────────────────────────────────────
+# Compute the aperture-filtered field for each sky patch:
+#   M = A_patch · Σ(w · field · Q(θ)) / Σ(w)
+# where Q(θ) is the compensated filter function.
+
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_aperture_density_kernel(
     Q_inds: np.ndarray,
@@ -75,6 +94,8 @@ def _cpu_aperture_density_kernel(
     Q_patch_area: np.ndarray,
     out_aperture: np.ndarray,
 ) -> None:
+    """Galaxy mean density M_g within an aperture: weighted δ_g convolved
+    with the compensated filter Q(θ)."""
     n_patches = Q_offsets.shape[0] - 1
     zero = map_values[0] * 0.0
 
@@ -104,6 +125,11 @@ def _cpu_aperture_shear_kernel(
     Q_patch_area: np.ndarray,
     out_aperture: np.ndarray,
 ) -> None:
+    """Aperture mass M_ap: tangential shear γ_t convolved with Q(θ).
+
+    γ_t = -γ₁·cos(2φ) - γ₂·sin(2φ) is the tangential shear component
+    relative to the patch centre.
+    """
     n_patches = Q_offsets.shape[0] - 1
     zero = g1[0] * 0.0
 
@@ -115,13 +141,17 @@ def _cpu_aperture_shear_kernel(
         for i in range(start, stop):
             pix_idx = Q_inds[i]
             weight = weights[pix_idx]
+            # Tangential shear projection
             gt = -g1[pix_idx] * Q_cos[i] - g2[pix_idx] * Q_sin[i]
             sum_w += weight
             sum_wgt_q += weight * gt * Q_val[i]
         out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wgt_q / sum_w
 
 
+# ── CuPy ElementwiseKernel builders (GPU per-element operations) ──────────
+
 def _build_cupy_aperture_density_kernel(module: Any) -> Any:
+    """GPU kernel: per-pixel contribution to galaxy mean density M_g."""
     return module.ElementwiseKernel(
         "raw I Q_inds, raw T Q_val, raw T map_values, raw T weights",
         "T out_num, T out_den",
@@ -137,6 +167,7 @@ def _build_cupy_aperture_density_kernel(module: Any) -> Any:
 
 
 def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
+    """GPU kernel: per-pixel contribution to aperture mass M_ap via γ_t·Q(θ)."""
     return module.ElementwiseKernel(
         "raw I Q_inds, raw T Q_cos, raw T Q_sin, raw T Q_val,"
         " raw T g1, raw T g2, raw T weights",
@@ -153,6 +184,8 @@ def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
     )
 
 
+# ── Single-pair 2PCF kernels ─────────────────────────────────────────────
+
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_corr_kernel(
     density_a: np.ndarray,
@@ -164,6 +197,10 @@ def _cpu_density_density_corr_kernel(
     offsets: np.ndarray,
     out_w: np.ndarray,
 ) -> None:
+    """Galaxy clustering ξ_g numerator for a single tomo-bin pair.
+
+    Sums w_a·w_b·δ_a·δ_b over all pixel pairs in each angular bin.
+    """
     nbins = offsets.shape[0] - 1
     for b in prange(nbins):
         sum_w = 0.0
@@ -191,6 +228,11 @@ def _cpu_density_shear_corr_kernel(
     offsets: np.ndarray,
     out_gt: np.ndarray,
 ) -> None:
+    """Galaxy-galaxy lensing ξ_t numerator for a single tomo-bin pair.
+
+    Computes γ_t = -γ₁·cos(2φ) + γ₂·sin(2φ) and sums
+    w_lens·w_source·δ_lens·γ_t over all pairs in each angular bin.
+    """
     nbins = offsets.shape[0] - 1
     for b in prange(nbins):
         sum_gt = 0.0
@@ -201,11 +243,16 @@ def _cpu_density_shear_corr_kernel(
             i = ind_i[idx]
             j = ind_j[idx]
             rot = exp_j[idx]
+            # Tangential shear of source galaxy j around lens galaxy i
             gamma_t = -g1_source[j] * rot.real + g2_source[j] * rot.imag
             sum_gt += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
 
         out_gt[b] = sum_gt
 
+
+# ── Vectorised tomographic CPU kernels ────────────────────────────────────
+# Process all tomographic bin combinations in a single pass over the
+# pair list, avoiding redundant memory traversals.
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_tomo_vectorized_kernel(
@@ -218,6 +265,11 @@ def _cpu_density_density_tomo_vectorized_kernel(
     comb_j: np.ndarray,
     out_num: np.ndarray,
 ) -> None:
+    """Vectorised galaxy clustering ξ_g for all tomo-bin combinations.
+
+    For cross-bin pairs (i≠j), averages the A→B and B→A orientations
+    to symmetrise the estimator.
+    """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
     half = 0.5
@@ -235,6 +287,7 @@ def _cpu_density_density_tomo_vectorized_kernel(
                 pix_i = int(ind_i[idx])
                 pix_j = int(ind_j[idx])
 
+                # A→B orientation: tomo bin i at pixel_i, tomo bin j at pixel_j
                 ab = (
                     weights[pix_i, i]
                     * weights[pix_j, j]
@@ -245,6 +298,7 @@ def _cpu_density_density_tomo_vectorized_kernel(
                 if i == j:
                     sum_w += ab
                 else:
+                    # B→A orientation: swap tomo bins to symmetrise
                     ba = (
                         weights[pix_i, j]
                         * weights[pix_j, i]
@@ -271,6 +325,12 @@ def _cpu_density_shear_tomo_vectorized_kernel(
     comb_j: np.ndarray,
     out_num: np.ndarray,
 ) -> None:
+    """Vectorised galaxy-galaxy lensing ξ_t for all lens×source tomo
+    combinations.
+
+    Each pair contributes in both orientations: pixel i as lens with
+    pixel j as source (A→B), and vice versa (B→A).
+    """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
 
@@ -286,6 +346,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
             for idx in range(start, stop):
                 pix_i = int(ind_i[idx])
                 pix_j = int(ind_j[idx])
+                # A→B: pixel i = lens, pixel j = source
                 exp_j = rot_j[idx]
                 gamma_t_ij = (
                     -shear_map[pix_j, source_bin, 0] * exp_j.real
@@ -298,6 +359,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
                     * gamma_t_ij
                 )
 
+                # B→A: pixel j = lens, pixel i = source
                 exp_i = rot_i[idx]
                 gamma_t_ji = (
                     -shear_map[pix_i, source_bin, 0] * exp_i.real
@@ -314,6 +376,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
 
 
 def _build_cupy_density_density_corr_kernel(module: Any) -> Any:
+    """GPU kernel: per-pair ξ_g contribution (w_a·w_b·δ_a·δ_b)."""
     return module.ElementwiseKernel(
         "raw T density_a, raw T density_b, raw T w_a, raw T w_b,"
         " raw I ind_i, raw I ind_j",
@@ -329,6 +392,7 @@ def _build_cupy_density_density_corr_kernel(module: Any) -> Any:
 
 
 def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
+    """GPU kernel: per-pair ξ_t contribution (w_lens·w_source·δ_lens·γ_t)."""
     return module.ElementwiseKernel(
         "raw T density_lens, raw T g1_source, raw T g2_source,"
         " raw T w_lens, raw T w_source, raw I ind_i, raw I ind_j, raw C exp_j",
@@ -345,16 +409,21 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
     )
 
 
-def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, int], Any] = {}
+# ── CuPy RawKernel builders (GPU fused kernels from .cu files) ────────────
+# These builders compile the CUDA source templates with specific type
+# parameters and cache the compiled kernels for reuse.
 
-    def _get_or_build_raw_kernel(map_c_type: str, nzbins: int) -> Optional[Any]:
-        key = (map_c_type, nzbins)
+def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
+    """Builder for GPU tomographic galaxy clustering ξ_g kernel."""
+    kernel_cache: dict[tuple[str, int, str], Any] = {}
+
+    def _get_or_build_raw_kernel(map_c_type: str, nzbins: int, index_c_type: str) -> Optional[Any]:
+        key = (map_c_type, nzbins, index_c_type)
         cached = kernel_cache.get(key)
         if cached is not None:
             return cached
 
-        name_expression = f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}>"
+        name_expression = f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}, {index_c_type}>"
         source = _prepare_cuda_source("density_density_tomo_vectorized.cu")
 
         try:
@@ -387,7 +456,8 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
             return False
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
-        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins)
+        index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins, index_c_type)
         if raw_kernel is None:
             return False
 
@@ -419,7 +489,8 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
 
 
 def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str, int, int], Any] = {}
+    """Builder for GPU tomographic galaxy-galaxy lensing ξ_t kernel."""
+    kernel_cache: dict[tuple[str, str, int, int, str], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
@@ -427,15 +498,16 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         suffix: str,
         nlens_bins: int,
         nsource_bins: int,
+        index_c_type: str,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nlens_bins, nsource_bins)
+        key = (map_c_type, suffix, nlens_bins, nsource_bins, index_c_type)
         cached = kernel_cache.get(key)
         if cached is not None:
             return cached
 
         name_expression = (
             f"gpu_fused_tomo_reduce_ds<{map_c_type}, {complex_c_type}, "
-            f"{nlens_bins}, {nsource_bins}>"
+            f"{nlens_bins}, {nsource_bins}, {index_c_type}>"
         )
         source = _prepare_cuda_source("density_shear_tomo_vectorized.cu")
 
@@ -482,12 +554,14 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             suffix = "c128"
 
         map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
+        index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
             suffix,
             nlens_bins,
             nsource_bins,
+            index_c_type,
         )
         if raw_kernel is None:
             return False
@@ -523,6 +597,12 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
     return _cupy_density_shear_tomo_vectorized_kernel
 
 
+# ── Shear-shear 2PCF kernels ─────────────────────────────────────────────
+# Compute ξ+(θ) and ξ-(θ) from the complex shear γ = γ₁ + iγ₂.
+# The shear is rotated into the pair frame via γ' = γ · e^{2iφ}, then:
+#   ξ+ = Re[γ'_b · conj(γ'_a)]   (sensitive to E+B mode power)
+#   ξ- = Re[γ'_b · γ'_a]          (sensitive to E-B mode power)
+
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_cross_corr_kernel(
     g1a: np.ndarray,
@@ -541,6 +621,12 @@ def _cpu_xipm_cross_corr_kernel(
     out_ba_p: np.ndarray,
     out_ba_m: np.ndarray,
 ) -> None:
+    """Cross-correlation ξ+/ξ- between two different shear catalogues (a, b).
+
+    Computes both A→B and B→A orientations for asymmetric cross-correlations.
+    Real/imaginary parts are accumulated separately to stay compatible with
+    Numba's @njit (which has limited complex arithmetic support).
+    """
     nbins = offsets.shape[0] - 1
     zero = wa[0] * 0.0
     for b in prange(nbins):
@@ -614,6 +700,10 @@ def _cpu_xipm_auto_corr_kernel(
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
+    """Auto-correlation ξ+/ξ- within a single tomo-bin pair.
+
+    Only one orientation is needed (the estimator is symmetric).
+    """
     nbins = offsets.shape[0] - 1
     zero = w1[0] * 0.0
     for b in prange(nbins):
@@ -661,6 +751,12 @@ def _cpu_vectorized_tomo_kernel(
     out_p: np.ndarray,
     out_m: np.ndarray,
 ) -> None:
+    """Vectorised cosmic shear ξ+/ξ- for all tomo-bin combinations.
+
+    For each pair, rotates the shear into the pair frame and computes
+    both ξ+ = Re[γ'_b·conj(γ'_a)] and ξ- = Re[γ'_b·γ'_a].
+    Cross-bin pairs (i≠j) contribute in both A→B and B→A orientations.
+    """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
 
@@ -717,21 +813,23 @@ def _cpu_vectorized_tomo_kernel(
 
 
 def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str, int], Any] = {}
+    """Builder for GPU tomographic cosmic shear ξ+/ξ- kernel."""
+    kernel_cache: dict[tuple[str, str, int, str], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
         suffix: str,
         nzbins: int,
+        index_c_type: str,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nzbins)
+        key = (map_c_type, suffix, nzbins, index_c_type)
         cached = kernel_cache.get(key)
         if cached is not None:
             return cached
 
         name_expression = (
-            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}>"
+            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}, {index_c_type}>"
         )
         source = _prepare_cuda_source("tomo_vectorized_xipm.cu")
 
@@ -773,11 +871,13 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             suffix = "c128"
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
+        index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
             suffix,
             nzbins,
+            index_c_type,
         )
         if raw_kernel is None:
             return False
@@ -810,6 +910,12 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
 
     return _cupy_tomo_vectorized_kernel
 
+
+# ── Fused 3×2pt CPU kernel ────────────────────────────────────────────────
+# CPU equivalent of the fused CUDA kernel in tomo_fused_3x2pt.cu.
+# Computes all six 3×2pt outputs (M_ap, M_g, ξ+, ξ-, ξ_g, ξ_t) in
+# separate prange loops — each loop parallelises over tomo combinations
+# or patch indices.
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_3x2pt_tomo_fused_kernel(
@@ -851,6 +957,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
     n_density = density_map.shape[1]
     nbins_total = pair_offsets.shape[0] - 1
 
+    # --- Aperture mass M_ap: γ_t convolved with Q(θ) per patch ---
     for tomo_idx in prange(n_shear):
         for patch_idx in range(n_patches):
             start = q_offsets[patch_idx]
@@ -867,6 +974,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
             out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
             out_ma_den[tomo_idx, patch_idx] = sum_w
 
+    # --- Galaxy mean density M_g: δ_g convolved with Q(θ) per patch ---
     for tomo_idx in prange(n_density):
         for patch_idx in range(n_patches):
             start = q_offsets[patch_idx]
@@ -882,6 +990,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
             out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
             out_mg_den[tomo_idx, patch_idx] = sum_w
 
+    # --- Cosmic shear ξ+/ξ- ---
     n_ss_comb = ss_comb_i.shape[0]
     for comb_ori in prange(2 * n_ss_comb):
         comb_idx = comb_ori >> 1
@@ -930,6 +1039,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
             out_xim_num[comb_ori, bin_flat] = sum_m
             out_xipm_den[comb_ori, bin_flat] = sum_w
 
+    # --- Galaxy clustering ξ_g ---
     n_dd_comb = dd_comb_i.shape[0]
     for comb_ori in prange(2 * n_dd_comb):
         comb_idx = comb_ori >> 1
@@ -961,6 +1071,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
             out_xig_num[comb_ori, bin_flat] = sum_num
             out_xig_den[comb_ori, bin_flat] = sum_den
 
+    # --- Galaxy-galaxy lensing ξ_t ---
     n_ds_comb = ds_comb_i.shape[0]
     for comb_idx in prange(n_ds_comb):
         lens_bin = ds_comb_i[comb_idx]
@@ -998,19 +1109,25 @@ def _cpu_3x2pt_tomo_fused_kernel(
 
 
 def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str], Any] = {}
+    kernel_cache: dict[tuple[str, str, str, int, int], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
         suffix: str,
+        index_c_type: str,
+        n_density_bins: int,
+        n_shear_bins: int,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix)
+        key = (map_c_type, suffix, index_c_type, n_density_bins, n_shear_bins)
         cached = kernel_cache.get(key)
         if cached is not None:
             return cached
 
-        name_expression = f"gpu_3x2pt_tomo_fused<{map_c_type}, {complex_c_type}>"
+        name_expression = (
+            f"gpu_3x2pt_tomo_fused<{map_c_type}, {complex_c_type}, "
+            f"{index_c_type}, {n_density_bins}, {n_shear_bins}>"
+        )
         source = _prepare_cuda_source("tomo_fused_3x2pt.cu")
 
         try:
@@ -1069,19 +1186,23 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
             complex_c_type = "cuDoubleComplex"
             suffix = "c128"
 
+        n_density_bins = int(density_map.shape[1])
+        n_shear_bins = int(shear_map.shape[1])
         map_c_type = "float" if density_map.dtype == module.float32 else "double"
+        index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
             suffix,
+            index_c_type,
+            n_density_bins,
+            n_shear_bins,
         )
         if raw_kernel is None:
             return False
 
         nbins_total = int(pair_offsets.shape[0] - 1)
         npatches = int(q_offsets.shape[0] - 1)
-        n_density_bins = int(density_map.shape[1])
-        n_shear_bins = int(shear_map.shape[1])
         npix = int(density_map.shape[0])
         n_ss_comb = int(ss_comb_i.shape[0])
         n_dd_comb = int(dd_comb_i.shape[0])
@@ -1106,8 +1227,6 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
                 rot_j,
                 pair_offsets,
                 np.int64(nbins_total),
-                np.int32(n_density_bins),
-                np.int32(n_shear_bins),
                 np.int32(npatches),
                 np.int32(npix),
                 q_inds,
@@ -1144,6 +1263,11 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
 
 
 def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
+    """GPU kernel: per-pair ξ+/ξ- for cross-correlation of two shear catalogues.
+
+    Rotates shears into pair frame and computes g_b'·conj(g_a') (ξ+)
+    and g_b'·g_a' (ξ-) for both A→B and B→A orientations.
+    """
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
@@ -1176,6 +1300,7 @@ def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
 
 
 def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
+    """GPU kernel: per-pair ξ+/ξ- auto-correlation (single shear catalogue)."""
     return module.ElementwiseKernel(
         "raw T g11, raw T g21, raw T g12, raw T g22, raw T w1, raw T w2,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
@@ -1243,20 +1368,36 @@ class Backend:
         self.uint32 = module.uint32
         self.int32 = module.int32
 
-    def to_device(self, array: Any) -> Any:
-        """Move a numpy array to the backend device."""
+    def to_device(self, array: Any, stream: Optional[Any] = None) -> Any:
+        """Move a numpy array to the backend device.
+
+        When *stream* is provided and the backend is CuPy, the transfer is
+        scheduled on that CUDA stream.  If *array* is backed by pinned
+        (page-locked) host memory the transfer is truly asynchronous —
+        the call returns before the copy completes.
+        """
         if self.name == 'numpy':
             return np.asarray(array)
         elif self.name == 'cupy':
             with self.module.cuda.Device(self.device_id):
+                if stream is not None:
+                    with stream:
+                        return self.module.asarray(array)
                 return self.module.asarray(array)
         return array
 
-    def to_numpy(self, array: Any) -> np.ndarray:
-        """Move an array from the backend device to numpy."""
+    def to_numpy(self, array: Any, stream: Optional[Any] = None) -> np.ndarray:
+        """Move an array from the backend device to numpy.
+
+        When *stream* is provided and the backend is CuPy, the transfer is
+        scheduled on that CUDA stream.
+        """
         if self.name == 'numpy':
             return np.asarray(array)
         elif self.name == 'cupy':
+            if stream is not None:
+                with stream:
+                    return self.module.asnumpy(array)
             return self.module.asnumpy(array)
         return np.asarray(array)
 
@@ -1264,6 +1405,62 @@ class Backend:
         if self.name == 'cupy':
             return self.module.get_default_memory_pool()
         return None
+
+    # ── CUDA stream management ──────────────────────────────────────────
+
+    def create_stream(self, non_blocking: bool = True) -> Optional[Any]:
+        """Create a CUDA stream for overlapping transfers and kernel execution.
+
+        Returns ``None`` on CPU backends.
+        """
+        if self.name != 'cupy':
+            return None
+        with self.module.cuda.Device(self.device_id):
+            return self.module.cuda.Stream(non_blocking=non_blocking)
+
+    def synchronize_stream(self, stream: Optional[Any] = None) -> None:
+        """Wait for all operations on *stream* to complete.
+
+        If *stream* is ``None``, synchronizes the current device.
+        No-op on CPU backends.
+        """
+        if self.name != 'cupy':
+            return
+        with self.module.cuda.Device(self.device_id):
+            if stream is not None:
+                stream.synchronize()
+            else:
+                self.module.cuda.runtime.deviceSynchronize()
+
+    def use_stream(self, stream: Optional[Any] = None) -> Any:
+        """Return a context manager that sets the active CUDA stream.
+
+        All CuPy operations (kernel launches, memory copies) executed
+        inside the context will be enqueued on *stream*.  On CPU backends
+        or when *stream* is ``None`` this returns a no-op context.
+        """
+        if self.name == 'cupy' and stream is not None:
+            return stream
+        return nullcontext()
+
+    # ── Pinned (page-locked) host memory ────────────────────────────────
+
+    def alloc_pinned(self, shape: Any, dtype: Any) -> np.ndarray:
+        """Allocate page-locked (pinned) host memory.
+
+        Returns a numpy array backed by pinned memory.  When this array
+        is passed to :meth:`to_device` with a CUDA *stream*, the host-to-
+        device copy can proceed asynchronously (DMA without CPU staging).
+
+        On CPU backends returns a regular numpy array.
+        """
+        if self.name != 'cupy':
+            return np.empty(shape, dtype=dtype)
+        dtype = np.dtype(dtype)
+        count = int(np.prod(shape))
+        nbytes = count * dtype.itemsize
+        mem = self.module.cuda.alloc_pinned_memory(nbytes)
+        return np.frombuffer(mem, dtype=dtype, count=count).reshape(shape)
 
 def get_backend(device: Union[str, int] = 'auto') -> "Backend":
     """

@@ -2160,8 +2160,8 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         captured_inds = []
         pair_index_signatures = {
-            (np.asarray(corr.pair_inds[0][0], dtype=np.int64).shape, np.dtype(np.int64).str),
-            (np.asarray(corr.pair_inds[0][1], dtype=np.int64).shape, np.dtype(np.int64).str),
+            (np.asarray(corr.pair_inds[0][0], dtype=corr.index_dtype).shape, corr.index_dtype.str),
+            (np.asarray(corr.pair_inds[0][1], dtype=corr.index_dtype).shape, corr.index_dtype.str),
         }
         pair_index_upload_count = 0
 
@@ -2210,16 +2210,17 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         self.assertEqual(len(captured_inds), 2)
         self.assertEqual(pair_index_upload_count, pair_index_uploads_after_prepare)
-        self.assertEqual(captured_inds[0][0].dtype, np.int64)
-        self.assertEqual(captured_inds[0][1].dtype, np.int64)
-        self.assertEqual(captured_inds[1][0].dtype, np.int64)
-        self.assertEqual(captured_inds[1][1].dtype, np.int64)
+        self.assertEqual(captured_inds[0][0].dtype, corr.index_dtype)
+        self.assertEqual(captured_inds[0][1].dtype, corr.index_dtype)
+        self.assertEqual(captured_inds[1][0].dtype, corr.index_dtype)
+        self.assertEqual(captured_inds[1][1].dtype, corr.index_dtype)
 
     def test_compute_3x2pt_tomo_fused_reuses_cached_input_staging_buffers_no_transpose(self):
         corr = self._make_small_cpu_corr()
         corr.calculate_pairs_M_a()
 
         class _NoTransposeModule:
+            int32 = np.int32
             int64 = np.int64
             float64 = np.float64
 
@@ -2268,6 +2269,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_maps=density_maps,
                 shear_weights=shear_w,
                 density_weights=density_w,
+                return_device=False,
             )
             density_buf_first = corr.compute_context.fused_density_soa
             shear_buf_first = corr.compute_context.fused_shear_soa
@@ -2277,6 +2279,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_maps=density_maps,
                 shear_weights=shear_w,
                 density_weights=density_w,
+                return_device=False,
             )
         finally:
             corr.backend.name = original_name
@@ -2880,10 +2883,10 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
             low.load_pairs(tmp.name)
 
-            self.assertEqual(low.pair_inds[0].dtype, np.int64)
-            self.assertEqual(low.bins[0].dtype, np.int64)
+            self.assertEqual(low.pair_inds[0].dtype, low.index_dtype)
+            self.assertEqual(low.bins[0].dtype, low.index_dtype)
             self.assertEqual(low.pair_exp2phi[0].dtype, np.complex64)
-            self.assertEqual(low.Q_inds[0].dtype, np.int64)
+            self.assertEqual(low.Q_inds[0].dtype, low.index_dtype)
             self.assertEqual(low.Q_cos[0].dtype, np.float32)
             self.assertEqual(low.Q_sin[0].dtype, np.float32)
             self.assertEqual(low.Q_val[0].dtype, np.float32)
@@ -3378,10 +3381,10 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.bins = [np.array([3, 3], dtype=np.uint64)]
 
         corr.prepare()
-        self.assertEqual(corr.inds_dev.dtype, np.int64)
+        self.assertEqual(corr.inds_dev.dtype, corr.index_dtype)
         self.assertEqual(corr.exp2phi_dev.dtype, np.complex64)
-        self.assertEqual(corr.bins_dev.dtype, np.int64)
-        self.assertEqual(corr.tot_bins_dev.dtype, np.int64)
+        self.assertEqual(corr.bins_dev.dtype, corr.index_dtype)
+        self.assertEqual(corr.tot_bins_dev.dtype, corr.index_dtype)
 
         corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint64)]
         corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float32)]
