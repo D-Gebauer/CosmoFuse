@@ -1,33 +1,33 @@
 /*
- * tomo_fused_3x2pt.cu -- Fused 3×2pt tomographic correlation kernel.
+ * tomo_fused_3x2pt.cu -- Fused 3x2pt tomographic correlation kernel.
  *
- * Computes ALL six correlation outputs of a 3×2pt weak lensing analysis
+ * Computes ALL six correlation outputs of a 3x2pt weak lensing analysis
  * in a single kernel launch, maximising GPU occupancy and minimising
  * kernel launch overhead.  The six outputs are:
  *
  *   z=0  Aperture mass  M_ap  -- tangential shear convolved with a
- *        compensated filter Q(θ) around each sky patch centre.
+ *        compensated filter Q(theta) around each sky patch centre.
  *        Probes the projected mass within the aperture.
  *
- *   z=1  Galaxy mean density  M_g  -- galaxy overdensity δ_g convolved
- *        with the same compensated filter Q(θ).
+ *   z=1  Galaxy mean density  M_g  -- galaxy overdensity delta_g convolved
+ *        with the same compensated filter Q(theta).
  *        Probes the smoothed galaxy number density contrast.
  *
- *   z=2  Cosmic shear  ξ+/ξ-  -- shear-shear 2-point correlations.
- *        ξ+ is sensitive to the sum of E- and B-mode power,
- *        ξ- to their difference.
+ *   z=2  Cosmic shear  xi+/xi-  -- shear-shear 2-point correlations.
+ *        xi+ is sensitive to the sum of E- and B-mode power,
+ *        xi- to their difference.
  *
- *   z=3  Galaxy clustering  ξ_g  -- density-density 2-point correlation,
+ *   z=3  Galaxy clustering  xi_g  -- density-density 2-point correlation,
  *        measuring galaxy clustering strength vs angular separation.
  *
- *   z=4  Galaxy-galaxy lensing  ξ_t  -- density-shear cross-correlation,
+ *   z=4  Galaxy-galaxy lensing  xi_t  -- density-shear cross-correlation,
  *        measuring the tangential shear of source galaxies around
  *        foreground lens positions.
  *
  * Grid layout (3D):
  *   blockIdx.x = work item (patch index for z=0,1; angular bin for z=2,3,4)
  *   blockIdx.y = tomographic combination index
- *   blockIdx.z = correlation type selector (0–4, see above)
+ *   blockIdx.z = correlation type selector (0-4, see above)
  *   threadIdx.x = parallel worker within the pair/pixel loop
  */
 
@@ -38,24 +38,24 @@ __COMMON_CUDA_SOURCE__
 template<typename T, typename C, typename I, int N_DENSITY, int N_SHEAR>
 __global__ void gpu_3x2pt_tomo_fused(
     /* --- Input maps (SoA layout, all tomo bins concatenated) --- */
-    const T* density,        /* galaxy overdensity δ_g  [npix × N_DENSITY]      */
-    const T* shear,          /* complex shear (γ₁,γ₂)  [npix × N_SHEAR × 2]    */
-    const T* density_w,      /* density weights         [npix × N_DENSITY]      */
-    const T* shear_w,        /* shear weights           [npix × N_SHEAR]        */
+    const T* density,        /* galaxy overdensity delta_g  [npix x N_DENSITY]      */
+    const T* shear,          /* complex shear (gamma_1,gamma_2)  [npix x N_SHEAR x 2]    */
+    const T* density_w,      /* density weights         [npix x N_DENSITY]      */
+    const T* shear_w,        /* shear weights           [npix x N_SHEAR]        */
     /* --- Precomputed pair geometry --- */
     const I* ind_i,          /* pixel index of first pair member                     */
     const I* ind_j,          /* pixel index of second pair member                    */
-    const C* rot_i,          /* e^{2iφ_i} rotation factor for pixel i                */
-    const C* rot_j,          /* e^{2iφ_j} rotation factor for pixel j                */
+    const C* rot_i,          /* e^{2iphi_i} rotation factor for pixel i                */
+    const C* rot_j,          /* e^{2iphi_j} rotation factor for pixel j                */
     const long long* pair_offsets,  /* CSR offsets per angular bin                    */
     const long long nbins_total,
     const int npatches,
     const int npix,
     /* --- Aperture filter geometry (for M_ap and M_g) --- */
     const unsigned int* q_inds,   /* pixel indices within each patch's aperture  */
-    const T* q_cos,               /* cos(2φ) of pixel w.r.t. patch centre        */
-    const T* q_sin,               /* sin(2φ) of pixel w.r.t. patch centre        */
-    const T* q_val,               /* Q(θ): compensated filter value              */
+    const T* q_cos,               /* cos(2phi) of pixel w.r.t. patch centre        */
+    const T* q_sin,               /* sin(2phi) of pixel w.r.t. patch centre        */
+    const T* q_val,               /* Q(theta): compensated filter value              */
     const long long* q_offsets,   /* CSR offsets per patch                        */
     const T* q_patch_area,        /* solid angle of each patch (steradians)       */
     /* --- Tomographic bin combinations for each correlation type --- */
@@ -69,17 +69,17 @@ __global__ void gpu_3x2pt_tomo_fused(
     const int* ds_comb_j,    /* density-shear: source tomo bin              */
     const int n_ds_comb,
     /* --- Output buffers (numerators and denominators) --- */
-    T* out_ma_num,           /* aperture mass numerator   [n_shear × npatches]   */
+    T* out_ma_num,           /* aperture mass numerator   [n_shear x npatches]   */
     T* out_ma_den,           /* aperture mass denominator (sum of weights)        */
-    T* out_mg_num,           /* galaxy mean density numerator [n_density × npatches] */
+    T* out_mg_num,           /* galaxy mean density numerator [n_density x npatches] */
     T* out_mg_den,           /* galaxy mean density denominator                   */
-    T* out_xip_num,          /* ξ+ numerator                                     */
-    T* out_xim_num,          /* ξ- numerator                                     */
-    T* out_xipm_den,         /* ξ+/ξ- shared denominator (sum of weight products) */
-    T* out_xig_num,          /* ξ_g numerator (galaxy clustering)                 */
-    T* out_xig_den,          /* ξ_g denominator                                  */
-    T* out_xit_num,          /* ξ_t numerator (galaxy-galaxy lensing)             */
-    T* out_xit_den)          /* ξ_t denominator                                  */
+    T* out_xip_num,          /* xi+ numerator                                     */
+    T* out_xim_num,          /* xi- numerator                                     */
+    T* out_xipm_den,         /* xi+/xi- shared denominator (sum of weight products) */
+    T* out_xig_num,          /* xi_g numerator (galaxy clustering)                 */
+    T* out_xig_den,          /* xi_g denominator                                  */
+    T* out_xit_num,          /* xi_t numerator (galaxy-galaxy lensing)             */
+    T* out_xit_den)          /* xi_t denominator                                  */
 {
     const int lane = (int)threadIdx.x;
     const long long x = (long long)blockIdx.x;  /* patch or angular bin index */
@@ -89,9 +89,9 @@ __global__ void gpu_3x2pt_tomo_fused(
     /* ================================================================
      * z=0 : Aperture mass M_ap(patch, tomo_bin)
      *
-     * M_ap = A_patch · Σ_pix [ w · γ_t · Q(θ) ] / Σ_pix [ w ]
-     * where γ_t = -γ₁·cos(2φ) - γ₂·sin(2φ) is the tangential shear
-     * around the patch centre, and Q(θ) is the compensated aperture
+     * M_ap = A_patch * Sum_pix [ w * gamma_t * Q(theta) ] / Sum_pix [ w ]
+     * where gamma_t = -gamma_1*cos(2phi) - gamma_2*sin(2phi) is the tangential shear
+     * around the patch centre, and Q(theta) is the compensated aperture
      * filter.  The numerator and denominator are stored separately so
      * the caller can normalise after the kernel.
      * ================================================================ */
@@ -125,7 +125,7 @@ __global__ void gpu_3x2pt_tomo_fused(
     /* ================================================================
      * z=1 : Galaxy mean density M_g(patch, tomo_bin)
      *
-     * M_g = A_patch · Σ_pix [ w · δ_g · Q(θ) ] / Σ_pix [ w ]
+     * M_g = A_patch * Sum_pix [ w * delta_g * Q(theta) ] / Sum_pix [ w ]
      * Smoothed galaxy overdensity within the aperture, used as the
      * "central" field in i3PCF measurements.
      * ================================================================ */
@@ -152,18 +152,18 @@ __global__ void gpu_3x2pt_tomo_fused(
     }
 
     /* ================================================================
-     * z=2 : Cosmic shear ξ+(θ) and ξ-(θ)
+     * z=2 : Cosmic shear xi+(theta) and xi-(theta)
      *
-     * Rotates shears into the pair frame γ' = γ · e^{2iφ}, then:
-     *   ξ+ = Re[γ'_b · conj(γ'_a)]  (E+B mode power)
-     *   ξ- = Re[γ'_b · γ'_a]         (E-B mode power)
+     * Rotates shears into the pair frame gamma' = gamma * e^{2iphi}, then:
+     *   xi+ = Re[gamma'_b * conj(gamma'_a)]  (E+B mode power)
+     *   xi- = Re[gamma'_b * gamma'_a]         (E-B mode power)
      *
-     * Both orientations (A→B, B→A) are computed for cross-bin pairs.
+     * Both orientations (A->B, B->A) are computed for cross-bin pairs.
      * ================================================================ */
     if (z == 2) {
         if (x >= nbins_total || y >= (2 * n_ss_comb)) return;
         const int comb_idx = y >> 1;
-        const int ori = y & 1;   /* 0 = A→B, 1 = B→A */
+        const int ori = y & 1;   /* 0 = A->B, 1 = B->A */
         const int i = ss_comb_i[comb_idx];
         const int j = ss_comb_j[comb_idx];
         if (ori == 1 && i == j) return;
@@ -186,7 +186,7 @@ __global__ void gpu_3x2pt_tomo_fused(
             const C ex_a = rot_i[idx];
             const C ex_b = rot_j[idx];
 
-            /* Fetch γ = (γ₁, γ₂) for each pixel in their respective tomo bins */
+            /* Fetch gamma = (gamma_1, gamma_2) for each pixel in their respective tomo bins */
             const long long a_base = ((pix_a * (long long)N_SHEAR + (long long)ai) * 2LL);
             const long long b_base = ((pix_b * (long long)N_SHEAR + (long long)bj) * 2LL);
             const T ga1 = shear[a_base];
@@ -194,7 +194,7 @@ __global__ void gpu_3x2pt_tomo_fused(
             const T gb1 = shear[b_base];
             const T gb2 = shear[b_base + 1LL];
 
-            /* Rotate into pair frame: γ' = (γ₁ + iγ₂) · e^{2iφ}
+            /* Rotate into pair frame: gamma' = (gamma_1 + igamma_2) * e^{2iphi}
                Expanded as real/imag parts to avoid complex arithmetic */
             const T a_r = ga1 * ex_a.x - ga2 * ex_a.y;
             const T a_i = ga1 * ex_a.y + ga2 * ex_a.x;
@@ -205,8 +205,8 @@ __global__ void gpu_3x2pt_tomo_fused(
             const long long wb_idx = pix_b * (long long)N_SHEAR + (long long)bj;
             const T wv = shear_w[wa_idx] * shear_w[wb_idx];
             sum_w += wv;
-            sum_p += wv * (b_r * a_r + b_i * a_i);  /* ξ+ */
-            sum_m += wv * (b_r * a_r - b_i * a_i);  /* ξ- */
+            sum_p += wv * (b_r * a_r + b_i * a_i);  /* xi+ */
+            sum_m += wv * (b_r * a_r - b_i * a_i);  /* xi- */
         }
         block_reduce_sum_triple(sum_p, sum_m, sum_w, &sum_p, &sum_m, &sum_w);
         if (lane == 0) {
@@ -219,9 +219,9 @@ __global__ void gpu_3x2pt_tomo_fused(
     }
 
     /* ================================================================
-     * z=3 : Galaxy clustering ξ_g(θ)
+     * z=3 : Galaxy clustering xi_g(theta)
      *
-     * ξ_g = Σ w_a · w_b · δ_a · δ_b  /  Σ w_a · w_b
+     * xi_g = Sum w_a * w_b * delta_a * delta_b  /  Sum w_a * w_b
      * Measures the angular galaxy auto-correlation.
      * ================================================================ */
     if (z == 3) {
@@ -262,13 +262,13 @@ __global__ void gpu_3x2pt_tomo_fused(
     }
 
     /* ================================================================
-     * z=4 : Galaxy-galaxy lensing ξ_t(θ)
+     * z=4 : Galaxy-galaxy lensing xi_t(theta)
      *
-     * ξ_t = Σ w_lens · w_source · δ_lens · γ_t  /  Σ w_lens · w_source
-     * where γ_t = -γ₁·cos(2φ) + γ₂·sin(2φ) is the tangential shear
+     * xi_t = Sum w_lens * w_source * delta_lens * gamma_t  /  Sum w_lens * w_source
+     * where gamma_t = -gamma_1*cos(2phi) + gamma_2*sin(2phi) is the tangential shear
      * of the source around the lens position.
      *
-     * Both pair orientations (A→B and B→A) are accumulated to use
+     * Both pair orientations (A->B and B->A) are accumulated to use
      * all lens-source information from each pair.
      * ================================================================ */
     if (z == 4) {
@@ -283,7 +283,7 @@ __global__ void gpu_3x2pt_tomo_fused(
             const long long pix_a = (long long)ind_i[idx];
             const long long pix_b = (long long)ind_j[idx];
 
-            /* A→B: pixel a = lens, pixel b = source */
+            /* A->B: pixel a = lens, pixel b = source */
             const long long lens_ab = pix_a * (long long)N_DENSITY + (long long)lens_bin;
             const long long src_ab = pix_b * (long long)N_SHEAR + (long long)source_bin;
             const long long src_ab_base = src_ab * 2LL;
@@ -293,7 +293,7 @@ __global__ void gpu_3x2pt_tomo_fused(
             sum_num += w_ab * density[lens_ab] * gt_ab;
             sum_den += w_ab;
 
-            /* B→A: pixel b = lens, pixel a = source */
+            /* B->A: pixel b = lens, pixel a = source */
             const long long lens_ba = pix_b * (long long)N_DENSITY + (long long)lens_bin;
             const long long src_ba = pix_a * (long long)N_SHEAR + (long long)source_bin;
             const long long src_ba_base = src_ba * 2LL;

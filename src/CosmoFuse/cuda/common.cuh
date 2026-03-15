@@ -11,7 +11,7 @@
 /*
  * Parallel sum reduction within a single thread block.
  * Each thread contributes its local accumulator `val` (e.g. a partial
- * ξ+ numerator); the result in thread 0 is the total sum for the block.
+ * xi+ numerator); the result in thread 0 is the total sum for the block.
  */
 template<typename T>
 __device__ inline T block_reduce_sum(T val) {
@@ -32,7 +32,7 @@ __device__ inline T block_reduce_sum(T val) {
 /*
  * Simultaneous reduction of two values in one pass -- avoids a second
  * __syncthreads() barrier.  Used when a kernel accumulates two quantities
- * over the same pair loop, e.g. ξ+ and ξ- numerators, or a numerator
+ * over the same pair loop, e.g. xi+ and xi- numerators, or a numerator
  * and its weight denominator.
  */
 template<typename T>
@@ -58,8 +58,8 @@ __device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
 /*
  * Simultaneous reduction of three values in one pass -- avoids two extra
  * __syncthreads() barrier chains.  Used when a kernel accumulates three
- * independent quantities over the same pair loop, e.g. ξ+ numerator,
- * ξ- numerator, and the shared weight denominator.
+ * independent quantities over the same pair loop, e.g. xi+ numerator,
+ * xi- numerator, and the shared weight denominator.
  */
 template<typename T>
 __device__ inline void block_reduce_sum_triple(T val1, T val2, T val3,

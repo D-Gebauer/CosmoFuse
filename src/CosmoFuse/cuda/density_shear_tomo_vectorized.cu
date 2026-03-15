@@ -1,19 +1,19 @@
 /*
  * density_shear_tomo_vectorized.cu -- Tomographic galaxy-galaxy lensing
- *                                     correlation ξ_t(θ).
+ *                                     correlation xi_t(theta).
  *
- * Measures the mean tangential shear γ_t of background (source) galaxies
+ * Measures the mean tangential shear gamma_t of background (source) galaxies
  * around foreground (lens) galaxy positions, weighted by the lens
- * overdensity δ_g:
+ * overdensity delta_g:
  *
- *   ξ_t(θ) = ⟨δ_g,lens · γ_t,source⟩(θ)
+ *   xi_t(theta) = <delta_g,lens * gamma_t,source>(theta)
  *
- * The tangential shear γ_t is the projection of the source shear onto
+ * The tangential shear gamma_t is the projection of the source shear onto
  * the direction perpendicular to the line connecting the lens-source pair:
  *
- *   γ_t = -Re[γ · e^{-2iφ}] = -γ₁·cos(2φ) - γ₂·sin(2φ)
+ *   gamma_t = -Re[gamma * e^{-2iphi}] = -gamma_1*cos(2phi) - gamma_2*sin(2phi)
  *
- * where φ is the position angle of the pair.  This probes the
+ * where phi is the position angle of the pair.  This probes the
  * galaxy-matter cross-power spectrum.
  *
  * Each pair contributes in both orientations (A as lens, B as source
@@ -21,7 +21,7 @@
  *
  * Grid layout:
  *   blockIdx.x  = angular separation bin  (0 .. nbins_total-1)
- *   blockIdx.y  = lens×source tomographic bin combination
+ *   blockIdx.y  = lensxsource tomographic bin combination
  *   threadIdx.x = pair index within the bin (strided loop)
  */
 
@@ -37,18 +37,18 @@ __COMMON_CUDA_SOURCE__
  */
 template<typename T, typename C, int LENS_TOMO_BINS, int SOURCE_TOMO_BINS, typename I>
 __global__ void gpu_fused_tomo_reduce_ds(
-    const T* density,         /* lens galaxy overdensity δ_g             */
-    const T* shear,           /* source shear (γ₁, γ₂) interleaved      */
+    const T* density,         /* lens galaxy overdensity delta_g             */
+    const T* shear,           /* source shear (gamma_1, gamma_2) interleaved      */
     const T* lens_weights,    /* per-pixel lens weights                  */
     const T* source_weights,  /* per-pixel source weights                */
     const I* ind_i,           /* pixel index of first pair member        */
     const I* ind_j,           /* pixel index of second pair member       */
-    const C* rot_i,           /* rotation factor e^{2iφ} at pixel i      */
-    const C* rot_j,           /* rotation factor e^{2iφ} at pixel j      */
+    const C* rot_i,           /* rotation factor e^{2iphi} at pixel i      */
+    const C* rot_j,           /* rotation factor e^{2iphi} at pixel j      */
     const long long* bin_offsets,
     const int* comb_i,        /* lens tomo bin for each combination      */
     const int* comb_j,        /* source tomo bin for each combination    */
-    T* out_num,               /* output: weighted δ_g·γ_t numerators     */
+    T* out_num,               /* output: weighted delta_g*gamma_t numerators     */
     const int ncomb,
     const long long nbins_total,
     const long long npairs)
@@ -71,16 +71,16 @@ __global__ void gpu_fused_tomo_reduce_ds(
     for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
         const long long idx_a = (long long)ind_i[tid];
         const long long idx_b = (long long)ind_j[tid];
-        const C rot_ab = rot_j[tid];   /* rotation for A→B direction */
-        const C rot_ba = rot_i[tid];   /* rotation for B→A direction */
+        const C rot_ab = rot_j[tid];   /* rotation for A->B direction */
+        const C rot_ba = rot_i[tid];   /* rotation for B->A direction */
 
-        /* --- A→B: pixel a is lens, pixel b is source --- */
+        /* --- A->B: pixel a is lens, pixel b is source --- */
         const long long lens_idx_ab = idx_a * (long long)LENS_TOMO_BINS + lens_bin;
         const long long source_idx_ab = idx_b * (long long)SOURCE_TOMO_BINS + source_bin;
         const long long shear_base_ab = source_idx_ab * 2;
 
-        /* Tangential shear: γ_t = -γ₁·cos(2φ) + γ₂·sin(2φ)
-           using rot.x = cos(2φ), rot.y = sin(2φ) */
+        /* Tangential shear: gamma_t = -gamma_1*cos(2phi) + gamma_2*sin(2phi)
+           using rot.x = cos(2phi), rot.y = sin(2phi) */
         const T gamma_t_ab = (
             -shear[shear_base_ab] * rot_ab.x
             + shear[shear_base_ab + 1] * rot_ab.y
@@ -93,7 +93,7 @@ __global__ void gpu_fused_tomo_reduce_ds(
             * gamma_t_ab
         );
 
-        /* --- B→A: pixel b is lens, pixel a is source --- */
+        /* --- B->A: pixel b is lens, pixel a is source --- */
         const long long lens_idx_ba = idx_b * (long long)LENS_TOMO_BINS + lens_bin;
         const long long source_idx_ba = idx_a * (long long)SOURCE_TOMO_BINS + source_bin;
         const long long shear_base_ba = source_idx_ba * 2;
