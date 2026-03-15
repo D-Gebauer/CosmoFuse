@@ -1,26 +1,26 @@
 /*
- * tomo_fused_3x2pt.cu — Fused 3×2pt tomographic correlation kernel.
+ * tomo_fused_3x2pt.cu -- Fused 3×2pt tomographic correlation kernel.
  *
  * Computes ALL six correlation outputs of a 3×2pt weak lensing analysis
  * in a single kernel launch, maximising GPU occupancy and minimising
  * kernel launch overhead.  The six outputs are:
  *
- *   z=0  Aperture mass  M_ap  — tangential shear convolved with a
+ *   z=0  Aperture mass  M_ap  -- tangential shear convolved with a
  *        compensated filter Q(θ) around each sky patch centre.
  *        Probes the projected mass within the aperture.
  *
- *   z=1  Galaxy mean density  M_g  — galaxy overdensity δ_g convolved
+ *   z=1  Galaxy mean density  M_g  -- galaxy overdensity δ_g convolved
  *        with the same compensated filter Q(θ).
  *        Probes the smoothed galaxy number density contrast.
  *
- *   z=2  Cosmic shear  ξ+/ξ-  — shear-shear 2-point correlations.
+ *   z=2  Cosmic shear  ξ+/ξ-  -- shear-shear 2-point correlations.
  *        ξ+ is sensitive to the sum of E- and B-mode power,
  *        ξ- to their difference.
  *
- *   z=3  Galaxy clustering  ξ_g  — density-density 2-point correlation,
+ *   z=3  Galaxy clustering  ξ_g  -- density-density 2-point correlation,
  *        measuring galaxy clustering strength vs angular separation.
  *
- *   z=4  Galaxy-galaxy lensing  ξ_t  — density-shear cross-correlation,
+ *   z=4  Galaxy-galaxy lensing  ξ_t  -- density-shear cross-correlation,
  *        measuring the tangential shear of source galaxies around
  *        foreground lens positions.
  *

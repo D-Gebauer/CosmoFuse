@@ -1,5 +1,5 @@
 /*
- * density_shear_tomo_vectorized.cu — Tomographic galaxy-galaxy lensing
+ * density_shear_tomo_vectorized.cu -- Tomographic galaxy-galaxy lensing
  *                                     correlation ξ_t(θ).
  *
  * Measures the mean tangential shear γ_t of background (source) galaxies
@@ -30,10 +30,10 @@ __COMMON_CUDA_SOURCE__
 #include <cuComplex.h>
 
 /*
- * T               — scalar type (float / double)
- * C               — complex type for rotation factors
- * LENS_TOMO_BINS  — number of lens (foreground) tomographic bins
- * SOURCE_TOMO_BINS — number of source (background) tomographic bins
+ * T               -- scalar type (float / double)
+ * C               -- complex type for rotation factors
+ * LENS_TOMO_BINS  -- number of lens (foreground) tomographic bins
+ * SOURCE_TOMO_BINS -- number of source (background) tomographic bins
  */
 template<typename T, typename C, int LENS_TOMO_BINS, int SOURCE_TOMO_BINS, typename I>
 __global__ void gpu_fused_tomo_reduce_ds(

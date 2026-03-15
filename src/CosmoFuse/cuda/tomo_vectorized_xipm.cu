@@ -1,5 +1,5 @@
 /*
- * tomo_vectorized_xipm.cu — Tomographic cosmic shear 2-point correlation
+ * tomo_vectorized_xipm.cu -- Tomographic cosmic shear 2-point correlation
  *                            functions ξ+(θ) and ξ-(θ).
  *
  * Computes the shear-shear correlation numerators for all tomographic bin
@@ -52,9 +52,9 @@ __device__ inline cuDoubleComplex complex_mul<cuDoubleComplex>(cuDoubleComplex a
 }
 
 /*
- * T            — scalar type (float / double) for map values and weights
- * C            — complex type (cuFloatComplex / cuDoubleComplex) for rotations
- * TOMO_BINS_T  — number of tomographic redshift bins (compile-time constant
+ * T            -- scalar type (float / double) for map values and weights
+ * C            -- complex type (cuFloatComplex / cuDoubleComplex) for rotations
+ * TOMO_BINS_T  -- number of tomographic redshift bins (compile-time constant
  *                for efficient index arithmetic)
  */
 template<typename T, typename C, int TOMO_BINS_T, typename I>
@@ -89,7 +89,7 @@ __global__ void gpu_fused_tomo_reduce_xipm(
     const int j = comb_j[comb_idx];   /* tomo bin for pixel b */
     const bool use_ba = (comb_ori & 1) == 1;
     if (use_ba && i == j) {
-        return;   /* auto-correlation is symmetric — skip duplicate */
+        return;   /* auto-correlation is symmetric -- skip duplicate */
     }
 
     const long long start = bin_offsets[bin_flat];

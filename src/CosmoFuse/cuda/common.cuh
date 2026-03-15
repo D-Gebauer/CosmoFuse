@@ -1,5 +1,5 @@
 /*
- * common.cuh — Shared CUDA utilities for CosmoFuse correlation kernels.
+ * common.cuh -- Shared CUDA utilities for CosmoFuse correlation kernels.
  *
  * Provides thread-block level parallel reductions used to sum per-pair
  * contributions (e.g. weighted shear products, density products) across
@@ -30,7 +30,7 @@ __device__ inline T block_reduce_sum(T val) {
 }
 
 /*
- * Simultaneous reduction of two values in one pass — avoids a second
+ * Simultaneous reduction of two values in one pass -- avoids a second
  * __syncthreads() barrier.  Used when a kernel accumulates two quantities
  * over the same pair loop, e.g. ξ+ and ξ- numerators, or a numerator
  * and its weight denominator.
@@ -56,7 +56,7 @@ __device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
 }
 
 /*
- * Simultaneous reduction of three values in one pass — avoids two extra
+ * Simultaneous reduction of three values in one pass -- avoids two extra
  * __syncthreads() barrier chains.  Used when a kernel accumulates three
  * independent quantities over the same pair loop, e.g. ξ+ numerator,
  * ξ- numerator, and the shared weight denominator.

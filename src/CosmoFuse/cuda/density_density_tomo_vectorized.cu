@@ -1,5 +1,5 @@
 /*
- * density_density_tomo_vectorized.cu — Tomographic galaxy clustering
+ * density_density_tomo_vectorized.cu -- Tomographic galaxy clustering
  *                                       correlation ξ_g(θ).
  *
  * Computes the galaxy auto-correlation function, which measures the
@@ -22,8 +22,8 @@
 __COMMON_CUDA_SOURCE__
 
 /*
- * T          — scalar type (float / double)
- * TOMO_BINS  — number of tomographic redshift bins (compile-time constant)
+ * T          -- scalar type (float / double)
+ * TOMO_BINS  -- number of tomographic redshift bins (compile-time constant)
  */
 template<typename T, int TOMO_BINS, typename I>
 __global__ void gpu_fused_tomo_reduce_dd(
@@ -52,7 +52,7 @@ __global__ void gpu_fused_tomo_reduce_dd(
     const int j = comb_j[comb_idx];
     const bool use_ba = (comb_ori & 1) == 1;
     if (use_ba && i == j) {
-        return;   /* auto-bin is symmetric — skip duplicate */
+        return;   /* auto-bin is symmetric -- skip duplicate */
     }
 
     const long long start = bin_offsets[bin_flat];
