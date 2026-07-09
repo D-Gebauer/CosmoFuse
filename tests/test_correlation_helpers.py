@@ -1,6 +1,9 @@
 import numpy as np
 import pytest
 from CosmoFuse.correlation_helpers import (
+    Q_T,
+    Q_crittenden,
+    Q_schneider,
     _get_pair_index,
     calculate_all_zetas,
     zeta_a_g,
@@ -213,3 +216,59 @@ def test_zeta_t_validation_raises_on_patch_count_mismatch():
     with pytest.raises(ValueError):
         zeta_g_t(center, xi_t)
 
+
+
+# ---------------------------------------------------------------------------
+# Aperture filter functions
+# ---------------------------------------------------------------------------
+
+def test_Q_T_is_crittenden_alias():
+    """The historical default Q_T is the Crittenden et al. (2002) filter
+    (previously misattributed to Schneider et al. 1998); the alias keeps
+    the default filter object identical."""
+    assert Q_T is Q_crittenden
+
+
+def test_Q_crittenden_formula():
+    theta_Q_arcmin = 90.0
+    theta_ap = np.radians(theta_Q_arcmin / 60)
+    theta = np.linspace(0.0, 5 * theta_ap, 64)
+    expected = theta**2 / (4 * np.pi * theta_ap**4) * np.exp(
+        -(theta**2) / (2 * theta_ap**2)
+    )
+    np.testing.assert_allclose(Q_crittenden(theta, theta_Q_arcmin), expected)
+    # peak at theta = sqrt(2) * theta_ap
+    fine = np.linspace(0.5 * theta_ap, 3 * theta_ap, 20001)
+    peak = fine[np.argmax(Q_crittenden(fine, theta_Q_arcmin))]
+    np.testing.assert_allclose(peak, np.sqrt(2) * theta_ap, rtol=1e-3)
+
+
+def test_Q_schneider_formula_and_support():
+    theta_Q_arcmin = 90.0
+    theta_ap = np.radians(theta_Q_arcmin / 60)
+    x = np.array([0.0, 0.25, 1 / np.sqrt(2), 0.9, 1.0, 1.5, 4.0])
+    values = Q_schneider(x * theta_ap, theta_Q_arcmin)
+
+    inside = x < 1.0
+    expected = 6.0 / (np.pi * theta_ap**2) * x[inside] ** 2 * (1 - x[inside] ** 2)
+    np.testing.assert_allclose(values[inside], expected)
+    # compact support: identically zero at and beyond theta_Q
+    np.testing.assert_array_equal(values[~inside], 0.0)
+    assert values[0] == 0.0
+    # peak at x = 1/sqrt(2) with value 1.5/(pi theta_ap^2)
+    np.testing.assert_allclose(
+        Q_schneider(theta_ap / np.sqrt(2), theta_Q_arcmin),
+        1.5 / (np.pi * theta_ap**2),
+    )
+
+
+@pytest.mark.parametrize("filter_fn", [Q_crittenden, Q_schneider])
+def test_filters_share_unit_normalisation(filter_fn):
+    """Both filters obey the same convention: ∫ Q(θ) dΩ = 2π ∫ Q θ dθ = 1,
+    so aperture masses measured with either are directly comparable."""
+    theta_Q_arcmin = 90.0
+    theta_ap = np.radians(theta_Q_arcmin / 60)
+    theta = np.linspace(0.0, 8 * theta_ap, 400001)
+    q = np.asarray(filter_fn(theta, theta_Q_arcmin), dtype=np.float64)
+    integral = 2 * np.pi * np.trapezoid(q * theta, theta)
+    np.testing.assert_allclose(integral, 1.0, rtol=1e-5)

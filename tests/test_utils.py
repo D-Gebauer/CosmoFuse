@@ -10,6 +10,7 @@ import numpy as np
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
+from CosmoFuse.correlation_helpers import Q_schneider
 from CosmoFuse.correlations import Correlation
 from CosmoFuse.utils import pixel2RaDec, select_patch_centers
 
@@ -276,6 +277,43 @@ class TestFilterWeightedSelection(unittest.TestCase):
             **self.kwargs,
         )
         self.assertEqual(seen["theta_Q"], self.kwargs["theta_Q"])
+
+    def test_schneider_filter_ignores_holes_beyond_its_support(self):
+        """The Schneider et al. (1998) filter has compact support (theta_Q),
+        so a hole at ~4.5 theta_Q contributes exactly zero weight and the
+        weighted check must accept the affected candidates."""
+        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_sch = select_patch_centers(
+            self.mask, filter_weighted=True, aperture_filter=Q_schneider,
+            **self.kwargs,
+        )
+        self.assertEqual(self._count_in_band(t_raw, 13.5, 16.5), 0)
+        self.assertGreater(self._count_in_band(t_sch, 13.5, 16.5), 0)
+
+    def test_schneider_filter_in_aperture_geometry(self):
+        """calculate_pairs_M_a with Q_schneider: pixels beyond theta_Q in
+        the 5*theta_Q aperture disc receive exactly zero weight."""
+        corr = Correlation(
+            self.NSIDE_MASK,
+            np.array([0.3]),
+            np.array([np.radians(15.0)]),
+            nbins=4,
+            theta_min=10,
+            theta_max=60,
+            patch_size=90.0,
+            theta_Q=90.0,
+            device="cpu",
+        )
+        corr.calculate_pairs_M_a(aperture_filter=Q_schneider)
+
+        self.assertNotEqual(corr._aperture_filter_active_key, "Q_T")
+        q_val = np.asarray(corr.Q_val[0], dtype=np.float64)
+        self.assertTrue(np.all(np.isfinite(q_val)))
+        self.assertGreater(np.count_nonzero(q_val > 0), 0)
+        # the aperture disc extends to 5*theta_Q, but the filter's support
+        # ends at theta_Q -> the vast majority of pixels get zero weight
+        zero_fraction = 1.0 - np.count_nonzero(q_val) / q_val.size
+        self.assertGreater(zero_fraction, 0.9)
 
     def test_from_mask_passthrough(self):
         p_wgt, _ = select_patch_centers(

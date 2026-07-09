@@ -3,7 +3,7 @@ from typing import Callable, Optional, Tuple, Union
 import healpy as hp
 import numpy as np
 
-from .correlation_helpers import Q_T
+from .correlation_helpers import Q_crittenden
 
 
 def pixel2RaDec(
@@ -48,7 +48,7 @@ def _aperture_filter_weights(
     support regardless of the weight's sign.
     """
     if aperture_filter is None:
-        values = Q_T(theta, theta_Q)
+        values = Q_crittenden(theta, theta_Q)
     else:
         try:
             values = aperture_filter(theta, theta_Q)
@@ -103,7 +103,7 @@ def select_patch_centers(
             can be negative at large radii.  The patch-disc (2PCF)
             check always uses the raw fraction.
         aperture_filter: Filter used for the weighting; defaults to the
-            built-in ``Q_T`` (same convention as
+            built-in ``Q_crittenden`` (same convention as
             ``Correlation.preprocess``: called as
             ``aperture_filter(theta, theta_Q)`` with theta in radians
             and theta_Q in arcminutes, falling back to

@@ -15,6 +15,8 @@ from .io_handler import PairIOHandler
 from .pair_geometry import PairGeometry
 from .correlation_helpers import (
     Q_T,
+    Q_crittenden,
+    Q_schneider,
     calculate_all_zetas as _calculate_all_zetas_helper,
     zeta_a_g as _zeta_a_g_helper,
     zeta_a_minus as _zeta_a_minus_helper,
@@ -472,8 +474,8 @@ class Correlation:
                 check by ``|aperture_filter(θ)|`` instead of counting
                 pixels (see :func:`CosmoFuse.utils.select_patch_centers`).
             aperture_filter: Filter for the weighted check; defaults to
-                the built-in ``Q_T``.  Selection only — pass the same
-                filter to :meth:`preprocess` for consistency.
+                the built-in ``Q_crittenden``.  Selection only — pass the
+                same filter to :meth:`preprocess` for consistency.
             **kwargs: Forwarded to the constructor (``nbins``,
                 ``theta_min``, ``theta_max``, ``device``, ``fastmath``,
                 ``map_precision``, ``rotation_precision``).

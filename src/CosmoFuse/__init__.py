@@ -6,6 +6,9 @@ on GPU/CPU, with support for shear measurements and aperture mass calculations.
 """
 
 from .correlation_helpers import (
+    Q_T,
+    Q_crittenden,
+    Q_schneider,
     calculate_all_zetas,
     zeta_a_g,
     zeta_a_minus,
@@ -25,6 +28,9 @@ __email__ = "git@gebauer.ai"
 
 __all__ = [
     "Correlation",
+    "Q_T",
+    "Q_crittenden",
+    "Q_schneider",
     "calculate_all_zetas",
     "zeta_g_plus",
     "zeta_g_minus",

@@ -19,7 +19,7 @@ import healpy as hp
 import numpy as np
 from tqdm import trange
 
-from .correlation_helpers import Q_T
+from .correlation_helpers import Q_crittenden
 from .utils import pixel2RaDec
 
 if TYPE_CHECKING:
@@ -31,11 +31,13 @@ class PairGeometry:
     def resolve_aperture_filter(
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Callable[..., Any]:
-        return Q_T if aperture_filter is None else aperture_filter
+        return Q_crittenden if aperture_filter is None else aperture_filter
 
     @staticmethod
     def aperture_filter_key(aperture_filter: Callable[..., Any]) -> Any:
-        if aperture_filter is Q_T:
+        if aperture_filter is Q_crittenden:
+            # Legacy key kept for pickle/state compatibility (Q_T is the
+            # backwards-compatible alias of Q_crittenden).
             return "Q_T"
         return id(aperture_filter)
 
