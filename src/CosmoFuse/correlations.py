@@ -26,7 +26,7 @@ from .correlation_helpers import (
     zeta_g_t as _zeta_g_t_helper,
 )
 from .pair_finder import PairFinder
-from .utils import pixel2RaDec
+from .utils import pixel2RaDec, select_patch_centers
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +431,77 @@ class Correlation:
         self.bins = []
         self.compute_context.initialize_runtime_state()
         self._aperture_filter_active_key = "Q_T"
+
+    @classmethod
+    def from_mask(
+        cls,
+        nside: int,
+        mask: np.ndarray,
+        nside_centers: int,
+        patch_size: float = 90,
+        theta_Q: float = 90,
+        f_mask: float = 0.2,
+        f_mask_filter: Optional[float] = None,
+        **kwargs: Any,
+    ) -> "Correlation":
+        """Construct a Correlation with patch centres selected from a mask.
+
+        Convenience wrapper around
+        :func:`CosmoFuse.utils.select_patch_centers`: candidate centres on
+        an ``nside_centers`` grid are accepted when the masked fraction of
+        ``mask`` within the patch disc (radius ``patch_size``) and within
+        the compensated-filter support disc (radius ``5 * theta_Q``) stays
+        below ``f_mask`` / ``f_mask_filter``.
+
+        Args:
+            nside: HEALPix resolution of the maps to be measured.
+            mask: HEALPix mask/footprint (nonzero = observed).  May be at a
+                different resolution than ``nside``; the selection runs at
+                the mask's own resolution and the stored instance mask is
+                regraded to ``nside`` if needed.
+            nside_centers: Resolution of the candidate-centre grid
+                (controls the patch oversampling density).
+            patch_size: Patch radius in arcminutes.
+            theta_Q: Compensated filter scale in arcminutes.
+            f_mask: Maximum tolerated masked fraction inside the patch disc.
+            f_mask_filter: Maximum tolerated masked fraction inside the
+                filter support disc; defaults to ``f_mask``.
+            **kwargs: Forwarded to the constructor (``nbins``,
+                ``theta_min``, ``theta_max``, ``device``, ``fastmath``,
+                ``map_precision``, ``rotation_precision``).
+
+        Raises:
+            ValueError: If no candidate centre satisfies the masking
+                criteria.
+        """
+        mask_arr = np.asarray(mask)
+        phi_center, theta_center = select_patch_centers(
+            mask_arr,
+            nside_centers,
+            patch_size=patch_size,
+            theta_Q=theta_Q,
+            f_mask=f_mask,
+            f_mask_filter=f_mask_filter,
+        )
+        if phi_center.size == 0:
+            raise ValueError(
+                "No patch centres satisfy the masking criteria; loosen "
+                "f_mask/f_mask_filter, use a finer nside_centers, or check "
+                "the mask."
+            )
+        if mask_arr.size != hp.nside2npix(nside):
+            instance_mask = hp.ud_grade(mask_arr.astype(np.float64), nside) != 0
+        else:
+            instance_mask = mask_arr
+        return cls(
+            nside,
+            phi_center,
+            theta_center,
+            patch_size=patch_size,
+            theta_Q=theta_Q,
+            mask=instance_mask,
+            **kwargs,
+        )
 
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()

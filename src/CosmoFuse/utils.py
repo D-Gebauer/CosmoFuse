@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import healpy as hp
 import numpy as np
@@ -30,3 +30,88 @@ def pixel2RaDec(
     ra = phi
     dec = np.pi / 2.0 - theta
     return ra, dec
+
+
+def select_patch_centers(
+    mask: np.ndarray,
+    nside_centers: int,
+    patch_size: float = 90.0,
+    theta_Q: Optional[float] = None,
+    f_mask: float = 0.2,
+    f_mask_filter: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Select patch centres on a coarse grid whose surroundings are
+    sufficiently unmasked.
+
+    Candidate centres are the pixel centres of an ``nside_centers``
+    HEALPix grid that fall inside the (downgraded) footprint.  A
+    candidate is accepted when the masked fraction of the
+    full-resolution ``mask`` is at most ``f_mask`` within the 2PCF patch
+    disc (radius ``patch_size``) and at most ``f_mask_filter`` within
+    the compensated-filter support disc (radius ``5 * theta_Q`` — the
+    same region ``Correlation.calculate_pairs_M_a`` uses).
+
+    ``nside_centers`` controls the patch (over)sampling density: a finer
+    grid yields more, more strongly overlapping patches.
+
+    Args:
+        mask: Full-resolution HEALPix mask/footprint (nonzero = observed).
+        nside_centers: Resolution of the candidate-centre grid (coarser
+            than the mask resolution).
+        patch_size: Patch radius in arcminutes (same meaning as
+            ``Correlation(patch_size=...)``).
+        theta_Q: Compensated filter scale in arcminutes; defaults to
+            ``patch_size``.
+        f_mask: Maximum tolerated masked fraction inside the patch disc.
+        f_mask_filter: Maximum tolerated masked fraction inside the
+            filter support disc; defaults to ``f_mask``.
+
+    Returns:
+        ``(phi_center, theta_center)`` in radians, ordered to match the
+        ``Correlation`` constructor, so
+        ``Correlation(nside, *select_patch_centers(...), ...)`` works.
+    """
+    mask = np.asarray(mask)
+    if mask.ndim != 1:
+        raise ValueError("mask must be a 1-D HEALPix map")
+    nside_mask = hp.npix2nside(mask.size)
+    if theta_Q is None:
+        theta_Q = float(patch_size)
+    if f_mask_filter is None:
+        f_mask_filter = f_mask
+    if patch_size <= 0 or theta_Q <= 0:
+        raise ValueError("patch_size and theta_Q must be positive")
+    if not (0 <= f_mask <= 1) or not (0 <= f_mask_filter <= 1):
+        raise ValueError("f_mask and f_mask_filter must lie in [0, 1]")
+
+    patch_radius = np.radians(patch_size / 60.0)
+    filter_radius = 5.0 * np.radians(theta_Q / 60.0)
+
+    # Candidate centres: coarse-grid pixels inside the footprint
+    mask_lr = hp.ud_grade(mask.astype(np.float64), nside_centers)
+    candidate_pix = np.flatnonzero(mask_lr != 0)
+    if candidate_pix.size == 0:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty
+
+    theta_c, phi_c = hp.pix2ang(nside_centers, candidate_pix)
+    vecs = hp.ang2vec(theta_c, phi_c)
+
+    unmasked = mask != 0
+    accepted = np.zeros(candidate_pix.size, dtype=bool)
+    for i in range(candidate_pix.size):
+        # Filter support disc first: it is the larger of the two, so it
+        # rejects earlier and the patch disc is only queried on survivors.
+        disc = hp.query_disc(nside_mask, vecs[i], filter_radius)
+        if disc.size == 0:
+            continue
+        masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
+        if masked_fraction > f_mask_filter:
+            continue
+        disc = hp.query_disc(nside_mask, vecs[i], patch_radius)
+        if disc.size == 0:
+            continue
+        masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
+        accepted[i] = masked_fraction <= f_mask
+
+    return phi_c[accepted], theta_c[accepted]

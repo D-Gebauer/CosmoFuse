@@ -17,7 +17,7 @@ from .correlation_helpers import (
     zeta_g_t,
 )
 from .correlations import Correlation
-from .utils import pixel2RaDec
+from .utils import pixel2RaDec, select_patch_centers
 
 __version__ = "4.1.0"
 __author__ = "David Gebauer"
@@ -35,4 +35,5 @@ __all__ = [
     "zeta_g_t",
     "zeta_a_t",
     "pixel2RaDec",
+    "select_patch_centers",
 ]

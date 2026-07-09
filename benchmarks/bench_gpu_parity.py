@@ -1,6 +1,6 @@
 """GPU↔CPU parity and timing harness for the CosmoFuse measurement paths.
 
-Run this BEFORE and AFTER every kernel change (see GPU_IMPLEMENTATION_GUIDE.md):
+Run this BEFORE and AFTER every GPU kernel change:
 
     python benchmarks/bench_gpu_parity.py --device 0 --out after.json
     python benchmarks/bench_gpu_parity.py --compare before.json after.json
