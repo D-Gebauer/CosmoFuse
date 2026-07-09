@@ -115,7 +115,7 @@ Then Calculate pairs:
 
     correlation.preprocess()
 
-`preprocess()` accepts an `aperture_filter` (the compensated filter used for the aperture mass, see [Aperture filters](#aperture-filters); default `Q_crittenden`) and an `angle_method` (see [Angle methods](#angle-methods)).
+`preprocess()` accepts an `aperture_filter`: the compensated filter used for the aperture mass (see [Aperture filters](#aperture-filters); default `Q_crittenden`).
 
 Optionally, the one-off Numba JIT compilation of the measurement kernels can be moved out of the first measurement call:
 
@@ -165,16 +165,6 @@ Both filters are normalised to $\int Q(\theta)\, \mathrm{d}\Omega = 1$, so apert
     from CosmoFuse import Q_crittenden, Q_schneider
 
     correlation.preprocess(aperture_filter=Q_schneider)
-
-### Angle methods
-
-`preprocess()` and `calculate_pairs_2PCF()` accept `angle_method`, one of `'arccos'`, `'haversine'`, or `'law'` (default: `'haversine'`). The names refer to three mathematically equivalent ways of computing the angular separation of a pixel pair on the sphere:
-
-- `'arccos'` — inverse cosine of the dot product of the pixel unit vectors,
-- `'haversine'` — the haversine formula, traditionally preferred at small separations for its numerical conditioning,
-- `'law'` — the spherical law of cosines.
-
-In the current pair-finding kernel the separation angle itself is never evaluated: each pair's $\cos\theta$ (the 3-D dot product of the pixel unit vectors) is compared directly against the precomputed cosines of the angular bin edges. This gives exactly the same bin assignment as `'arccos'` while avoiding inverse trigonometry in the $O(N_{\rm pix}^2)$ inner loop, so all three options currently select this same (fastest) computation — the argument is validated and retained for API compatibility. The pair rotation angles $e^{2i\phi}$ are always computed from exact vector geometry, independent of this choice.
 
 ### Measuring Correlations
 

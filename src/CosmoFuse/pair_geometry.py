@@ -76,21 +76,18 @@ class PairGeometry:
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
-        angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
         owner._pair_finder.kernel = owner._compute_pairs_kernel
         return owner._pair_finder.get_pairs_patch(
             patch_inds,
             ra,
             dec,
-            angle_method=angle_method,
         )
 
     @staticmethod
     def get_pairs_helper(
         owner: "Correlation",
         i: int,
-        angle_method: str = "haversine",
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         vec = hp.ang2vec(owner.theta_center[i], owner.phi_center[i])
         patch_inds = hp.query_disc(
@@ -103,7 +100,6 @@ class PairGeometry:
             pix_inds,
             ra,
             dec,
-            angle_method=angle_method,
         )
         return (
             all_inds,
@@ -112,10 +108,10 @@ class PairGeometry:
         )
 
     @staticmethod
-    def calculate_pairs_2PCF(owner: "Correlation", angle_method: str = "haversine") -> None:
+    def calculate_pairs_2PCF(owner: "Correlation") -> None:
         pair_inds, pair_exp2phi, bins = [], [], []
         for i in trange(owner.n_patches, desc="2PCF pairs", unit=" patches"):
-            result = owner.__get_pairs_helper__(i, angle_method=angle_method)
+            result = owner.__get_pairs_helper__(i)
 
             pair_inds.append(result[0])
             pair_exp2phi.append(result[1])

@@ -44,24 +44,6 @@ _ROTATION_COMPLEX_PRECISION = {
     "float64": np.complex128,
 }
 
-_ANGLE_METHOD_TO_CODE = {
-    "arccos": 0,
-    "haversine": 1,
-    "law": 2,
-}
-
-
-def _resolve_angle_method_code(angle_method: str) -> int:
-    key = str(angle_method).lower()
-    code = _ANGLE_METHOD_TO_CODE.get(key)
-    if code is None:
-        raise ValueError(
-            "angle_method must be one of ('arccos', 'haversine', 'law'); "
-            f"got {angle_method!r}"
-        )
-    return int(code)
-
-
 def _compute_aperture_shear_all_patches(
     Q_inds: np.ndarray,
     Q_cos: np.ndarray,
@@ -95,7 +77,6 @@ def _compute_pairs_impl(
     ra: np.ndarray,
     dec: np.ndarray,
     binedges: np.ndarray,
-    angle_method_code: int = 1,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -409,7 +390,6 @@ class Correlation:
             rotation_dtype=self.rotation_dtype,
             rotation_complex_dtype=self.rotation_complex_dtype,
             kernel=self._compute_pairs_kernel,
-            resolve_angle_method_code=_resolve_angle_method_code,
         )
         self.radius_filter = 5 * self.theta_Q
 
@@ -552,7 +532,6 @@ class Correlation:
             rotation_dtype=self.rotation_dtype,
             rotation_complex_dtype=self.rotation_complex_dtype,
             kernel=self._compute_pairs_kernel,
-            resolve_angle_method_code=_resolve_angle_method_code,
         )
         self.compute_context = ComputeContext()
         legacy_context_fields = (
@@ -607,7 +586,7 @@ class Correlation:
         ra = np.array([0.0, 1e-3, 2e-3], dtype=self.rotation_dtype)
         dec = np.array([0.0, 1e-3, 0.0], dtype=self.rotation_dtype)
         binedges = np.asarray(self.binedges, dtype=self.rotation_dtype)
-        self._compute_pairs_kernel(pts, ra, dec, binedges, 1)
+        self._compute_pairs_kernel(pts, ra, dec, binedges)
 
     @property
     def inds_dev(self) -> Any:
@@ -862,25 +841,22 @@ class Correlation:
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
-        angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
         return PairGeometry.get_pairs_patch(
             self,
             patch_inds,
             ra,
             dec,
-            angle_method=angle_method,
         )
 
     def __get_pairs_helper__(
         self,
         i: int,
-        angle_method: str = "haversine",
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return PairGeometry.get_pairs_helper(self, i, angle_method=angle_method)
+        return PairGeometry.get_pairs_helper(self, i)
 
-    def calculate_pairs_2PCF(self, angle_method: str = "haversine") -> None:
-        PairGeometry.calculate_pairs_2PCF(self, angle_method=angle_method)
+    def calculate_pairs_2PCF(self) -> None:
+        PairGeometry.calculate_pairs_2PCF(self)
 
     def get_pairs_patch_M_a(
         self,
@@ -1157,7 +1133,6 @@ class Correlation:
     def preprocess(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
-        angle_method: str = "haversine",
         release_host_pairs: bool = False,
     ) -> None:
         """
@@ -1169,7 +1144,7 @@ class Correlation:
         else:
             self.calculate_pairs_M_a(aperture_filter=aperture_filter)
         logger.info("Calculating pairs for 2PCF")
-        self.calculate_pairs_2PCF(angle_method=angle_method)
+        self.calculate_pairs_2PCF()
         logger.info("Preparing flattened pair arrays on backend device")
         if release_host_pairs:
             self.prepare(release_host_pairs=True)
@@ -1179,13 +1154,11 @@ class Correlation:
     def precompute(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
-        angle_method: str = "haversine",
         release_host_pairs: bool = False,
     ) -> None:
         """Backward-compatible alias for preprocess()."""
         self.preprocess(
             aperture_filter=aperture_filter,
-            angle_method=angle_method,
             release_host_pairs=release_host_pairs,
         )
 

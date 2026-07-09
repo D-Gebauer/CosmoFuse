@@ -1505,7 +1505,6 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         spy_preprocess.assert_called_once_with(
             aperture_filter=None,
-            angle_method="haversine",
             release_host_pairs=True,
         )
 
@@ -2685,28 +2684,18 @@ class TestCorrelationCoverage(unittest.TestCase):
                 "name": "preprocess-default",
                 "method": "preprocess",
                 "kwargs": {},
-                "expected_angle": "haversine",
                 "expected_filter": None,
             },
             {
                 "name": "preprocess-with-filter",
                 "method": "preprocess",
                 "kwargs": {"aperture_filter": custom_filter},
-                "expected_angle": "haversine",
                 "expected_filter": custom_filter,
             },
             {
-                "name": "preprocess-angle-law",
-                "method": "preprocess",
-                "kwargs": {"angle_method": "law"},
-                "expected_angle": "law",
-                "expected_filter": None,
-            },
-            {
-                "name": "precompute-angle-arccos",
+                "name": "precompute-default",
                 "method": "precompute",
-                "kwargs": {"angle_method": "arccos"},
-                "expected_angle": "arccos",
+                "kwargs": {},
                 "expected_filter": None,
             },
         ]
@@ -2719,9 +2708,7 @@ class TestCorrelationCoverage(unittest.TestCase):
 
                 getattr(self.corr, case["method"])(**case["kwargs"])
 
-                mock_calculate_pairs_2PCF.assert_called_once_with(
-                    angle_method=case["expected_angle"]
-                )
+                mock_calculate_pairs_2PCF.assert_called_once_with()
                 mock_prepare.assert_called_once_with()
 
                 expected_filter = case["expected_filter"]

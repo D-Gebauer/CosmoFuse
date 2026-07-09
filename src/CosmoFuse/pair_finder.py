@@ -30,7 +30,6 @@ class PairFinder:
         rotation_dtype: np.dtype,
         rotation_complex_dtype: np.dtype,
         kernel: Callable[..., Tuple[np.ndarray, ...]],
-        resolve_angle_method_code: Callable[[str], int],
     ) -> None:
         self.nbins = nbins
         self.binedges = binedges
@@ -38,14 +37,12 @@ class PairFinder:
         self.rotation_dtype = rotation_dtype
         self.rotation_complex_dtype = rotation_complex_dtype
         self.kernel = kernel
-        self.resolve_angle_method_code = resolve_angle_method_code
 
     def get_pairs_patch(
         self,
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
-        angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
         """Find all pixel pairs within angular separation bins for a patch.
 
@@ -59,7 +56,6 @@ class PairFinder:
         dec_local = np.asarray(dec, dtype=self.rotation_dtype)
         binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
-        angle_method_code = self.resolve_angle_method_code(angle_method)
 
         if patch_inds_local.size < 2:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
@@ -79,7 +75,6 @@ class PairFinder:
             ra_local,
             dec_local,
             binedges_local,
-            angle_method_code,
         )
 
         npairs = bin_indices.size
@@ -133,7 +128,6 @@ class PairFinder:
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
-        angle_method: str = "haversine",
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Like :meth:`get_pairs_patch` but without the per-bin split.
 
@@ -148,7 +142,6 @@ class PairFinder:
         dec_local = np.asarray(dec, dtype=self.rotation_dtype)
         binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
-        angle_method_code = self.resolve_angle_method_code(angle_method)
 
         empty_counts = np.zeros(self.nbins, dtype=np.int64)
         if patch_inds_local.size < 2:
@@ -171,7 +164,6 @@ class PairFinder:
             ra_local,
             dec_local,
             binedges_local,
-            angle_method_code,
         )
 
         npairs = bin_indices.size
