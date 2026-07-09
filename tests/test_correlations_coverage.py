@@ -968,6 +968,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            _weights_fingerprint_sources=None,
         ):
             captured["shear"] = np.array(shear_arg, copy=True)
             return np.zeros((4, corr.n_patches, corr.nbins), dtype=np.float64)
@@ -1008,6 +1009,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            _weights_fingerprint_sources=None,
         ):
             captured["nlens"] = nlens_bins_arg
             captured["nsource"] = nsource_bins_arg
@@ -1047,6 +1049,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            _weights_fingerprint_sources=None,
         ):
             captured["nlens"] = nlens_bins_arg
             captured["nsource"] = nsource_bins_arg
@@ -2054,7 +2057,38 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
 
         self.assertEqual(out.shape, (1, corr.n_patches, corr.nbins))
-        self.assertGreaterEqual(spy_reduce.call_count, 2)
+        # The CPU kernel now accumulates the denominators itself: no
+        # separate gather+reduce passes over the pair list.
+        self.assertEqual(spy_reduce.call_count, 0)
+
+        # In-kernel denominators must match the explicitly computed
+        # directional sums for the cross combination.
+        w_dev = corr._to_backend_array(
+            corr._coerce_map_input_array(weights), dtype=corr.map_dtype
+        )
+        sum_ab = corr._reduce_pairs(
+            w_dev[0][corr.inds_dev[0]] * w_dev[1][corr.inds_dev[1]]
+        )
+        sum_ba = corr._reduce_pairs(
+            w_dev[1][corr.inds_dev[0]] * w_dev[0][corr.inds_dev[1]]
+        )
+        nbins_total = corr.n_patches * corr.nbins
+        explicit = np.stack(
+            (sum_ab.reshape(1, nbins_total), sum_ba.reshape(1, nbins_total)), axis=0
+        )
+        with patch.object(
+            corr,
+            "_get_selected_tomo_density_combination_indices",
+            return_value=(comb_i, comb_j, auto, 1),
+        ):
+            out_explicit = corr._density_density_tomo_vectorized(
+                density_maps,
+                weights,
+                sumofweights=explicit,
+                nzbins=2,
+                gc_auto_correlations_only=True,
+            )
+        np.testing.assert_allclose(out, out_explicit, rtol=1e-12, atol=1e-14)
 
     def test_compute_3x2pt_tomo_fused_non_numpy_launch_decline_raises(self):
         corr = self._make_small_cpu_corr()
@@ -3007,7 +3041,10 @@ class TestCorrelationCoverage(unittest.TestCase):
             atol=1e-14,
         )
 
-    def test_xipm_auto_sumofweights_reuses_cache(self):
+    def test_xipm_auto_sumofweights_in_kernel_on_cpu(self):
+        """CPU path accumulates the weight sums inside the kernel: the
+        separate gather+reduce sum-of-weights machinery is never invoked,
+        and the result matches an explicitly provided sum-of-weights."""
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3021,11 +3058,20 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_xipm_sumofweights",
             wraps=self.corr._compute_xipm_sumofweights,
         ) as spy_compute:
-            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
-            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
-            self.assertEqual(spy_compute.call_count, 1)
+            xip_a, xim_a = self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+            self.assertEqual(spy_compute.call_count, 0)
 
-    def test_xipm_cross_uses_sumofweights_getter(self):
+        w_dev = self.corr._to_backend_array(w1, dtype=self.corr.map_dtype)
+        explicit = self.corr._compute_xipm_sumofweights(w_dev, w_dev)
+        xip_b, xim_b = self.corr.compute_shear_shear(
+            g11, g21, g12, g22, w1, w2, sumofweights=explicit
+        )
+        np.testing.assert_allclose(xip_a, xip_b, rtol=1e-6, atol=1e-9)
+        np.testing.assert_allclose(xim_a, xim_b, rtol=1e-6, atol=1e-9)
+
+    def test_xipm_cross_skips_sumofweights_getter_on_cpu(self):
+        """CPU path accumulates weight sums in-kernel, so the cached
+        gather+reduce getter is not used at all."""
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3041,9 +3087,11 @@ class TestCorrelationCoverage(unittest.TestCase):
         ) as spy_get:
             self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
-        self.assertEqual(spy_get.call_count, 2)
+        self.assertEqual(spy_get.call_count, 0)
 
-    def test_xipm_cross_sumofweights_reuses_cache(self):
+    def test_xipm_cross_matches_explicit_sumofweights_on_cpu(self):
+        """In-kernel weight sums must reproduce the explicitly computed
+        directional sums for the cross-correlation path."""
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3057,11 +3105,21 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_compute_xipm_sumofweights",
             wraps=self.corr._compute_xipm_sumofweights,
         ) as spy_compute:
-            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
-            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
-            self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+            xip_a, xim_a = self.corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
-        self.assertEqual(spy_compute.call_count, 2)
+        self.assertEqual(spy_compute.call_count, 0)
+
+        w1_dev = self.corr._to_backend_array(w1, dtype=self.corr.map_dtype)
+        w2_dev = self.corr._to_backend_array(w2, dtype=self.corr.map_dtype)
+        sum_ab = self.corr._compute_xipm_sumofweights(w1_dev, w2_dev)
+        sum_ba = self.corr._compute_xipm_sumofweights(w2_dev, w1_dev)
+        xip_b, xim_b = self.corr._xipm_cross(
+            g11, g21, g12, g22, w1, w2,
+            sumofweights_ab=sum_ab,
+            sumofweights_ba=sum_ba,
+        )
+        np.testing.assert_allclose(xip_a, xip_b, rtol=1e-6, atol=1e-9)
+        np.testing.assert_allclose(xim_a, xim_b, rtol=1e-6, atol=1e-9)
 
     def test_xipm_sumofweights_legacy_single_entry_cache_migrates(self):
         self._setup_mock_pairs()
@@ -3204,7 +3262,9 @@ class TestCorrelationCoverage(unittest.TestCase):
             finally:
                 sys.modules.pop("cupy", None)
                 sys.modules.pop(module_name, None)
-    def test_vectorized_shear_shear_same_w_reuses_cache(self):
+    def test_vectorized_shear_shear_cpu_skips_sumofweights(self):
+        """On the CPU backend the kernel accumulates the weight sums, so
+        neither the fingerprint cache nor the reduce machinery runs."""
         nzbins = 2
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.random.rand(nzbins, self.npix)
@@ -3214,10 +3274,51 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.corr,
             "_compute_tomo_sumofweights",
             wraps=self.corr._compute_tomo_sumofweights,
-        ) as spy_compute:
+        ) as spy_compute, patch.object(
+            self.corr,
+            "_fingerprint_weights",
+            wraps=self.corr._fingerprint_weights,
+        ) as spy_fp:
             self.corr.vectorized_shear_shear(shear_maps, w)
             self.corr.vectorized_shear_shear(shear_maps, w)
-            self.assertEqual(spy_compute.call_count, 1)
+            self.assertEqual(spy_compute.call_count, 0)
+            self.assertEqual(spy_fp.call_count, 0)
+
+    def test_vectorized_shear_shear_same_w_reuses_cache(self):
+        """On the GPU-style branch the fingerprint cache avoids
+        recomputing the sum-of-weights for identical weight maps."""
+        nzbins = 2
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        self._setup_mock_pairs()
+
+        nzbin_combs = 3
+        stub = (
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+        )
+        self.corr.backend.name = "cupy"
+        orig_to_device = self.corr.backend.to_device
+        orig_to_numpy = self.corr.backend.to_numpy
+        self.corr.backend.to_device = lambda arr, stream=None: np.asarray(arr)
+        self.corr.backend.to_numpy = lambda arr, stream=None: np.asarray(arr)
+        try:
+            with patch.object(
+                self.corr,
+                "_xipm_tomo_vectorized",
+                return_value=stub,
+            ), patch.object(
+                self.corr,
+                "_compute_tomo_sumofweights",
+                wraps=self.corr._compute_tomo_sumofweights,
+            ) as spy_compute:
+                self.corr.vectorized_shear_shear(shear_maps, w)
+                self.corr.vectorized_shear_shear(shear_maps, w)
+                self.assertEqual(spy_compute.call_count, 1)
+        finally:
+            self.corr.backend.name = "numpy"
+            self.corr.backend.to_device = orig_to_device
+            self.corr.backend.to_numpy = orig_to_numpy
 
     def test_vectorized_shear_shear_changed_w_recomputes(self):
         nzbins = 2
@@ -3227,14 +3328,33 @@ class TestCorrelationCoverage(unittest.TestCase):
         w_changed[0, 0] += 1e-3
         self._setup_mock_pairs()
 
-        with patch.object(
-            self.corr,
-            "_compute_tomo_sumofweights",
-            wraps=self.corr._compute_tomo_sumofweights,
-        ) as spy_compute:
-            self.corr.vectorized_shear_shear(shear_maps, w)
-            self.corr.vectorized_shear_shear(shear_maps, w_changed)
-            self.assertEqual(spy_compute.call_count, 2)
+        nzbin_combs = 3
+        stub = (
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+        )
+        self.corr.backend.name = "cupy"
+        orig_to_device = self.corr.backend.to_device
+        orig_to_numpy = self.corr.backend.to_numpy
+        self.corr.backend.to_device = lambda arr, stream=None: np.asarray(arr)
+        self.corr.backend.to_numpy = lambda arr, stream=None: np.asarray(arr)
+        try:
+            with patch.object(
+                self.corr,
+                "_xipm_tomo_vectorized",
+                return_value=stub,
+            ), patch.object(
+                self.corr,
+                "_compute_tomo_sumofweights",
+                wraps=self.corr._compute_tomo_sumofweights,
+            ) as spy_compute:
+                self.corr.vectorized_shear_shear(shear_maps, w)
+                self.corr.vectorized_shear_shear(shear_maps, w_changed)
+                self.assertEqual(spy_compute.call_count, 2)
+        finally:
+            self.corr.backend.name = "numpy"
+            self.corr.backend.to_device = orig_to_device
+            self.corr.backend.to_numpy = orig_to_numpy
 
     def test_vectorized_shear_shear_explicit_sumofweights_still_accepted(self):
         nzbins = 2

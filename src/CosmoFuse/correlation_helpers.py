@@ -133,13 +133,18 @@ def _zeta_from_fields(
         dtype=np.result_type(central.dtype, annulus.dtype),
     )
 
+    # Hoist the per-center and per-annulus means out of the triplet loop:
+    # there are only nzbins distinct centers and ncomb distinct annuli.
+    all_center_means = np.mean(central, axis=2)
+    all_annulus_means = np.mean(annulus, axis=2)
+
     for k, (z_center, z2, z3) in enumerate(zeta_combs):
         pair_idx = _get_pair_index(nzbins, z2, z3)
         center_vals = central[:, z_center, :]
         annulus_vals = annulus[:, pair_idx, :, :]
 
-        mean_center = np.mean(center_vals, axis=1)
-        mean_annulus = np.mean(annulus_vals, axis=1)
+        mean_center = all_center_means[:, z_center]
+        mean_annulus = all_annulus_means[:, pair_idx]
         mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
 
         out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
@@ -198,25 +203,28 @@ def _zeta_from_cross_fields(
     if n_correlations == triangular_pairs:
         zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
         out = np.zeros((nmaps, len(zeta_combs), nbins), dtype=dtype)
+        all_center_means = np.mean(central, axis=2)
+        all_annulus_means = np.mean(annulus, axis=2)
         for k, (z_center, z2, z3) in enumerate(zeta_combs):
             pair_idx = _get_pair_index(nzbins, z2, z3)
             center_vals = central[:, z_center, :]
             annulus_vals = annulus[:, pair_idx, :, :]
 
-            mean_center = np.mean(center_vals, axis=1)
-            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_center = all_center_means[:, z_center]
+            mean_annulus = all_annulus_means[:, pair_idx]
             mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
         return out
 
     out = np.zeros((nmaps, nzbins * n_correlations, nbins), dtype=dtype)
+    all_annulus_means = np.mean(annulus, axis=2)
     k = 0
     for z_center in range(nzbins):
         center_vals = central[:, z_center, :]
         mean_center = np.mean(center_vals, axis=1)
         for pair_idx in range(n_correlations):
             annulus_vals = annulus[:, pair_idx, :, :]
-            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_annulus = all_annulus_means[:, pair_idx]
             mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
             k += 1

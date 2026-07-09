@@ -70,6 +70,22 @@ class TestBackend(unittest.TestCase):
         with ctx:
             pass
 
+    def test_warmup_numpy_runs_all_kernels(self):
+        backend = get_backend("cpu")
+        # exercises every CPU kernel with tiny inputs (compiles under JIT,
+        # plain execution when JIT is disabled) - must not raise
+        backend.warmup()
+        backend.warmup(
+            map_dtype=np.float32,
+            rotation_dtype=np.float32,
+            rotation_complex_dtype=np.complex64,
+            index_dtype=np.int64,
+        )
+
+    def test_warmup_gpu_backend_is_noop(self):
+        backend = Backend("cupy", MagicMock())
+        backend.warmup()  # must not touch any kernels
+
     def test_alloc_pinned_numpy_returns_ndarray(self):
         arr = self.numpy_backend.alloc_pinned((3, 4), np.float64)
         self.assertIsInstance(arr, np.ndarray)
@@ -251,10 +267,12 @@ class TestBackend(unittest.TestCase):
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
         offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_ab_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
-        out_ab_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
-        out_ba_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
-        out_ba_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_ab_p = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_ab_m = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_ba_p = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_ba_m = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_ab_w = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_ba_w = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
 
         _cpu_xipm_cross_corr_kernel(
             g1a,
@@ -272,12 +290,16 @@ class TestBackend(unittest.TestCase):
             out_ab_m,
             out_ba_p,
             out_ba_m,
+            out_ab_w,
+            out_ba_w,
         )
 
         exp_ab_p = np.zeros_like(out_ab_p)
         exp_ab_m = np.zeros_like(out_ab_m)
         exp_ba_p = np.zeros_like(out_ba_p)
         exp_ba_m = np.zeros_like(out_ba_m)
+        exp_ab_w = np.zeros_like(out_ab_w)
+        exp_ba_w = np.zeros_like(out_ba_w)
 
         for idx in range(ind_i.shape[0]):
             i = ind_i[idx]
@@ -293,15 +315,19 @@ class TestBackend(unittest.TestCase):
             ga_j_rot = wa[j] * ga_j * exp_j[idx]
             gb_j_rot = wb[j] * gb_j * exp_j[idx]
 
-            exp_ab_p[idx] = gb_j_rot * np.conjugate(ga_i_rot)
-            exp_ab_m[idx] = gb_j_rot * ga_i_rot
-            exp_ba_p[idx] = ga_j_rot * np.conjugate(gb_i_rot)
-            exp_ba_m[idx] = ga_j_rot * gb_i_rot
+            exp_ab_p[idx] = np.real(gb_j_rot * np.conjugate(ga_i_rot))
+            exp_ab_m[idx] = np.real(gb_j_rot * ga_i_rot)
+            exp_ba_p[idx] = np.real(ga_j_rot * np.conjugate(gb_i_rot))
+            exp_ba_m[idx] = np.real(ga_j_rot * gb_i_rot)
+            exp_ab_w[idx] = wa[i] * wb[j]
+            exp_ba_w[idx] = wb[i] * wa[j]
 
         np.testing.assert_allclose(out_ab_p, exp_ab_p)
         np.testing.assert_allclose(out_ab_m, exp_ab_m)
         np.testing.assert_allclose(out_ba_p, exp_ba_p)
         np.testing.assert_allclose(out_ba_m, exp_ba_m)
+        np.testing.assert_allclose(out_ab_w, exp_ab_w)
+        np.testing.assert_allclose(out_ba_w, exp_ba_w)
 
     def test_cpu_xipm_auto_corr_kernel_complex64_dispatch(self):
         g11 = np.array([0.1, 0.2, 0.3], dtype=np.float32)
@@ -317,8 +343,9 @@ class TestBackend(unittest.TestCase):
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex64)
         offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex64)
-        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex64)
+        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.float32)
+        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.float32)
+        out_w = np.zeros(offsets.shape[0] - 1, dtype=np.float32)
 
         _cpu_xipm_auto_corr_kernel(
             g11,
@@ -334,20 +361,24 @@ class TestBackend(unittest.TestCase):
             offsets,
             out_p,
             out_m,
+            out_w,
         )
 
         exp_p = np.zeros_like(out_p)
         exp_m = np.zeros_like(out_m)
+        exp_w = np.zeros_like(out_w)
         for idx in range(ind_i.shape[0]):
             i = ind_i[idx]
             j = ind_j[idx]
             g2 = w1[i] * np.complex64(g11[i] + 1j * g21[i]) * exp_i[idx]
             g1 = w2[j] * np.complex64(g12[j] + 1j * g22[j]) * exp_j[idx]
-            exp_p[idx] = g1 * np.conjugate(g2)
-            exp_m[idx] = g1 * g2
+            exp_p[idx] = np.real(g1 * np.conjugate(g2))
+            exp_m[idx] = np.real(g1 * g2)
+            exp_w[idx] = w1[i] * w2[j]
 
         np.testing.assert_allclose(out_p, exp_p, rtol=1e-6, atol=1e-7)
         np.testing.assert_allclose(out_m, exp_m, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(out_w, exp_w, rtol=1e-6, atol=1e-7)
 
     def test_cpu_xipm_auto_corr_kernel_complex128_dispatch(self):
         g11 = np.array([0.1, 0.2, 0.3], dtype=np.float64)
@@ -363,8 +394,9 @@ class TestBackend(unittest.TestCase):
         exp_j = np.array([0.7 - 0.1j, 0.4 + 0.8j], dtype=np.complex128)
         offsets = np.array([0, 1, 2], dtype=np.int64)
 
-        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
-        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.complex128)
+        out_p = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_m = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
+        out_w = np.zeros(offsets.shape[0] - 1, dtype=np.float64)
 
         _cpu_xipm_auto_corr_kernel(
             g11,
@@ -380,20 +412,24 @@ class TestBackend(unittest.TestCase):
             offsets,
             out_p,
             out_m,
+            out_w,
         )
 
         exp_p = np.zeros_like(out_p)
         exp_m = np.zeros_like(out_m)
+        exp_w = np.zeros_like(out_w)
         for idx in range(ind_i.shape[0]):
             i = ind_i[idx]
             j = ind_j[idx]
             g2 = w1[i] * np.complex128(g11[i] + 1j * g21[i]) * exp_i[idx]
             g1 = w2[j] * np.complex128(g12[j] + 1j * g22[j]) * exp_j[idx]
-            exp_p[idx] = g1 * np.conjugate(g2)
-            exp_m[idx] = g1 * g2
+            exp_p[idx] = np.real(g1 * np.conjugate(g2))
+            exp_m[idx] = np.real(g1 * g2)
+            exp_w[idx] = w1[i] * w2[j]
 
         np.testing.assert_allclose(out_p, exp_p)
         np.testing.assert_allclose(out_m, exp_m)
+        np.testing.assert_allclose(out_w, exp_w)
 
     def test_cpu_backend_exposes_tomo_vectorized_kernel(self):
         backend = get_backend("cpu")
@@ -414,8 +450,9 @@ class TestBackend(unittest.TestCase):
         rot_j = np.array([1.0 + 0.0j], dtype=np.complex128)
         comb_i = np.array([0, 0, 1], dtype=np.int64)
         comb_j = np.array([0, 1, 1], dtype=np.int64)
-        out_p = np.zeros((6, 1), dtype=np.complex128)
-        out_m = np.zeros((6, 1), dtype=np.complex128)
+        out_p = np.zeros((6, 1), dtype=np.float64)
+        out_m = np.zeros((6, 1), dtype=np.float64)
+        out_w = np.zeros((6, 1), dtype=np.float64)
 
         launched = backend.xipm_tomo_vectorized_kernel(
             shear,
@@ -429,6 +466,7 @@ class TestBackend(unittest.TestCase):
             comb_j,
             out_p,
             out_m,
+            out_w,
         )
         self.assertIsNone(launched)
         self.assertEqual(out_p.shape, (6, 1))
@@ -442,7 +480,10 @@ class TestBackend(unittest.TestCase):
         ind_i = np.array([0, 1, 2], dtype=np.int64)
         ind_j = np.array([1, 2, 0], dtype=np.int64)
         offsets = np.array([0, 2, 3], dtype=np.int64)
-        out_w = np.zeros(2, dtype=np.float64)
+        out_ab = np.zeros(2, dtype=np.float64)
+        out_ba = np.zeros(2, dtype=np.float64)
+        out_ab_w = np.zeros(2, dtype=np.float64)
+        out_ba_w = np.zeros(2, dtype=np.float64)
 
         _cpu_density_density_corr_kernel(
             density_a,
@@ -452,17 +493,29 @@ class TestBackend(unittest.TestCase):
             ind_i,
             ind_j,
             offsets,
-            out_w,
+            out_ab,
+            out_ba,
+            out_ab_w,
+            out_ba_w,
         )
 
-        expected = np.zeros_like(out_w)
+        expected_ab = np.zeros_like(out_ab)
+        expected_ba = np.zeros_like(out_ba)
+        expected_ab_w = np.zeros_like(out_ab_w)
+        expected_ba_w = np.zeros_like(out_ba_w)
         for b in range(offsets.shape[0] - 1):
             for idx in range(offsets[b], offsets[b + 1]):
                 i = ind_i[idx]
                 j = ind_j[idx]
-                expected[b] += w_a[i] * w_b[j] * density_a[i] * density_b[j]
+                expected_ab[b] += w_a[i] * w_b[j] * density_a[i] * density_b[j]
+                expected_ab_w[b] += w_a[i] * w_b[j]
+                expected_ba[b] += w_a[j] * w_b[i] * density_a[j] * density_b[i]
+                expected_ba_w[b] += w_a[j] * w_b[i]
 
-        np.testing.assert_allclose(out_w, expected)
+        np.testing.assert_allclose(out_ab, expected_ab)
+        np.testing.assert_allclose(out_ba, expected_ba)
+        np.testing.assert_allclose(out_ab_w, expected_ab_w)
+        np.testing.assert_allclose(out_ba_w, expected_ba_w)
 
     def test_cpu_density_shear_corr_kernel(self):
         density_lens = np.array([1.0, 2.0, 0.5], dtype=np.float64)
@@ -472,9 +525,13 @@ class TestBackend(unittest.TestCase):
         w_source = np.array([1.0, 1.5, 0.25], dtype=np.float64)
         ind_i = np.array([0, 1, 2], dtype=np.int64)
         ind_j = np.array([1, 2, 0], dtype=np.int64)
+        exp_i = np.array([0.9 - 0.3j, 0.5 + 0.5j, 0.2 + 0.7j], dtype=np.complex128)
         exp_j = np.array([0.6 + 0.8j, 1.0 + 0.0j, -0.5 + 0.5j], dtype=np.complex128)
         offsets = np.array([0, 2, 3], dtype=np.int64)
-        out_gt = np.zeros(2, dtype=np.float64)
+        out_ab = np.zeros(2, dtype=np.float64)
+        out_ba = np.zeros(2, dtype=np.float64)
+        out_ab_w = np.zeros(2, dtype=np.float64)
+        out_ba_w = np.zeros(2, dtype=np.float64)
 
         _cpu_density_shear_corr_kernel(
             density_lens,
@@ -484,20 +541,34 @@ class TestBackend(unittest.TestCase):
             w_source,
             ind_i,
             ind_j,
+            exp_i,
             exp_j,
             offsets,
-            out_gt,
+            out_ab,
+            out_ba,
+            out_ab_w,
+            out_ba_w,
         )
 
-        expected = np.zeros_like(out_gt)
+        expected_ab = np.zeros_like(out_ab)
+        expected_ba = np.zeros_like(out_ba)
+        expected_ab_w = np.zeros_like(out_ab_w)
+        expected_ba_w = np.zeros_like(out_ba_w)
         for b in range(offsets.shape[0] - 1):
             for idx in range(offsets[b], offsets[b + 1]):
                 i = ind_i[idx]
                 j = ind_j[idx]
-                gamma_t = -g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
-                expected[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
+                gamma_t_ab = -g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
+                expected_ab[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t_ab
+                expected_ab_w[b] += w_lens[i] * w_source[j]
+                gamma_t_ba = -g1_source[i] * exp_i[idx].real + g2_source[i] * exp_i[idx].imag
+                expected_ba[b] += w_lens[j] * w_source[i] * density_lens[j] * gamma_t_ba
+                expected_ba_w[b] += w_lens[j] * w_source[i]
 
-        np.testing.assert_allclose(out_gt, expected)
+        np.testing.assert_allclose(out_ab, expected_ab)
+        np.testing.assert_allclose(out_ba, expected_ba)
+        np.testing.assert_allclose(out_ab_w, expected_ab_w)
+        np.testing.assert_allclose(out_ba_w, expected_ba_w)
 
     def test_cpu_density_density_tomo_vectorized_kernel(self):
         density = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
@@ -508,6 +579,7 @@ class TestBackend(unittest.TestCase):
         comb_i = np.array([0, 0, 1], dtype=np.int32)
         comb_j = np.array([0, 1, 1], dtype=np.int32)
         out_num = np.zeros((3, 1), dtype=np.float64)
+        out_den = np.zeros((3, 1), dtype=np.float64)
 
         _cpu_density_density_tomo_vectorized_kernel(
             density,
@@ -518,10 +590,32 @@ class TestBackend(unittest.TestCase):
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
 
         self.assertEqual(out_num.shape, (3, 1))
-        self.assertNotEqual(out_num[0, 0], 0.0)
+        self.assertEqual(out_den.shape, (3, 1))
+
+        expected_num = np.zeros((3, 1), dtype=np.float64)
+        expected_den = np.zeros((3, 1), dtype=np.float64)
+        for k in range(3):
+            i = comb_i[k]
+            j = comb_j[k]
+            for idx in range(1):
+                pi, pj = ind_i[idx], ind_j[idx]
+                w_ab = weights[pi, i] * weights[pj, j]
+                ab = w_ab * density[pi, i] * density[pj, j]
+                if i == j:
+                    expected_num[k, 0] += ab
+                    expected_den[k, 0] += w_ab
+                else:
+                    w_ba = weights[pi, j] * weights[pj, i]
+                    ba = w_ba * density[pi, j] * density[pj, i]
+                    expected_num[k, 0] += 0.5 * (ab + ba)
+                    expected_den[k, 0] += 0.5 * (w_ab + w_ba)
+
+        np.testing.assert_allclose(out_num, expected_num)
+        np.testing.assert_allclose(out_den, expected_den)
 
     def test_cpu_density_shear_tomo_vectorized_kernel(self):
         density = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
@@ -542,6 +636,7 @@ class TestBackend(unittest.TestCase):
         comb_i = np.array([0, 1], dtype=np.int32)
         comb_j = np.array([0, 1], dtype=np.int32)
         out_num = np.zeros((2, 1), dtype=np.float64)
+        out_den = np.zeros((2, 1), dtype=np.float64)
 
         _cpu_density_shear_tomo_vectorized_kernel(
             density,
@@ -556,10 +651,37 @@ class TestBackend(unittest.TestCase):
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
 
         self.assertEqual(out_num.shape, (2, 1))
+        self.assertEqual(out_den.shape, (2, 1))
         self.assertNotEqual(out_num[0, 0], 0.0)
+
+        expected_num = np.zeros((2, 1), dtype=np.float64)
+        expected_den = np.zeros((2, 1), dtype=np.float64)
+        for k in range(2):
+            lens_bin = comb_i[k]
+            source_bin = comb_j[k]
+            for idx in range(1):
+                pi, pj = ind_i[idx], ind_j[idx]
+                gt_ab = (
+                    -shear[pj, source_bin, 0] * rot_j[idx].real
+                    + shear[pj, source_bin, 1] * rot_j[idx].imag
+                )
+                w_ab = lens_weights[pi, lens_bin] * source_weights[pj, source_bin]
+                expected_num[k, 0] += w_ab * density[pi, lens_bin] * gt_ab
+                expected_den[k, 0] += w_ab
+                gt_ba = (
+                    -shear[pi, source_bin, 0] * rot_i[idx].real
+                    + shear[pi, source_bin, 1] * rot_i[idx].imag
+                )
+                w_ba = lens_weights[pj, lens_bin] * source_weights[pi, source_bin]
+                expected_num[k, 0] += w_ba * density[pj, lens_bin] * gt_ba
+                expected_den[k, 0] += w_ba
+
+        np.testing.assert_allclose(out_num, expected_num)
+        np.testing.assert_allclose(out_den, expected_den)
 
     def test_cpu_aperture_density_kernel(self):
         Q_inds = np.array([0, 1, 2], dtype=np.int64)
@@ -866,6 +988,8 @@ class TestBackend(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_cupy_3x2pt_tomo_fused_kernel_compile_failure_returns_false(self):
+        compile_attempts = []
+
         class FakeModule:
             float32 = np.float32
             int32 = np.int32
@@ -873,6 +997,7 @@ class TestBackend(unittest.TestCase):
 
             @staticmethod
             def RawKernel(*_args, **_kwargs):
+                compile_attempts.append(1)
                 raise RuntimeError("compile failed")
 
         kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
@@ -911,6 +1036,46 @@ class TestBackend(unittest.TestCase):
             np.zeros((1, 1), dtype=np.float32),
         )
         self.assertFalse(ok)
+        # Failed compilations are cached negatively: a second call must not
+        # retry the (expensive) NVRTC compilation.
+        args = (
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1, 2), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.int64),
+            np.zeros(1, dtype=np.complex64),
+            np.zeros(1, dtype=np.complex64),
+            np.array([0, 1], dtype=np.int64),
+            np.zeros(1, dtype=np.uint32),
+            np.zeros(1, dtype=np.float32),
+            np.zeros(1, dtype=np.float32),
+            np.zeros(1, dtype=np.float32),
+            np.array([0, 1], dtype=np.int64),
+            np.ones(1, dtype=np.float32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+            np.zeros((2, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
+        )
+        attempts_after_first = len(compile_attempts)
+        ok2 = kernel(*args)
+        self.assertFalse(ok2)
+        self.assertEqual(len(compile_attempts), attempts_after_first)
 
     def test_cupy_3x2pt_tomo_fused_kernel_success_and_cache(self):
         compile_calls = {"count": 0}

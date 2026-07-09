@@ -96,22 +96,18 @@ class PairGeometry:
         )
         pix_inds = patch_inds[owner.map_mask[patch_inds]]
         ra, dec = pixel2RaDec(pix_inds, owner.nside)
-        inds, exp2theta = PairGeometry.get_pairs_patch(
-            owner,
+        owner._pair_finder.kernel = owner._compute_pairs_kernel
+        all_inds, exp2theta, ninds = owner._pair_finder.get_pairs_patch_flat(
             pix_inds,
             ra,
             dec,
             angle_method=angle_method,
         )
-        ninds = np.array([len(inds[idx][0]) for idx in range(owner.nbins)], dtype=owner.index_dtype)
-        all_inds = np.zeros((2, int(ninds.sum())), dtype=owner.index_dtype)
-        for bin_idx in range(owner.nbins):
-            start_idx = np.sum(ninds[:bin_idx])
-            end_idx = np.sum(ninds[: bin_idx + 1])
-            all_inds[0, start_idx:end_idx] = inds[bin_idx][0]
-            all_inds[1, start_idx:end_idx] = inds[bin_idx][1]
-
-        return all_inds, exp2theta.astype(owner.rotation_complex_dtype, copy=False), ninds
+        return (
+            all_inds,
+            exp2theta.astype(owner.rotation_complex_dtype, copy=False),
+            ninds.astype(owner.index_dtype, copy=False),
+        )
 
     @staticmethod
     def calculate_pairs_2PCF(owner: "Correlation", angle_method: str = "haversine") -> None:
@@ -148,26 +144,25 @@ class PairGeometry:
 
         Returns (cos_2phi, sin_2phi, Q).
         """
+        # Hoisted trig: each of these arrays was previously recomputed
+        # two to three times below (bit-identical results).
+        delta_ra = pixels_RA_Q_patch - Q_patch_center_RA
+        cos_delta_ra = np.cos(delta_ra)
+        sin_delta_ra = np.sin(delta_ra)
+        cos_dec = np.cos(pixels_dec_Q_patch)
+        sin_dec = np.sin(pixels_dec_Q_patch)
+        cos_dec_c = np.cos(Q_patch_center_dec)
+        sin_dec_c = np.sin(Q_patch_center_dec)
+
         # Great-circle angular distance ϑ via spherical law of cosines
-        cos_vartheta = np.cos(pixels_RA_Q_patch - Q_patch_center_RA) * np.cos(
-            Q_patch_center_dec
-        ) * np.cos(pixels_dec_Q_patch) + np.sin(Q_patch_center_dec) * np.sin(
-            pixels_dec_Q_patch
-        )
+        cos_vartheta = cos_delta_ra * cos_dec_c * cos_dec + sin_dec_c * sin_dec
         vartheta = np.arccos(cos_vartheta)
         sin_vartheta = np.sqrt(1 - cos_vartheta**2)
         # Position angle φ of each pixel relative to patch centre
         # (components from the spherical bearing formula)
-        cos_phi = (
-            np.sin(pixels_RA_Q_patch - Q_patch_center_RA)
-            * np.cos(pixels_dec_Q_patch)
-            / sin_vartheta
-        )
+        cos_phi = sin_delta_ra * cos_dec / sin_vartheta
         sin_phi = (
-            np.cos(pixels_dec_Q_patch) * np.sin(Q_patch_center_dec)
-            - np.sin(pixels_dec_Q_patch)
-            * np.cos(Q_patch_center_dec)
-            * np.cos(pixels_RA_Q_patch - Q_patch_center_RA)
+            cos_dec * sin_dec_c - sin_dec * cos_dec_c * cos_delta_ra
         ) / sin_vartheta
         # Double-angle identities for the spin-2 shear projection
         cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi

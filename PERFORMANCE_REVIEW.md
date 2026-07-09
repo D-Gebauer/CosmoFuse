@@ -40,6 +40,64 @@ small-kernel launches). The batching item (9) is the largest structural headroom
 
 ---
 
+## Implementation status (follow-up commit)
+
+The findings below were implemented in the commits following this report.
+All measurements were re-taken with baseline and optimized builds interleaved
+under matched conditions (4-core Linux container, Numba 0.66, JIT enabled;
+56 patches, nside 512, 5 tomographic bins, 10 angular bins, 8.0M pairs).
+
+**Measured per-map steady state (median of 6 maps):**
+
+| Path | Before | After | Speedup |
+|---|---|---|---|
+| `vectorized_shear_shear` (ξ±, 15 combs) | 1815 ms | 858 ms | **2.1×** |
+| `vectorized_density_density` (ξ_g) | 3887 ms | 625 ms | **6.2×** |
+| `vectorized_density_shear` (GGL, 25 combs) | 8023 ms | 1407 ms | **5.7×** |
+| `get_full_tomo_shear` (M_ap + ξ±) | 1973 ms | 894 ms | **2.2×** |
+| `get_3x2pt_tomo` (fused) | 4126 ms | 3872 ms | 1.07× |
+| `compute_shear_shear` (single-bin auto) | 136 ms | 52 ms | **2.6×** |
+| `compute_density_density` (single-bin) | 222 ms | 45 ms | **5.0×** |
+| `compute_density_shear` (single-bin) | 284 ms | 68 ms | **4.2×** |
+| `calculate_pairs_2PCF` (nside 2048, 36.6M pairs/patch, one-time) | 32.2 s | 18.3 s | **1.76×** on 4 cores |
+
+**Correctness:** the full test suite (219 tests + 17 subtests, including the
+treecorr end-to-end comparisons) passes both with and without Numba JIT.
+Measuring the same maps against the same pair file, all outputs match the
+baseline to ≤1.2×10⁻¹¹ relative (most bit-identical); pair-finding outputs are
+bit-identical. The only visible change: ξ± numerators are no longer rounded
+to float32 per bin on the CPU path (differences ~5×10⁻¹² absolute — the new
+results are strictly more precise).
+
+**Implemented:** items 1, 2, 3 (CPU kernels), 4 (standalone kernels), 5, 6,
+7 (output-scratch reuse), 8, 11, 12, 13, 14 (except `pix2vec`), 18 (scratch
+reuse), 20 (context repopulation + scratch), 21, 22, 23, 24, 25, 26, 29
+(all bullets, plus a `warmup()` API and negative caching of failed NVRTC
+compilations). Notes:
+
+- Item 3 (in-kernel denominators) is CPU-complete: all Numba kernels now
+  accumulate their weight sums in the same pass, so the CPU measurement
+  paths need neither fingerprinting nor separate reductions. The GPU paths
+  got the item-1 LRU fingerprint caches instead.
+- Item 4: the loop interchange helps the standalone kernels (per-pair
+  index/rotation loads amortized over combinations) but measured *slower*
+  inside the fused 3×2pt kernel, where per-bin pair segments are
+  cache-resident and register accumulators win — there the fix kept the
+  original loop order and instead flattened `prange` over
+  (combination × bin) as item 22 prescribes (matching the CUDA grid).
+- Item 14: the `pix2vec` conversion was deliberately left out — verified
+  impact is negligible and it perturbs results at the ULP level.
+
+**Deferred** (no GPU available in the implementation environment — CUDA
+kernels cannot be compiled or validated, and shipping unverifiable kernel
+code would violate the correctness requirement): the CUDA-side halves of
+items 3/19/20, items 15 (streams/pinned overlap), 16 (combination tiling),
+17 (payload interleaving), 27 (float32 aperture upload), 28 (mixed
+precision), and the two architectural items 9 (multi-map batching) and 10
+(index compaction), which warrant their own API design and GPU validation.
+
+---
+
 ## A. Per-map hot path — highest priority
 
 ### 1. Sum-of-weights recomputed every map in the clustering and GGL paths — high impact
