@@ -1,7 +1,9 @@
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import healpy as hp
 import numpy as np
+
+from .correlation_helpers import Q_T
 
 
 def pixel2RaDec(
@@ -32,6 +34,29 @@ def pixel2RaDec(
     return ra, dec
 
 
+def _aperture_filter_weights(
+    aperture_filter: Optional[Callable[..., np.ndarray]],
+    theta: np.ndarray,
+    theta_Q: float,
+) -> np.ndarray:
+    """|filter(θ)| for the filter-weighted masking check.
+
+    The absolute value is deliberate: compensated aperture filters can be
+    negative at large radii, and signed weights would let those regions
+    cancel masked area elsewhere (and push the "fraction" outside
+    [0, 1]).  A masked pixel costs the aperture |weight| of filter
+    support regardless of the weight's sign.
+    """
+    if aperture_filter is None:
+        values = Q_T(theta, theta_Q)
+    else:
+        try:
+            values = aperture_filter(theta, theta_Q)
+        except TypeError:
+            values = aperture_filter(theta)
+    return np.abs(np.asarray(values, dtype=np.float64))
+
+
 def select_patch_centers(
     mask: np.ndarray,
     nside_centers: int,
@@ -39,6 +64,8 @@ def select_patch_centers(
     theta_Q: Optional[float] = None,
     f_mask: float = 0.2,
     f_mask_filter: Optional[float] = None,
+    filter_weighted: bool = False,
+    aperture_filter: Optional[Callable[..., np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Select patch centres on a coarse grid whose surroundings are
     sufficiently unmasked.
@@ -65,6 +92,23 @@ def select_patch_centers(
         f_mask: Maximum tolerated masked fraction inside the patch disc.
         f_mask_filter: Maximum tolerated masked fraction inside the
             filter support disc; defaults to ``f_mask``.
+        filter_weighted: If ``True``, the filter-disc check uses the
+            aperture-filter-weighted masked fraction
+            ``Σ_masked |Q(θ)| / Σ_all |Q(θ)|`` instead of the raw pixel
+            fraction, so masked pixels only matter in proportion to the
+            filter support they remove from the aperture mass (a hole
+            near the disc edge, where Q is negligible, no longer vetoes
+            the patch, while a hole at the filter peak counts more).
+            The magnitude ``|Q|`` is used because compensated filters
+            can be negative at large radii.  The patch-disc (2PCF)
+            check always uses the raw fraction.
+        aperture_filter: Filter used for the weighting; defaults to the
+            built-in ``Q_T`` (same convention as
+            ``Correlation.preprocess``: called as
+            ``aperture_filter(theta, theta_Q)`` with theta in radians
+            and theta_Q in arcminutes, falling back to
+            ``aperture_filter(theta)``).  Pass the same filter here and
+            to ``preprocess`` for a consistent selection.
 
     Returns:
         ``(phi_center, theta_center)`` in radians, ordered to match the
@@ -105,7 +149,19 @@ def select_patch_centers(
         disc = hp.query_disc(nside_mask, vecs[i], filter_radius)
         if disc.size == 0:
             continue
-        masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
+        if filter_weighted:
+            pix_vec = np.asarray(hp.pix2vec(nside_mask, disc))
+            cos_theta = np.clip(vecs[i] @ pix_vec, -1.0, 1.0)
+            weights = _aperture_filter_weights(
+                aperture_filter, np.arccos(cos_theta), theta_Q
+            )
+            total = weights.sum()
+            if total <= 0:
+                # degenerate filter over this disc: cannot assess -> reject
+                continue
+            masked_fraction = weights[~unmasked[disc]].sum() / total
+        else:
+            masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
         if masked_fraction > f_mask_filter:
             continue
         disc = hp.query_disc(nside_mask, vecs[i], patch_radius)

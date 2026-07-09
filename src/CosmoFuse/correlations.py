@@ -442,6 +442,8 @@ class Correlation:
         theta_Q: float = 90,
         f_mask: float = 0.2,
         f_mask_filter: Optional[float] = None,
+        filter_weighted: bool = False,
+        aperture_filter: Optional[Callable[..., Any]] = None,
         **kwargs: Any,
     ) -> "Correlation":
         """Construct a Correlation with patch centres selected from a mask.
@@ -466,6 +468,12 @@ class Correlation:
             f_mask: Maximum tolerated masked fraction inside the patch disc.
             f_mask_filter: Maximum tolerated masked fraction inside the
                 filter support disc; defaults to ``f_mask``.
+            filter_weighted: If ``True``, weight the filter-disc masking
+                check by ``|aperture_filter(θ)|`` instead of counting
+                pixels (see :func:`CosmoFuse.utils.select_patch_centers`).
+            aperture_filter: Filter for the weighted check; defaults to
+                the built-in ``Q_T``.  Selection only — pass the same
+                filter to :meth:`preprocess` for consistency.
             **kwargs: Forwarded to the constructor (``nbins``,
                 ``theta_min``, ``theta_max``, ``device``, ``fastmath``,
                 ``map_precision``, ``rotation_precision``).
@@ -482,6 +490,8 @@ class Correlation:
             theta_Q=theta_Q,
             f_mask=f_mask,
             f_mask_filter=f_mask_filter,
+            filter_weighted=filter_weighted,
+            aperture_filter=aperture_filter,
         )
         if phi_center.size == 0:
             raise ValueError(

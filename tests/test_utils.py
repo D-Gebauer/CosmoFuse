@@ -178,5 +178,125 @@ class TestSelectPatchCenters(unittest.TestCase):
             )
 
 
+class TestFilterWeightedSelection(unittest.TestCase):
+    """Tests for the compensated-filter-weighted masking check."""
+
+    NSIDE_MASK = 128
+
+    @classmethod
+    def setUpClass(cls):
+        """40-degree polar cap with an annular hole at colatitude
+        21.3-22.2 degrees.
+
+        With theta_Q = 90 arcmin the filter support disc has radius
+        7.5 degrees, so for candidates at colatitude ~15 degrees the hole
+        sits at 4.2-4.8 theta_Q — inside the disc but where |Q| is
+        negligible: the raw fraction there is ~5% while the weighted
+        fraction is ~0.02%.  For candidates on the hole itself the hole
+        crosses the filter peak, so both checks must reject.
+        """
+        npix = hp.nside2npix(cls.NSIDE_MASK)
+        theta_pix, _ = hp.pix2ang(cls.NSIDE_MASK, np.arange(npix))
+        mask = (theta_pix < np.radians(40)).astype(np.float64)
+        hole = (theta_pix > np.radians(21.3)) & (theta_pix < np.radians(22.2))
+        mask[hole] = 0.0
+        cls.mask = mask
+        cls.kwargs = dict(
+            nside_centers=32, patch_size=90.0, theta_Q=90.0,
+            f_mask=0.01, f_mask_filter=0.01,
+        )
+
+    @staticmethod
+    def _count_in_band(theta_c, lo_deg, hi_deg):
+        return np.count_nonzero(
+            (theta_c > np.radians(lo_deg)) & (theta_c < np.radians(hi_deg))
+        )
+
+    def test_edge_hole_rejected_raw_but_accepted_weighted(self):
+        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_wgt = select_patch_centers(
+            self.mask, filter_weighted=True, **self.kwargs
+        )
+
+        # Candidates seeing the hole only at ~4.5 theta_Q (negligible |Q|):
+        # vetoed by the raw pixel fraction, accepted by the weighted one.
+        self.assertEqual(self._count_in_band(t_raw, 13.5, 16.5), 0)
+        self.assertGreater(self._count_in_band(t_wgt, 13.5, 16.5), 0)
+        self.assertGreater(t_wgt.size, t_raw.size)
+
+    def test_hole_at_filter_peak_rejected_in_both_modes(self):
+        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_wgt = select_patch_centers(
+            self.mask, filter_weighted=True, **self.kwargs
+        )
+        # Candidates on the hole: it removes support at the filter peak,
+        # so the weighted mode must not rescue them.
+        self.assertEqual(self._count_in_band(t_raw, 20.0, 23.5), 0)
+        self.assertEqual(self._count_in_band(t_wgt, 20.0, 23.5), 0)
+
+    def test_constant_filter_reproduces_raw_fraction(self):
+        """Uniform weights make the weighted fraction identical to the raw
+        pixel fraction, so the accepted sets must match exactly."""
+        p_raw, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        p_wgt, t_wgt = select_patch_centers(
+            self.mask, filter_weighted=True,
+            aperture_filter=lambda theta: np.ones_like(theta),
+            **self.kwargs,
+        )
+        np.testing.assert_array_equal(p_raw, p_wgt)
+        np.testing.assert_array_equal(t_raw, t_wgt)
+
+    def test_negative_filter_uses_absolute_value(self):
+        """A filter that is negative everywhere must behave like its
+        absolute value (compensated filters go negative at large radii;
+        signed weights would corrupt the fraction)."""
+        p_pos, t_pos = select_patch_centers(
+            self.mask, filter_weighted=True,
+            aperture_filter=lambda theta: np.ones_like(theta),
+            **self.kwargs,
+        )
+        p_neg, t_neg = select_patch_centers(
+            self.mask, filter_weighted=True,
+            aperture_filter=lambda theta: -np.ones_like(theta),
+            **self.kwargs,
+        )
+        np.testing.assert_array_equal(p_pos, p_neg)
+        np.testing.assert_array_equal(t_pos, t_neg)
+
+    def test_filter_receives_theta_q_when_accepted(self):
+        """Two-argument filters are called as filter(theta, theta_Q)."""
+        seen = {}
+
+        def spy_filter(theta, theta_Q):
+            seen["theta_Q"] = theta_Q
+            return np.ones_like(theta)
+
+        select_patch_centers(
+            self.mask, filter_weighted=True, aperture_filter=spy_filter,
+            **self.kwargs,
+        )
+        self.assertEqual(seen["theta_Q"], self.kwargs["theta_Q"])
+
+    def test_from_mask_passthrough(self):
+        p_wgt, _ = select_patch_centers(
+            self.mask, filter_weighted=True, **self.kwargs
+        )
+        corr = Correlation.from_mask(
+            self.NSIDE_MASK,
+            self.mask,
+            nside_centers=32,
+            patch_size=90.0,
+            theta_Q=90.0,
+            f_mask=0.01,
+            f_mask_filter=0.01,
+            filter_weighted=True,
+            nbins=4,
+            theta_min=10,
+            theta_max=60,
+            device="cpu",
+        )
+        self.assertEqual(corr.n_patches, p_wgt.size)
+
+
 if __name__ == "__main__":
     unittest.main()
