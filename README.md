@@ -57,6 +57,8 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Reuse pairs to measure i3PCFs across maps
 - Optimized backend kernels for Spin-0×Spin-0 ($w(\theta)$), Spin-0×Spin-2 ($\gamma_t$), and Spin-2×Spin-2 ($\xi_\pm$) workloads
 - Optimized tomographic kernels for all probes on CPU and GPU
+- Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
+- Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
 
 ## Installation
 Install using:
@@ -84,9 +86,40 @@ First create a Correlation object:
         rotation_precision="float32",       # float32 / float64
     )
 
+### Selecting patch centers from a mask
+
+Instead of providing patch centers manually, they can be selected automatically from a survey footprint. Candidate centers are the pixel centers of a coarse `nside_centers` HEALPix grid (which controls the patch oversampling density); a candidate is accepted if the masked fraction of the full-resolution mask stays below `f_mask` within the 2PCF patch disc (radius `patch_size`) and below `f_mask_filter` (default: `f_mask`) within the aperture-mass filter disc (radius $5\,\theta_Q$):
+
+    from CosmoFuse import select_patch_centers
+
+    phi_center, theta_center = select_patch_centers(
+        mask,                    # HEALPix footprint (nonzero = observed)
+        nside_centers=32,        # candidate-center grid resolution
+        patch_size=90,           # patch radius (arcminutes)
+        theta_Q=90,              # compensated filter scale (arcminutes)
+        f_mask=0.2,              # max masked fraction in the patch disc
+    )
+    correlation = Correlation(nside, phi_center, theta_center, mask=mask, ...)
+
+or, in one step:
+
+    correlation = Correlation.from_mask(
+        nside, mask, nside_centers=32,
+        patch_size=90, theta_Q=90, f_mask=0.2,
+        nbins=10, theta_min=10, theta_max=170,
+    )
+
+With `filter_weighted=True` the aperture-mass disc check weights each pixel by the compensated filter instead of counting pixels — the masked fraction becomes $\sum_{\rm masked} |Q(\theta)| \,/\, \sum_{\rm all} |Q(\theta)|$ — so holes near the edge of the disc (where the filter carries almost no weight) no longer veto a patch, while holes at the filter peak count more. The magnitude $|Q|$ is used because compensated filters can be negative at large radii. A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the raw pixel fraction.
+
 Then Calculate pairs:
 
     correlation.preprocess()
+
+`preprocess()` accepts an `aperture_filter` (the compensated filter used for the aperture mass, see [Aperture filters](#aperture-filters); default `Q_crittenden`) and an `angle_method` (see [Angle methods](#angle-methods)).
+
+Optionally, the one-off Numba JIT compilation of the measurement kernels can be moved out of the first measurement call:
+
+    correlation.warmup()
 
 You can also release host-side pair arrays immediately after preprocessing:
 
@@ -107,7 +140,41 @@ To load pairs and immediately release host-side pair arrays after backend prepar
 
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
+Pair files are written in a consolidated layout (format version 2) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable.
+
 Note: `index_precision` has been removed from the public API. Index buffers are now fixed to int64 internally.
+
+### Aperture filters
+
+The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `calculate_pairs_M_a()`, `select_patch_centers()`, and `Correlation.from_mask()`. Two filters ship with the package:
+
+**`Q_crittenden` (default)** — the exponential compensated filter of [Crittenden et al. (2002)](https://arxiv.org/abs/astro-ph/0012336), as used for the i3PCF in [Halder et al. (2021)](https://arxiv.org/abs/2102.10177):
+
+$$ Q(\theta) = \frac{\theta^2}{4\pi\theta_Q^4} \exp\left(-\frac{\theta^2}{2\theta_Q^2}\right) $$
+
+It peaks at $\theta = \sqrt{2}\,\theta_Q$ and has decayed to below $10^{-3}$ of its peak value at the $5\,\theta_Q$ truncation radius. `Q_T` remains available as a backwards-compatible alias (earlier versions misattributed this filter to Schneider et al. 1998 — the implemented formula was always the one above).
+
+**`Q_schneider`** — the polynomial ($\ell = 1$) compensated filter of [Schneider et al. (1998)](https://arxiv.org/abs/astro-ph/9708143), which has compact support:
+
+$$ Q(\theta) = \frac{6}{\pi\theta_Q^2}\, x^2 \left(1 - x^2\right) \;\; \text{for } x = \theta/\theta_Q \le 1, \qquad Q(\theta) = 0 \;\; \text{for } \theta > \theta_Q $$
+
+Pixels between $\theta_Q$ and the $5\,\theta_Q$ aperture disc simply receive zero weight.
+
+Both filters are normalised to $\int Q(\theta)\, \mathrm{d}\Omega = 1$, so aperture masses measured with either are directly comparable:
+
+    from CosmoFuse import Q_crittenden, Q_schneider
+
+    correlation.preprocess(aperture_filter=Q_schneider)
+
+### Angle methods
+
+`preprocess()` and `calculate_pairs_2PCF()` accept `angle_method`, one of `'arccos'`, `'haversine'`, or `'law'` (default: `'haversine'`). The names refer to three mathematically equivalent ways of computing the angular separation of a pixel pair on the sphere:
+
+- `'arccos'` — inverse cosine of the dot product of the pixel unit vectors,
+- `'haversine'` — the haversine formula, traditionally preferred at small separations for its numerical conditioning,
+- `'law'` — the spherical law of cosines.
+
+In the current pair-finding kernel the separation angle itself is never evaluated: each pair's $\cos\theta$ (the 3-D dot product of the pixel unit vectors) is compared directly against the precomputed cosines of the angular bin edges. This gives exactly the same bin assignment as `'arccos'` while avoiding inverse trigonometry in the $O(N_{\rm pix}^2)$ inner loop, so all three options currently select this same (fastest) computation — the argument is validated and retained for API compatibility. The pair rotation angles $e^{2i\phi}$ are always computed from exact vector geometry, independent of this choice.
 
 ### Measuring Correlations
 
