@@ -30,7 +30,6 @@ class PairFinder:
         rotation_dtype: np.dtype,
         rotation_complex_dtype: np.dtype,
         kernel: Callable[..., Tuple[np.ndarray, ...]],
-        resolve_angle_method_code: Callable[[str], int],
     ) -> None:
         self.nbins = nbins
         self.binedges = binedges
@@ -38,14 +37,12 @@ class PairFinder:
         self.rotation_dtype = rotation_dtype
         self.rotation_complex_dtype = rotation_complex_dtype
         self.kernel = kernel
-        self.resolve_angle_method_code = resolve_angle_method_code
 
     def get_pairs_patch(
         self,
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
-        angle_method: str = "haversine",
     ) -> Tuple[List[np.ndarray], np.ndarray]:
         """Find all pixel pairs within angular separation bins for a patch.
 
@@ -59,7 +56,6 @@ class PairFinder:
         dec_local = np.asarray(dec, dtype=self.rotation_dtype)
         binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
-        angle_method_code = self.resolve_angle_method_code(angle_method)
 
         if patch_inds_local.size < 2:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
@@ -79,7 +75,6 @@ class PairFinder:
             ra_local,
             dec_local,
             binedges_local,
-            angle_method_code,
         )
 
         npairs = bin_indices.size
@@ -110,15 +105,87 @@ class PairFinder:
             self.rotation_complex_dtype, copy=False
         )
 
-        # Split pairs into per-bin groups
+        # Split pairs into per-bin groups.  bin_indices is sorted, so the
+        # group boundaries come from bincount instead of nbins full scans.
+        counts = np.bincount(bin_indices, minlength=self.nbins)
+        boundaries = np.zeros(self.nbins + 1, dtype=np.int64)
+        boundaries[1:] = np.cumsum(counts)
         all_inds = []
         for bin_idx in range(self.nbins):
-            in_bin = np.where(bin_indices == bin_idx)[0]
+            start = boundaries[bin_idx]
+            stop = boundaries[bin_idx + 1]
             all_inds.append(
                 np.array(
-                    [inds_a[in_bin], inds_b[in_bin]],
+                    [inds_a[start:stop], inds_b[start:stop]],
                     dtype=self.index_dtype,
                 )
             )
 
         return all_inds, exp2phi
+
+    def get_pairs_patch_flat(
+        self,
+        patch_inds: np.ndarray,
+        ra: np.ndarray,
+        dec: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Like :meth:`get_pairs_patch` but without the per-bin split.
+
+        Returns:
+            all_inds: (2, npairs) index array, sorted by angular bin.
+            exp2phi:  (2, npairs) complex rotation factors, same order.
+            ninds:    (nbins,) number of pairs per angular bin.
+        Avoids splitting the sorted pair arrays into per-bin copies that
+        the caller would immediately re-concatenate.
+        """
+        ra_local = np.asarray(ra, dtype=self.rotation_dtype)
+        dec_local = np.asarray(dec, dtype=self.rotation_dtype)
+        binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
+        patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
+
+        empty_counts = np.zeros(self.nbins, dtype=np.int64)
+        if patch_inds_local.size < 2:
+            return (
+                np.empty((2, 0), dtype=self.index_dtype),
+                np.empty((2, 0), dtype=self.rotation_complex_dtype),
+                empty_counts,
+            )
+
+        (
+            inds_a,
+            inds_b,
+            bin_indices,
+            exp2phi1_real,
+            exp2phi1_imag,
+            exp2phi2_real,
+            exp2phi2_imag,
+        ) = self.kernel(
+            patch_inds_local,
+            ra_local,
+            dec_local,
+            binedges_local,
+        )
+
+        npairs = bin_indices.size
+        if npairs == 0:
+            return (
+                np.empty((2, 0), dtype=self.index_dtype),
+                np.empty((2, 0), dtype=self.rotation_complex_dtype),
+                empty_counts,
+            )
+
+        # Sort by angular bin for contiguous memory access in correlation kernels
+        order = np.argsort(bin_indices, kind="stable")
+        ninds = np.bincount(bin_indices, minlength=self.nbins).astype(np.int64)
+
+        all_inds = np.empty((2, npairs), dtype=self.index_dtype)
+        all_inds[0] = inds_a[order]
+        all_inds[1] = inds_b[order]
+
+        exp2phi = np.empty((2, npairs), dtype=self.rotation_complex_dtype)
+        exp2phi[0].real = exp2phi1_real[order].astype(self.rotation_dtype, copy=False)
+        exp2phi[0].imag = exp2phi1_imag[order].astype(self.rotation_dtype, copy=False)
+        exp2phi[1].real = exp2phi2_real[order].astype(self.rotation_dtype, copy=False)
+        exp2phi[1].imag = exp2phi2_imag[order].astype(self.rotation_dtype, copy=False)
+
+        return all_inds, exp2phi, ninds

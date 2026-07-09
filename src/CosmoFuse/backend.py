@@ -26,6 +26,10 @@ _CUPY_FASTMATH_OPTIONS = ("--use_fast_math", )
 _MAX_VECTOR_TOMO_BINS = 64
 _CUDA_DIR = Path(__file__).with_name("cuda")
 _CUDA_SOURCE_CACHE: dict[str, str] = {}
+# Sentinel distinguishing "never attempted" from "compilation failed" in the
+# per-builder kernel caches, so a failing NVRTC compilation is not retried
+# (and re-logged) on every subsequent call.
+_KERNEL_CACHE_MISS = object()
 
 def _load_cuda_source_file(filename: str) -> str:
     cached = _CUDA_SOURCE_CACHE.get(filename)
@@ -195,24 +199,40 @@ def _cpu_density_density_corr_kernel(
     ind_i: np.ndarray,
     ind_j: np.ndarray,
     offsets: np.ndarray,
-    out_w: np.ndarray,
+    out_ab: np.ndarray,
+    out_ba: np.ndarray,
+    out_ab_w: np.ndarray,
+    out_ba_w: np.ndarray,
 ) -> None:
-    """Galaxy clustering ξ_g numerator for a single tomo-bin pair.
+    """Galaxy clustering ξ_g numerators for a single tomo-bin pair.
 
-    Sums w_a·w_b·δ_a·δ_b over all pixel pairs in each angular bin.
+    Sums w_a·w_b·δ_a·δ_b over all pixel pairs in each angular bin, for
+    both pair orientations in a single pass over the pair list, and
+    accumulates the weight sums (denominators) alongside.
     """
     nbins = offsets.shape[0] - 1
     for b in prange(nbins):
-        sum_w = 0.0
+        sum_ab = 0.0
+        sum_ba = 0.0
+        sum_ab_w = 0.0
+        sum_ba_w = 0.0
         start = offsets[b]
         stop = offsets[b + 1]
 
         for idx in range(start, stop):
             i = ind_i[idx]
             j = ind_j[idx]
-            sum_w += w_a[i] * w_b[j] * density_a[i] * density_b[j]
+            w_ab = w_a[i] * w_b[j]
+            sum_ab += w_ab * density_a[i] * density_b[j]
+            sum_ab_w += w_ab
+            w_ba = w_a[j] * w_b[i]
+            sum_ba += w_ba * density_a[j] * density_b[i]
+            sum_ba_w += w_ba
 
-        out_w[b] = sum_w
+        out_ab[b] = sum_ab
+        out_ba[b] = sum_ba
+        out_ab_w[b] = sum_ab_w
+        out_ba_w[b] = sum_ba_w
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -224,30 +244,50 @@ def _cpu_density_shear_corr_kernel(
     w_source: np.ndarray,
     ind_i: np.ndarray,
     ind_j: np.ndarray,
+    exp_i: np.ndarray,
     exp_j: np.ndarray,
     offsets: np.ndarray,
-    out_gt: np.ndarray,
+    out_ab: np.ndarray,
+    out_ba: np.ndarray,
+    out_ab_w: np.ndarray,
+    out_ba_w: np.ndarray,
 ) -> None:
-    """Galaxy-galaxy lensing ξ_t numerator for a single tomo-bin pair.
+    """Galaxy-galaxy lensing ξ_t numerators for a single tomo-bin pair.
 
     Computes γ_t = -γ₁·cos(2φ) + γ₂·sin(2φ) and sums
-    w_lens·w_source·δ_lens·γ_t over all pairs in each angular bin.
+    w_lens·w_source·δ_lens·γ_t over all pairs in each angular bin, for
+    both lens/source orientations in a single pass over the pair list,
+    accumulating the weight sums (denominators) alongside.
     """
     nbins = offsets.shape[0] - 1
     for b in prange(nbins):
-        sum_gt = 0.0
+        sum_ab = 0.0
+        sum_ba = 0.0
+        sum_ab_w = 0.0
+        sum_ba_w = 0.0
         start = offsets[b]
         stop = offsets[b + 1]
 
         for idx in range(start, stop):
             i = ind_i[idx]
             j = ind_j[idx]
-            rot = exp_j[idx]
-            # Tangential shear of source galaxy j around lens galaxy i
-            gamma_t = -g1_source[j] * rot.real + g2_source[j] * rot.imag
-            sum_gt += w_lens[i] * w_source[j] * density_lens[i] * gamma_t
+            # A→B: pixel i = lens, pixel j = source
+            rot_ab = exp_j[idx]
+            gamma_t_ab = -g1_source[j] * rot_ab.real + g2_source[j] * rot_ab.imag
+            w_ab = w_lens[i] * w_source[j]
+            sum_ab += w_ab * density_lens[i] * gamma_t_ab
+            sum_ab_w += w_ab
+            # B→A: pixel j = lens, pixel i = source
+            rot_ba = exp_i[idx]
+            gamma_t_ba = -g1_source[i] * rot_ba.real + g2_source[i] * rot_ba.imag
+            w_ba = w_lens[j] * w_source[i]
+            sum_ba += w_ba * density_lens[j] * gamma_t_ba
+            sum_ba_w += w_ba
 
-        out_gt[b] = sum_gt
+        out_ab[b] = sum_ab
+        out_ba[b] = sum_ba
+        out_ab_w[b] = sum_ab_w
+        out_ba_w[b] = sum_ba_w
 
 
 # ── Vectorised tomographic CPU kernels ────────────────────────────────────
@@ -264,11 +304,15 @@ def _cpu_density_density_tomo_vectorized_kernel(
     comb_i: np.ndarray,
     comb_j: np.ndarray,
     out_num: np.ndarray,
+    out_den: np.ndarray,
 ) -> None:
     """Vectorised galaxy clustering ξ_g for all tomo-bin combinations.
 
     For cross-bin pairs (i≠j), averages the A→B and B→A orientations
-    to symmetrise the estimator.
+    to symmetrise the estimator.  The pair loop is outermost within each
+    bin so the pair indices and map rows are loaded once and reused for
+    every tomographic combination; the weight sums (denominators) are
+    accumulated in the same pass so no separate reduction is needed.
     """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
@@ -277,37 +321,34 @@ def _cpu_density_density_tomo_vectorized_kernel(
     for b in prange(n_bins):
         start = offsets[b]
         stop = offsets[b + 1]
+        acc_num = np.zeros(ncomb, dtype=out_num.dtype)
+        acc_den = np.zeros(ncomb, dtype=out_den.dtype)
 
-        for comb_idx in range(ncomb):
-            i = comb_i[comb_idx]
-            j = comb_j[comb_idx]
-            sum_w = 0.0
+        for idx in range(start, stop):
+            pix_i = int(ind_i[idx])
+            pix_j = int(ind_j[idx])
 
-            for idx in range(start, stop):
-                pix_i = int(ind_i[idx])
-                pix_j = int(ind_j[idx])
+            for comb_idx in range(ncomb):
+                i = comb_i[comb_idx]
+                j = comb_j[comb_idx]
 
                 # A→B orientation: tomo bin i at pixel_i, tomo bin j at pixel_j
-                ab = (
-                    weights[pix_i, i]
-                    * weights[pix_j, j]
-                    * density_map[pix_i, i]
-                    * density_map[pix_j, j]
-                )
+                w_ab = weights[pix_i, i] * weights[pix_j, j]
+                ab = w_ab * density_map[pix_i, i] * density_map[pix_j, j]
 
                 if i == j:
-                    sum_w += ab
+                    acc_num[comb_idx] += ab
+                    acc_den[comb_idx] += w_ab
                 else:
                     # B→A orientation: swap tomo bins to symmetrise
-                    ba = (
-                        weights[pix_i, j]
-                        * weights[pix_j, i]
-                        * density_map[pix_i, j]
-                        * density_map[pix_j, i]
-                    )
-                    sum_w += half * (ab + ba)
+                    w_ba = weights[pix_i, j] * weights[pix_j, i]
+                    ba = w_ba * density_map[pix_i, j] * density_map[pix_j, i]
+                    acc_num[comb_idx] += half * (ab + ba)
+                    acc_den[comb_idx] += half * (w_ab + w_ba)
 
-            out_num[comb_idx, b] = sum_w
+        for comb_idx in range(ncomb):
+            out_num[comb_idx, b] = acc_num[comb_idx]
+            out_den[comb_idx, b] = acc_den[comb_idx]
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -324,12 +365,16 @@ def _cpu_density_shear_tomo_vectorized_kernel(
     comb_i: np.ndarray,
     comb_j: np.ndarray,
     out_num: np.ndarray,
+    out_den: np.ndarray,
 ) -> None:
     """Vectorised galaxy-galaxy lensing ξ_t for all lens×source tomo
     combinations.
 
     Each pair contributes in both orientations: pixel i as lens with
-    pixel j as source (A→B), and vice versa (B→A).
+    pixel j as source (A→B), and vice versa (B→A).  The pair loop is
+    outermost within each bin so the pair indices and rotation factors
+    are loaded once per pair and reused for every combination; the
+    weight sums (denominators) are accumulated in the same pass.
     """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
@@ -337,42 +382,50 @@ def _cpu_density_shear_tomo_vectorized_kernel(
     for b in prange(n_bins):
         start = offsets[b]
         stop = offsets[b + 1]
+        acc_num = np.zeros(ncomb, dtype=out_num.dtype)
+        acc_den = np.zeros(ncomb, dtype=out_den.dtype)
 
-        for comb_idx in range(ncomb):
-            lens_bin = comb_i[comb_idx]
-            source_bin = comb_j[comb_idx]
-            sum_gt = 0.0
+        for idx in range(start, stop):
+            pix_i = int(ind_i[idx])
+            pix_j = int(ind_j[idx])
+            exp_j = rot_j[idx]
+            exp_i = rot_i[idx]
+            exp_j_re = exp_j.real
+            exp_j_im = exp_j.imag
+            exp_i_re = exp_i.real
+            exp_i_im = exp_i.imag
 
-            for idx in range(start, stop):
-                pix_i = int(ind_i[idx])
-                pix_j = int(ind_j[idx])
+            for comb_idx in range(ncomb):
+                lens_bin = comb_i[comb_idx]
+                source_bin = comb_j[comb_idx]
+
                 # A→B: pixel i = lens, pixel j = source
-                exp_j = rot_j[idx]
                 gamma_t_ij = (
-                    -shear_map[pix_j, source_bin, 0] * exp_j.real
-                    + shear_map[pix_j, source_bin, 1] * exp_j.imag
+                    -shear_map[pix_j, source_bin, 0] * exp_j_re
+                    + shear_map[pix_j, source_bin, 1] * exp_j_im
                 )
-                sum_gt += (
+                w_ab = (
                     lens_weights[pix_i, lens_bin]
                     * source_weights[pix_j, source_bin]
-                    * density_map[pix_i, lens_bin]
-                    * gamma_t_ij
                 )
+                acc_num[comb_idx] += w_ab * density_map[pix_i, lens_bin] * gamma_t_ij
+                acc_den[comb_idx] += w_ab
 
                 # B→A: pixel j = lens, pixel i = source
-                exp_i = rot_i[idx]
                 gamma_t_ji = (
-                    -shear_map[pix_i, source_bin, 0] * exp_i.real
-                    + shear_map[pix_i, source_bin, 1] * exp_i.imag
+                    -shear_map[pix_i, source_bin, 0] * exp_i_re
+                    + shear_map[pix_i, source_bin, 1] * exp_i_im
                 )
-                sum_gt += (
+                w_ba = (
                     lens_weights[pix_j, lens_bin]
                     * source_weights[pix_i, source_bin]
-                    * density_map[pix_j, lens_bin]
-                    * gamma_t_ji
                 )
+                acc_num[comb_idx] += w_ba * density_map[pix_j, lens_bin] * gamma_t_ji
+                acc_den[comb_idx] += w_ba
 
-            out_num[comb_idx, b] = sum_gt
+        for comb_idx in range(ncomb):
+            out_num[comb_idx, b] = acc_num[comb_idx]
+            out_den[comb_idx, b] = acc_den[comb_idx]
 
 
 def _build_cupy_density_density_corr_kernel(module: Any) -> Any:
@@ -419,8 +472,10 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
 
     def _get_or_build_raw_kernel(map_c_type: str, nzbins: int, index_c_type: str) -> Optional[Any]:
         key = (map_c_type, nzbins, index_c_type)
-        cached = kernel_cache.get(key)
-        if cached is not None:
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
             return cached
 
         name_expression = f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}, {index_c_type}>"
@@ -434,6 +489,7 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
                 nzbins,
                 exc,
             )
+            kernel_cache[key] = None
             return None
 
         kernel_cache[key] = kernel
@@ -501,8 +557,10 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         index_c_type: str,
     ) -> Optional[Any]:
         key = (map_c_type, suffix, nlens_bins, nsource_bins, index_c_type)
-        cached = kernel_cache.get(key)
-        if cached is not None:
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
             return cached
 
         name_expression = (
@@ -520,6 +578,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 nsource_bins,
                 exc,
             )
+            kernel_cache[key] = None
             return None
 
         kernel_cache[key] = kernel
@@ -620,24 +679,25 @@ def _cpu_xipm_cross_corr_kernel(
     out_ab_m: np.ndarray,
     out_ba_p: np.ndarray,
     out_ba_m: np.ndarray,
+    out_ab_w: np.ndarray,
+    out_ba_w: np.ndarray,
 ) -> None:
     """Cross-correlation ξ+/ξ- between two different shear catalogues (a, b).
 
     Computes both A→B and B→A orientations for asymmetric cross-correlations.
-    Real/imaginary parts are accumulated separately to stay compatible with
-    Numba's @njit (which has limited complex arithmetic support).
+    Only the real parts of the estimators are accumulated — every caller
+    discards the imaginary parts — and the weight sums (denominators) are
+    accumulated in the same pass over the pair list.
     """
     nbins = offsets.shape[0] - 1
     zero = wa[0] * 0.0
     for b in prange(nbins):
         ab_p_re = zero
-        ab_p_im = zero
         ab_m_re = zero
-        ab_m_im = zero
         ba_p_re = zero
-        ba_p_im = zero
         ba_m_re = zero
-        ba_m_im = zero
+        ab_w = zero
+        ba_w = zero
         start = offsets[b]
         stop = offsets[b + 1]
 
@@ -669,19 +729,20 @@ def _cpu_xipm_cross_corr_kernel(
             gb_j_rot_i = wb[j] * (gb_j_r * exp_ji + gb_j_i * exp_jr)
 
             ab_p_re += gb_j_rot_r * ga_i_rot_r + gb_j_rot_i * ga_i_rot_i
-            ab_p_im += gb_j_rot_i * ga_i_rot_r - gb_j_rot_r * ga_i_rot_i
             ab_m_re += gb_j_rot_r * ga_i_rot_r - gb_j_rot_i * ga_i_rot_i
-            ab_m_im += gb_j_rot_r * ga_i_rot_i + gb_j_rot_i * ga_i_rot_r
 
             ba_p_re += ga_j_rot_r * gb_i_rot_r + ga_j_rot_i * gb_i_rot_i
-            ba_p_im += ga_j_rot_i * gb_i_rot_r - ga_j_rot_r * gb_i_rot_i
             ba_m_re += ga_j_rot_r * gb_i_rot_r - ga_j_rot_i * gb_i_rot_i
-            ba_m_im += ga_j_rot_r * gb_i_rot_i + ga_j_rot_i * gb_i_rot_r
 
-        out_ab_p[b] = ab_p_re + 1j * ab_p_im
-        out_ab_m[b] = ab_m_re + 1j * ab_m_im
-        out_ba_p[b] = ba_p_re + 1j * ba_p_im
-        out_ba_m[b] = ba_m_re + 1j * ba_m_im
+            ab_w += wa[i] * wb[j]
+            ba_w += wb[i] * wa[j]
+
+        out_ab_p[b] = ab_p_re
+        out_ab_m[b] = ab_m_re
+        out_ba_p[b] = ba_p_re
+        out_ba_m[b] = ba_m_re
+        out_ab_w[b] = ab_w
+        out_ba_w[b] = ba_w
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -699,18 +760,20 @@ def _cpu_xipm_auto_corr_kernel(
     offsets: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
+    out_w: np.ndarray,
 ) -> None:
     """Auto-correlation ξ+/ξ- within a single tomo-bin pair.
 
-    Only one orientation is needed (the estimator is symmetric).
+    Only one orientation is needed (the estimator is symmetric).  Only the
+    real parts are accumulated (callers discard the imaginary parts) and
+    the weight sum (denominator) is accumulated in the same pass.
     """
     nbins = offsets.shape[0] - 1
     zero = w1[0] * 0.0
     for b in prange(nbins):
         p_acc_re = zero
-        p_acc_im = zero
         m_acc_re = zero
-        m_acc_im = zero
+        w_acc = zero
         start = offsets[b]
         stop = offsets[b + 1]
 
@@ -729,12 +792,12 @@ def _cpu_xipm_auto_corr_kernel(
             g1i = w2[j] * (g12[j] * exp_ji + g22[j] * exp_jr)
 
             p_acc_re += g1r * g2r + g1i * g2i
-            p_acc_im += g1i * g2r - g1r * g2i
             m_acc_re += g1r * g2r - g1i * g2i
-            m_acc_im += g1r * g2i + g1i * g2r
+            w_acc += w1[i] * w2[j]
 
-        out_p[b] = p_acc_re + 1j * p_acc_im
-        out_m[b] = m_acc_re + 1j * m_acc_im
+        out_p[b] = p_acc_re
+        out_m[b] = m_acc_re
+        out_w[b] = w_acc
 
 
 @njit(fastmath=True, parallel=True, cache=True)
@@ -750,12 +813,20 @@ def _cpu_vectorized_tomo_kernel(
     comb_j: np.ndarray,
     out_p: np.ndarray,
     out_m: np.ndarray,
+    out_w: np.ndarray,
 ) -> None:
     """Vectorised cosmic shear ξ+/ξ- for all tomo-bin combinations.
 
     For each pair, rotates the shear into the pair frame and computes
     both ξ+ = Re[γ'_b·conj(γ'_a)] and ξ- = Re[γ'_b·γ'_a].
     Cross-bin pairs (i≠j) contribute in both A→B and B→A orientations.
+
+    The pair loop is outermost within each bin so the pair indices and
+    rotation factors are loaded once per pair and reused for every
+    tomographic combination.  Only the real parts of the estimators are
+    accumulated, and the weight sums (denominators) are accumulated in
+    the same pass.  Output rows: 2k = A→B, 2k+1 = B→A (zero for
+    auto-combinations, which have no distinct B→A orientation).
     """
     n_bins = offsets.shape[0] - 1
     ncomb = comb_i.shape[0]
@@ -763,53 +834,67 @@ def _cpu_vectorized_tomo_kernel(
     for b in prange(n_bins):
         start = offsets[b]
         stop = offsets[b + 1]
+        acc_ab_p = np.zeros(ncomb, dtype=out_p.dtype)
+        acc_ab_m = np.zeros(ncomb, dtype=out_m.dtype)
+        acc_ab_w = np.zeros(ncomb, dtype=out_w.dtype)
+        acc_ba_p = np.zeros(ncomb, dtype=out_p.dtype)
+        acc_ba_m = np.zeros(ncomb, dtype=out_m.dtype)
+        acc_ba_w = np.zeros(ncomb, dtype=out_w.dtype)
 
-        for comb_idx in range(ncomb):
-            i = comb_i[comb_idx]
-            j = comb_j[comb_idx]
+        for idx in range(start, stop):
+            pix_i = int(ind_i[idx])
+            pix_j = int(ind_j[idx])
+            exp_i = rot_i[idx]
+            exp_j = rot_j[idx]
+            exp_i_re = exp_i.real
+            exp_i_im = exp_i.imag
+            exp_j_re = exp_j.real
+            exp_j_im = exp_j.imag
 
-            sum_ab_p = 0.0 + 0.0j
-            sum_ab_m = 0.0 + 0.0j
-            sum_ba_p = 0.0 + 0.0j
-            sum_ba_m = 0.0 + 0.0j
+            for comb_idx in range(ncomb):
+                i = comb_i[comb_idx]
+                j = comb_j[comb_idx]
 
-            for idx in range(start, stop):
-                pix_i = int(ind_i[idx])
-                pix_j = int(ind_j[idx])
-                exp_i = rot_i[idx]
-                exp_j = rot_j[idx]
+                ga1 = shear_map[pix_i, i, 0]
+                ga2 = shear_map[pix_i, i, 1]
+                gb1 = shear_map[pix_j, j, 0]
+                gb2 = shear_map[pix_j, j, 1]
 
-                ga_i = (
-                    shear_map[pix_i, i, 0] + 1j * shear_map[pix_i, i, 1]
-                ) * exp_i
-                gb_j = (
-                    shear_map[pix_j, j, 0] + 1j * shear_map[pix_j, j, 1]
-                ) * exp_j
+                a_r = ga1 * exp_i_re - ga2 * exp_i_im
+                a_i = ga1 * exp_i_im + ga2 * exp_i_re
+                b_r = gb1 * exp_j_re - gb2 * exp_j_im
+                b_i = gb1 * exp_j_im + gb2 * exp_j_re
+
                 w_ij = weights[pix_i, i] * weights[pix_j, j]
-
-                sum_ab_p += w_ij * gb_j * np.conjugate(ga_i)
-                sum_ab_m += w_ij * gb_j * ga_i
+                acc_ab_p[comb_idx] += w_ij * (b_r * a_r + b_i * a_i)
+                acc_ab_m[comb_idx] += w_ij * (b_r * a_r - b_i * a_i)
+                acc_ab_w[comb_idx] += w_ij
 
                 if i != j:
-                    ga_j = (
-                        shear_map[pix_j, i, 0] + 1j * shear_map[pix_j, i, 1]
-                    ) * exp_j
-                    gb_i = (
-                        shear_map[pix_i, j, 0] + 1j * shear_map[pix_i, j, 1]
-                    ) * exp_i
+                    gc1 = shear_map[pix_j, i, 0]
+                    gc2 = shear_map[pix_j, i, 1]
+                    gd1 = shear_map[pix_i, j, 0]
+                    gd2 = shear_map[pix_i, j, 1]
+
+                    c_r = gc1 * exp_j_re - gc2 * exp_j_im
+                    c_i = gc1 * exp_j_im + gc2 * exp_j_re
+                    d_r = gd1 * exp_i_re - gd2 * exp_i_im
+                    d_i = gd1 * exp_i_im + gd2 * exp_i_re
+
                     w_ji = weights[pix_i, j] * weights[pix_j, i]
+                    acc_ba_p[comb_idx] += w_ji * (c_r * d_r + c_i * d_i)
+                    acc_ba_m[comb_idx] += w_ji * (c_r * d_r - c_i * d_i)
+                    acc_ba_w[comb_idx] += w_ji
 
-                    sum_ba_p += w_ji * ga_j * np.conjugate(gb_i)
-                    sum_ba_m += w_ji * ga_j * gb_i
-
+        for comb_idx in range(ncomb):
             out_row_ab = 2 * comb_idx
-            out_p[out_row_ab, b] = sum_ab_p
-            out_m[out_row_ab, b] = sum_ab_m
-
-            if i != j:
-                out_row_ba = out_row_ab + 1
-                out_p[out_row_ba, b] = sum_ba_p
-                out_m[out_row_ba, b] = sum_ba_m
+            out_row_ba = out_row_ab + 1
+            out_p[out_row_ab, b] = acc_ab_p[comb_idx]
+            out_m[out_row_ab, b] = acc_ab_m[comb_idx]
+            out_w[out_row_ab, b] = acc_ab_w[comb_idx]
+            out_p[out_row_ba, b] = acc_ba_p[comb_idx]
+            out_m[out_row_ba, b] = acc_ba_m[comb_idx]
+            out_w[out_row_ba, b] = acc_ba_w[comb_idx]
 
 
 def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
@@ -824,8 +909,10 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         index_c_type: str,
     ) -> Optional[Any]:
         key = (map_c_type, suffix, nzbins, index_c_type)
-        cached = kernel_cache.get(key)
-        if cached is not None:
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
             return cached
 
         name_expression = (
@@ -841,6 +928,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
                 nzbins,
                 exc,
             )
+            kernel_cache[key] = None
             return None
         kernel_cache[key] = kernel
         return kernel
@@ -958,154 +1046,178 @@ def _cpu_3x2pt_tomo_fused_kernel(
     nbins_total = pair_offsets.shape[0] - 1
 
     # --- Aperture mass M_ap: γ_t convolved with Q(θ) per patch ---
-    for tomo_idx in prange(n_shear):
-        for patch_idx in range(n_patches):
-            start = q_offsets[patch_idx]
-            stop = q_offsets[patch_idx + 1]
-            sum_w = 0.0
-            sum_num = 0.0
-            for q_idx in range(start, stop):
-                pix_idx = q_inds[q_idx]
-                weight = shear_weights[pix_idx, tomo_idx]
-                gt = -shear_map[pix_idx, tomo_idx, 0] * q_cos[q_idx] - shear_map[pix_idx, tomo_idx, 1] * q_sin[q_idx]
-                sum_w += weight
-                sum_num += weight * gt * q_val[q_idx]
+    # prange over the flattened (tomo, patch) product so parallelism is not
+    # capped at the handful of tomographic bins.
+    for flat_idx in prange(n_shear * n_patches):
+        tomo_idx = flat_idx // n_patches
+        patch_idx = flat_idx - tomo_idx * n_patches
+        start = q_offsets[patch_idx]
+        stop = q_offsets[patch_idx + 1]
+        sum_w = 0.0
+        sum_num = 0.0
+        for q_idx in range(start, stop):
+            pix_idx = q_inds[q_idx]
+            weight = shear_weights[pix_idx, tomo_idx]
+            gt = -shear_map[pix_idx, tomo_idx, 0] * q_cos[q_idx] - shear_map[pix_idx, tomo_idx, 1] * q_sin[q_idx]
+            sum_w += weight
+            sum_num += weight * gt * q_val[q_idx]
 
-            out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
-            out_ma_den[tomo_idx, patch_idx] = sum_w
+        out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
+        out_ma_den[tomo_idx, patch_idx] = sum_w
 
     # --- Galaxy mean density M_g: δ_g convolved with Q(θ) per patch ---
-    for tomo_idx in prange(n_density):
-        for patch_idx in range(n_patches):
-            start = q_offsets[patch_idx]
-            stop = q_offsets[patch_idx + 1]
-            sum_w = 0.0
-            sum_num = 0.0
-            for q_idx in range(start, stop):
-                pix_idx = q_inds[q_idx]
-                weight = density_weights[pix_idx, tomo_idx]
-                sum_w += weight
-                sum_num += weight * density_map[pix_idx, tomo_idx] * q_val[q_idx]
+    for flat_idx in prange(n_density * n_patches):
+        tomo_idx = flat_idx // n_patches
+        patch_idx = flat_idx - tomo_idx * n_patches
+        start = q_offsets[patch_idx]
+        stop = q_offsets[patch_idx + 1]
+        sum_w = 0.0
+        sum_num = 0.0
+        for q_idx in range(start, stop):
+            pix_idx = q_inds[q_idx]
+            weight = density_weights[pix_idx, tomo_idx]
+            sum_w += weight
+            sum_num += weight * density_map[pix_idx, tomo_idx] * q_val[q_idx]
 
-            out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
-            out_mg_den[tomo_idx, patch_idx] = sum_w
+        out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
+        out_mg_den[tomo_idx, patch_idx] = sum_w
 
     # --- Cosmic shear ξ+/ξ- ---
+    # prange over angular bins; pair loop outermost inside each bin so the
+    # pair indices/rotations are loaded once and reused for every
+    # tomographic combination and orientation.
     n_ss_comb = ss_comb_i.shape[0]
-    for comb_ori in prange(2 * n_ss_comb):
-        comb_idx = comb_ori >> 1
-        ori = comb_ori & 1
-        i_bin = ss_comb_i[comb_idx]
-        j_bin = ss_comb_j[comb_idx]
+    for bin_flat in prange(nbins_total):
+        start = pair_offsets[bin_flat]
+        stop = pair_offsets[bin_flat + 1]
+        acc_p = np.zeros(2 * n_ss_comb, dtype=out_xip_num.dtype)
+        acc_m = np.zeros(2 * n_ss_comb, dtype=out_xim_num.dtype)
+        acc_w = np.zeros(2 * n_ss_comb, dtype=out_xipm_den.dtype)
 
-        if ori == 1 and i_bin == j_bin:
-            continue
+        for pair_idx in range(start, stop):
+            pix_a = ind_i[pair_idx]
+            pix_b = ind_j[pair_idx]
+            exp_a = rot_i[pair_idx]
+            exp_b = rot_j[pair_idx]
+            exp_a_re = exp_a.real
+            exp_a_im = exp_a.imag
+            exp_b_re = exp_b.real
+            exp_b_im = exp_b.imag
 
-        ai = i_bin
-        bj = j_bin
-        if ori == 1 and i_bin != j_bin:
-            ai = j_bin
-            bj = i_bin
+            for comb_idx in range(n_ss_comb):
+                i_bin = ss_comb_i[comb_idx]
+                j_bin = ss_comb_j[comb_idx]
 
-        for bin_flat in range(nbins_total):
-            start = pair_offsets[bin_flat]
-            stop = pair_offsets[bin_flat + 1]
-            sum_p = 0.0
-            sum_m = 0.0
-            sum_w = 0.0
-            for pair_idx in range(start, stop):
-                pix_a = ind_i[pair_idx]
-                pix_b = ind_j[pair_idx]
+                ga1 = shear_map[pix_a, i_bin, 0]
+                ga2 = shear_map[pix_a, i_bin, 1]
+                gb1 = shear_map[pix_b, j_bin, 0]
+                gb2 = shear_map[pix_b, j_bin, 1]
 
-                exp_a = rot_i[pair_idx]
-                exp_b = rot_j[pair_idx]
+                a_r = ga1 * exp_a_re - ga2 * exp_a_im
+                a_i = ga1 * exp_a_im + ga2 * exp_a_re
+                b_r = gb1 * exp_b_re - gb2 * exp_b_im
+                b_i = gb1 * exp_b_im + gb2 * exp_b_re
 
-                ga1 = shear_map[pix_a, ai, 0]
-                ga2 = shear_map[pix_a, ai, 1]
-                gb1 = shear_map[pix_b, bj, 0]
-                gb2 = shear_map[pix_b, bj, 1]
+                w_pair = shear_weights[pix_a, i_bin] * shear_weights[pix_b, j_bin]
+                row_ab = 2 * comb_idx
+                acc_w[row_ab] += w_pair
+                acc_p[row_ab] += w_pair * (b_r * a_r + b_i * a_i)
+                acc_m[row_ab] += w_pair * (b_r * a_r - b_i * a_i)
 
-                a_r = ga1 * exp_a.real - ga2 * exp_a.imag
-                a_i = ga1 * exp_a.imag + ga2 * exp_a.real
-                b_r = gb1 * exp_b.real - gb2 * exp_b.imag
-                b_i = gb1 * exp_b.imag + gb2 * exp_b.real
+                if i_bin != j_bin:
+                    gc1 = shear_map[pix_a, j_bin, 0]
+                    gc2 = shear_map[pix_a, j_bin, 1]
+                    gd1 = shear_map[pix_b, i_bin, 0]
+                    gd2 = shear_map[pix_b, i_bin, 1]
 
-                w_pair = shear_weights[pix_a, ai] * shear_weights[pix_b, bj]
-                sum_w += w_pair
-                sum_p += w_pair * (b_r * a_r + b_i * a_i)
-                sum_m += w_pair * (b_r * a_r - b_i * a_i)
+                    c_r = gc1 * exp_a_re - gc2 * exp_a_im
+                    c_i = gc1 * exp_a_im + gc2 * exp_a_re
+                    d_r = gd1 * exp_b_re - gd2 * exp_b_im
+                    d_i = gd1 * exp_b_im + gd2 * exp_b_re
 
-            out_xip_num[comb_ori, bin_flat] = sum_p
-            out_xim_num[comb_ori, bin_flat] = sum_m
-            out_xipm_den[comb_ori, bin_flat] = sum_w
+                    w_ba = shear_weights[pix_a, j_bin] * shear_weights[pix_b, i_bin]
+                    row_ba = row_ab + 1
+                    acc_w[row_ba] += w_ba
+                    acc_p[row_ba] += w_ba * (d_r * c_r + d_i * c_i)
+                    acc_m[row_ba] += w_ba * (d_r * c_r - d_i * c_i)
+
+        for row in range(2 * n_ss_comb):
+            out_xip_num[row, bin_flat] = acc_p[row]
+            out_xim_num[row, bin_flat] = acc_m[row]
+            out_xipm_den[row, bin_flat] = acc_w[row]
 
     # --- Galaxy clustering ξ_g ---
     n_dd_comb = dd_comb_i.shape[0]
-    for comb_ori in prange(2 * n_dd_comb):
-        comb_idx = comb_ori >> 1
-        ori = comb_ori & 1
-        i_bin = dd_comb_i[comb_idx]
-        j_bin = dd_comb_j[comb_idx]
+    for bin_flat in prange(nbins_total):
+        start = pair_offsets[bin_flat]
+        stop = pair_offsets[bin_flat + 1]
+        acc_num = np.zeros(2 * n_dd_comb, dtype=out_xig_num.dtype)
+        acc_den = np.zeros(2 * n_dd_comb, dtype=out_xig_den.dtype)
 
-        if ori == 1 and i_bin == j_bin:
-            continue
+        for pair_idx in range(start, stop):
+            pix_a = ind_i[pair_idx]
+            pix_b = ind_j[pair_idx]
 
-        ai = i_bin
-        bj = j_bin
-        if ori == 1 and i_bin != j_bin:
-            ai = j_bin
-            bj = i_bin
+            for comb_idx in range(n_dd_comb):
+                i_bin = dd_comb_i[comb_idx]
+                j_bin = dd_comb_j[comb_idx]
 
-        for bin_flat in range(nbins_total):
-            start = pair_offsets[bin_flat]
-            stop = pair_offsets[bin_flat + 1]
-            sum_num = 0.0
-            sum_den = 0.0
-            for pair_idx in range(start, stop):
-                pix_a = ind_i[pair_idx]
-                pix_b = ind_j[pair_idx]
-                weight = density_weights[pix_a, ai] * density_weights[pix_b, bj]
-                sum_den += weight
-                sum_num += weight * density_map[pix_a, ai] * density_map[pix_b, bj]
+                w_ab = density_weights[pix_a, i_bin] * density_weights[pix_b, j_bin]
+                row_ab = 2 * comb_idx
+                acc_den[row_ab] += w_ab
+                acc_num[row_ab] += w_ab * density_map[pix_a, i_bin] * density_map[pix_b, j_bin]
 
-            out_xig_num[comb_ori, bin_flat] = sum_num
-            out_xig_den[comb_ori, bin_flat] = sum_den
+                if i_bin != j_bin:
+                    w_ba = density_weights[pix_a, j_bin] * density_weights[pix_b, i_bin]
+                    row_ba = row_ab + 1
+                    acc_den[row_ba] += w_ba
+                    acc_num[row_ba] += w_ba * density_map[pix_a, j_bin] * density_map[pix_b, i_bin]
+
+        for row in range(2 * n_dd_comb):
+            out_xig_num[row, bin_flat] = acc_num[row]
+            out_xig_den[row, bin_flat] = acc_den[row]
 
     # --- Galaxy-galaxy lensing ξ_t ---
     n_ds_comb = ds_comb_i.shape[0]
-    for comb_idx in prange(n_ds_comb):
-        lens_bin = ds_comb_i[comb_idx]
-        source_bin = ds_comb_j[comb_idx]
+    for bin_flat in prange(nbins_total):
+        start = pair_offsets[bin_flat]
+        stop = pair_offsets[bin_flat + 1]
+        acc_num = np.zeros(n_ds_comb, dtype=out_xit_num.dtype)
+        acc_den = np.zeros(n_ds_comb, dtype=out_xit_den.dtype)
 
-        for bin_flat in range(nbins_total):
-            start = pair_offsets[bin_flat]
-            stop = pair_offsets[bin_flat + 1]
-            sum_num = 0.0
-            sum_den = 0.0
-            for pair_idx in range(start, stop):
-                pix_a = ind_i[pair_idx]
-                pix_b = ind_j[pair_idx]
+        for pair_idx in range(start, stop):
+            pix_a = ind_i[pair_idx]
+            pix_b = ind_j[pair_idx]
+            exp_ab = rot_j[pair_idx]
+            exp_ba = rot_i[pair_idx]
+            exp_ab_re = exp_ab.real
+            exp_ab_im = exp_ab.imag
+            exp_ba_re = exp_ba.real
+            exp_ba_im = exp_ba.imag
 
-                exp_ab = rot_j[pair_idx]
+            for comb_idx in range(n_ds_comb):
+                lens_bin = ds_comb_i[comb_idx]
+                source_bin = ds_comb_j[comb_idx]
+
                 gt_ab = (
-                    -shear_map[pix_b, source_bin, 0] * exp_ab.real
-                    + shear_map[pix_b, source_bin, 1] * exp_ab.imag
+                    -shear_map[pix_b, source_bin, 0] * exp_ab_re
+                    + shear_map[pix_b, source_bin, 1] * exp_ab_im
                 )
                 w_ab = density_weights[pix_a, lens_bin] * shear_weights[pix_b, source_bin]
-                sum_num += w_ab * density_map[pix_a, lens_bin] * gt_ab
-                sum_den += w_ab
+                acc_num[comb_idx] += w_ab * density_map[pix_a, lens_bin] * gt_ab
+                acc_den[comb_idx] += w_ab
 
-                exp_ba = rot_i[pair_idx]
                 gt_ba = (
-                    -shear_map[pix_a, source_bin, 0] * exp_ba.real
-                    + shear_map[pix_a, source_bin, 1] * exp_ba.imag
+                    -shear_map[pix_a, source_bin, 0] * exp_ba_re
+                    + shear_map[pix_a, source_bin, 1] * exp_ba_im
                 )
                 w_ba = density_weights[pix_b, lens_bin] * shear_weights[pix_a, source_bin]
-                sum_num += w_ba * density_map[pix_b, lens_bin] * gt_ba
-                sum_den += w_ba
+                acc_num[comb_idx] += w_ba * density_map[pix_b, lens_bin] * gt_ba
+                acc_den[comb_idx] += w_ba
 
-            out_xit_num[comb_idx, bin_flat] = sum_num
-            out_xit_den[comb_idx, bin_flat] = sum_den
+        for comb_idx in range(n_ds_comb):
+            out_xit_num[comb_idx, bin_flat] = acc_num[comb_idx]
+            out_xit_den[comb_idx, bin_flat] = acc_den[comb_idx]
 
 
 def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
@@ -1120,8 +1232,10 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         n_shear_bins: int,
     ) -> Optional[Any]:
         key = (map_c_type, suffix, index_c_type, n_density_bins, n_shear_bins)
-        cached = kernel_cache.get(key)
-        if cached is not None:
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
             return cached
 
         name_expression = (
@@ -1137,6 +1251,7 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
                 "Fused 3x2pt RawKernel compilation failed; using unfused path: %s",
                 exc,
             )
+            kernel_cache[key] = None
             return None
 
         kernel_cache[key] = kernel
@@ -1461,6 +1576,69 @@ class Backend:
         nbytes = count * dtype.itemsize
         mem = self.module.cuda.alloc_pinned_memory(nbytes)
         return np.frombuffer(mem, dtype=dtype, count=count).reshape(shape)
+
+    def warmup(
+        self,
+        map_dtype: Any = np.float64,
+        rotation_dtype: Any = np.float32,
+        rotation_complex_dtype: Any = np.complex64,
+        index_dtype: Any = np.int32,
+    ) -> None:
+        """Eagerly JIT-compile the CPU measurement kernels.
+
+        The Numba kernels compile lazily on first use, which otherwise
+        serializes ~10 parallel-kernel compilations with the first map
+        measurement.  Calling this once after constructing the backend
+        (with the dtypes that will be used) moves that cost out of the
+        measured path.  ``cache=True`` makes subsequent processes load
+        the compiled kernels from disk, so this is cheap after the first
+        run in a given environment.  No-op on GPU backends (CUDA kernels
+        are compiled per tomographic-bin-count template on first launch).
+        """
+        if self.name != 'numpy':
+            return
+
+        map_dtype = np.dtype(map_dtype)
+        rotation_dtype = np.dtype(rotation_dtype)
+        rotation_complex_dtype = np.dtype(rotation_complex_dtype)
+        index_dtype = np.dtype(index_dtype)
+
+        npix, nz = 4, 2
+        m = np.zeros((npix, nz), dtype=map_dtype)
+        shear = np.zeros((npix, nz, 2), dtype=map_dtype)
+        v1 = np.zeros(npix, dtype=map_dtype)
+        inds = np.zeros(2, dtype=index_dtype)
+        rot = np.ones(2, dtype=rotation_complex_dtype)
+        offsets = np.array([0, 2], dtype=np.int64)
+        comb = np.array([0], dtype=np.int32)
+        q_val = np.zeros(2, dtype=rotation_dtype)
+        q_offsets = np.array([0, 2], dtype=np.int64)
+        q_area = np.ones(1, dtype=rotation_dtype)
+        ones1 = np.ones(npix, dtype=map_dtype)
+
+        def outb(*shape: int) -> np.ndarray:
+            return np.zeros(shape, dtype=map_dtype)
+
+        self.aperture_density_kernel(inds, q_val, q_offsets, v1, ones1, q_area, outb(1))
+        self.aperture_shear_kernel(inds, q_val, q_val, q_val, q_offsets, v1, v1, ones1, q_area, outb(1))
+        self.kernel_density_density(v1, v1, ones1, ones1, inds, inds, offsets, outb(1), outb(1), outb(1), outb(1))
+        self.kernel_density_shear(v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1), outb(1))
+        self.xipm_auto_corr_kernel(v1, v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1))
+        self.xipm_cross_corr_kernel(v1, v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1), outb(1), outb(1), outb(1))
+        self.kernel_density_density_tomo_vectorized(m, m, inds, inds, offsets, comb, comb, outb(1, 1), outb(1, 1))
+        self.kernel_density_shear_tomo_vectorized(m, shear, m, m, inds, inds, rot, rot, offsets, comb, comb, outb(1, 1), outb(1, 1))
+        self.xipm_tomo_vectorized_kernel(shear, m, inds, inds, rot, rot, offsets, comb, comb, outb(2, 1), outb(2, 1), outb(2, 1))
+        self.kernel_3x2pt_tomo_fused(
+            m, shear, m, m,
+            inds, inds, rot, rot, offsets,
+            inds.astype(np.uint32), q_val.astype(map_dtype), q_val.astype(map_dtype),
+            q_val.astype(map_dtype), q_offsets, q_area.astype(map_dtype),
+            comb, comb, comb, comb, comb, comb,
+            outb(nz, 1), outb(nz, 1), outb(nz, 1), outb(nz, 1),
+            outb(2, 1), outb(2, 1), outb(2, 1),
+            outb(2, 1), outb(2, 1), outb(1, 1), outb(1, 1),
+        )
+
 
 def get_backend(device: Union[str, int] = 'auto') -> "Backend":
     """

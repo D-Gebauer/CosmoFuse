@@ -246,20 +246,6 @@ class TestCorrelation(unittest.TestCase):
         kernel_mock.assert_called_once()
         spy_getter.assert_called_with(False)
 
-    def test_get_pairs_patch_invalid_angle_method_raises(self):
-        corr = Correlation(
-            nside=self.nside,
-            phi_center=self.phi_center,
-            theta_center=self.theta_center,
-            nbins=self.nbins,
-        )
-        patch_inds = np.array([0, 1], dtype=np.uint32)
-        ra = np.array([0.0, 0.1], dtype=np.float64)
-        dec = np.array([0.0, 0.1], dtype=np.float64)
-
-        with self.assertRaisesRegex(ValueError, "angle_method must be one of"):
-            corr.get_pairs_patch(patch_inds, ra, dec, angle_method="invalid")
-
     def test_get_pairs_numba_kernel_cache_hit(self):
         correlations_module._compute_pairs_kernel_cache.clear()
         k1 = correlations_module._get_pairs_numba_kernel(True)
@@ -287,7 +273,6 @@ class TestCorrelation(unittest.TestCase):
             ra,
             dec,
             binedges,
-            2,
         )
 
         self.assertEqual(inds_a.size, 0)
@@ -319,7 +304,6 @@ class TestCorrelation(unittest.TestCase):
                 ra,
                 dec,
                 binedges,
-                0,
             )
 
         self.assertEqual(len(outputs), 7)
@@ -345,7 +329,6 @@ class TestCorrelation(unittest.TestCase):
                 ra,
                 dec,
                 binedges,
-                0,
             )
 
         self.assertEqual(len(outputs), 7)
@@ -382,7 +365,6 @@ class TestCorrelation(unittest.TestCase):
                 ra,
                 dec,
                 binedges,
-                2,
             )
 
         self.assertEqual(inds_a.size, 1)
@@ -422,7 +404,6 @@ class TestCorrelation(unittest.TestCase):
                 ra,
                 dec,
                 binedges,
-                2,
             )
 
         self.assertEqual(inds_a.size, 1)
@@ -430,19 +411,17 @@ class TestCorrelation(unittest.TestCase):
         self.assertEqual(exp2phi2_real[0], -1.0)
         self.assertEqual(exp2phi2_imag[0], 0.0)
 
-    def test_compute_pairs_numba_pyfunc_out_of_range_continues_for_arccos_and_law(self):
-        """Cover out-of-range continue branches for arccos and law angle methods."""
+    def test_compute_pairs_numba_pyfunc_out_of_range_continues(self):
+        """Cover the out-of-range continue branch of the pair kernel."""
         patch_inds = np.array([0, 1], dtype=np.uint32)
         ra = np.array([0.0, 0.3], dtype=np.float64)
         dec = np.array([0.0, 0.0], dtype=np.float64)
         binedges = np.array([0.4, 0.5], dtype=np.float64)
         kernel_fn = correlations_module._compute_pairs_impl
 
-        outputs_arccos = kernel_fn(patch_inds, ra, dec, binedges, 0)
-        outputs_law = kernel_fn(patch_inds, ra, dec, binedges, 2)
+        outputs = kernel_fn(patch_inds, ra, dec, binedges)
 
-        self.assertEqual(outputs_arccos[0].size, 0)
-        self.assertEqual(outputs_law[0].size, 0)
+        self.assertEqual(outputs[0].size, 0)
 
     def test_to_backend_array_bypasses_transfer_for_backend_native_arrays(self):
         corr = Correlation(

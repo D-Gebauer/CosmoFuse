@@ -24,25 +24,86 @@ from typing import Tuple, Dict, Optional
 import numpy as np
 
 
-def Q_T(theta: float, theta_Q: float = 90) -> float:
-    """Compensated filter for aperture mass M_ap (Schneider et al. 1998).
+def Q_crittenden(theta: float, theta_Q: float = 90) -> float:
+    """Exponential compensated aperture filter of Crittenden et al. (2002).
 
-    Q_T(θ) = θ² / (4π θ_Q⁴) · exp(-θ² / (2θ_Q²))
+    Tangential-shear filter of the Gaussian compensated aperture:
 
-    This filter has zero integral (compensated), so M_ap is insensitive
-    to the mass-sheet degeneracy.  θ_Q sets the characteristic smoothing
-    scale of the aperture.
+        Q(θ) = θ² / (4π θ_Q⁴) · exp(-θ² / (2 θ_Q²))
+
+    corresponding to the convergence-space filter
+    U(θ) = 1/(2π θ_Q²) · (1 - θ²/(2θ_Q²)) · exp(-θ²/(2θ_Q²)), which is
+    compensated (∫ dθ θ U(θ) = 0), so M_ap is insensitive to the
+    mass-sheet degeneracy.  Q is non-negative, peaks at θ = √2 θ_Q, is
+    normalised to ∫ Q(θ) dΩ = 1, and has formally unbounded support;
+    CosmoFuse truncates the aperture geometry at 5 θ_Q, where Q has
+    decayed to below 10⁻³ of its peak value.
+
+    This is CosmoFuse's default aperture filter, and the filter used for
+    the integrated 3-point correlation functions in Halder et al. (2021).
+
+    References:
+        Crittenden, Natarajan, Pen & Theuns 2002, ApJ 568, 20
+            (arXiv:astro-ph/0012336)
+        Halder, Friedrich, Seitz & Wang 2021, MNRAS 506, 2780
+            (arXiv:2102.10177)
 
     Args:
         theta: Angular distance to the aperture centre (radians).
         theta_Q: Aperture filter scale (arcminutes, default 90').
 
     Returns:
-        Filter value Q_T(θ).
+        Filter value Q(θ).
     """
 
     theta_Q = np.radians(theta_Q / 60)
     return theta**2 / (4 * np.pi * theta_Q**4) * np.exp(-(theta**2) / (2 * theta_Q**2))
+
+
+# Backwards-compatible alias.  The filter CosmoFuse has always applied is
+# the Crittenden et al. (2002) exponential filter above; it was previously
+# misattributed to Schneider et al. (1998) in the docstring.  ``Q_T``
+# remains the default aperture filter.
+Q_T = Q_crittenden
+
+
+def Q_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
+    """Polynomial compensated aperture filter of Schneider et al. (1998).
+
+    The widely used ℓ = 1 member of the polynomial filter family:
+
+        Q(θ) = 6/(π θ_Q²) · x² (1 - x²)    for x = θ/θ_Q ≤ 1,
+        Q(θ) = 0                           for x > 1,
+
+    corresponding to the convergence-space filter
+    U(θ) = 9/(π θ_Q²) · (1 - x²)(1/3 - x²) for x ≤ 1, which is
+    compensated and negative for 1/√3 < x < 1.  Like the Crittenden
+    et al. (2002) filter it is normalised to ∫ Q(θ) dΩ = 1, but it has
+    compact support: it vanishes identically beyond θ_Q.  (CosmoFuse
+    builds aperture geometry out to 5 θ_Q; with this filter the pixels
+    beyond θ_Q simply receive zero weight.)
+
+    Use it via the modular filter hooks, e.g.
+    ``preprocess(aperture_filter=Q_schneider)`` or
+    ``select_patch_centers(..., aperture_filter=Q_schneider)``.
+
+    References:
+        Schneider, van Waerbeke, Jain & Kruse 1998, MNRAS 296, 873
+            (arXiv:astro-ph/9708143)
+
+    Args:
+        theta: Angular distance to the aperture centre (radians).
+        theta_Q: Aperture radius (arcminutes, default 90').  The filter's
+            support ends exactly at this radius.
+
+    Returns:
+        Filter value Q(θ).
+    """
+
+    theta_ap = np.radians(theta_Q / 60)
+    x = np.asarray(theta) / theta_ap
+    values = 6.0 / (np.pi * theta_ap**2) * x**2 * (1.0 - x**2)
+    return np.where(x < 1.0, values, 0.0)
 
 
 def _get_pair_index(nbins: int, i: int, j: int) -> int:
@@ -133,13 +194,18 @@ def _zeta_from_fields(
         dtype=np.result_type(central.dtype, annulus.dtype),
     )
 
+    # Hoist the per-center and per-annulus means out of the triplet loop:
+    # there are only nzbins distinct centers and ncomb distinct annuli.
+    all_center_means = np.mean(central, axis=2)
+    all_annulus_means = np.mean(annulus, axis=2)
+
     for k, (z_center, z2, z3) in enumerate(zeta_combs):
         pair_idx = _get_pair_index(nzbins, z2, z3)
         center_vals = central[:, z_center, :]
         annulus_vals = annulus[:, pair_idx, :, :]
 
-        mean_center = np.mean(center_vals, axis=1)
-        mean_annulus = np.mean(annulus_vals, axis=1)
+        mean_center = all_center_means[:, z_center]
+        mean_annulus = all_annulus_means[:, pair_idx]
         mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
 
         out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
@@ -198,25 +264,28 @@ def _zeta_from_cross_fields(
     if n_correlations == triangular_pairs:
         zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
         out = np.zeros((nmaps, len(zeta_combs), nbins), dtype=dtype)
+        all_center_means = np.mean(central, axis=2)
+        all_annulus_means = np.mean(annulus, axis=2)
         for k, (z_center, z2, z3) in enumerate(zeta_combs):
             pair_idx = _get_pair_index(nzbins, z2, z3)
             center_vals = central[:, z_center, :]
             annulus_vals = annulus[:, pair_idx, :, :]
 
-            mean_center = np.mean(center_vals, axis=1)
-            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_center = all_center_means[:, z_center]
+            mean_annulus = all_annulus_means[:, pair_idx]
             mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
         return out
 
     out = np.zeros((nmaps, nzbins * n_correlations, nbins), dtype=dtype)
+    all_annulus_means = np.mean(annulus, axis=2)
     k = 0
     for z_center in range(nzbins):
         center_vals = central[:, z_center, :]
         mean_center = np.mean(center_vals, axis=1)
         for pair_idx in range(n_correlations):
             annulus_vals = annulus[:, pair_idx, :, :]
-            mean_annulus = np.mean(annulus_vals, axis=1)
+            mean_annulus = all_annulus_means[:, pair_idx]
             mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
             k += 1

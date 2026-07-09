@@ -6,6 +6,9 @@ on GPU/CPU, with support for shear measurements and aperture mass calculations.
 """
 
 from .correlation_helpers import (
+    Q_T,
+    Q_crittenden,
+    Q_schneider,
     calculate_all_zetas,
     zeta_a_g,
     zeta_a_minus,
@@ -17,7 +20,7 @@ from .correlation_helpers import (
     zeta_g_t,
 )
 from .correlations import Correlation
-from .utils import pixel2RaDec
+from .utils import pixel2RaDec, select_patch_centers
 
 __version__ = "4.1.0"
 __author__ = "David Gebauer"
@@ -25,6 +28,9 @@ __email__ = "git@gebauer.ai"
 
 __all__ = [
     "Correlation",
+    "Q_T",
+    "Q_crittenden",
+    "Q_schneider",
     "calculate_all_zetas",
     "zeta_g_plus",
     "zeta_g_minus",
@@ -35,4 +41,5 @@ __all__ = [
     "zeta_g_t",
     "zeta_a_t",
     "pixel2RaDec",
+    "select_patch_centers",
 ]

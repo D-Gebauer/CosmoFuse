@@ -41,6 +41,16 @@ class ComputeContext:
         ("_xipm_sumofweights_cache", None),
         ("_xipm_sumofweights_cache_w_fingerprint", None),
         ("_xipm_sumofweights_cache_prepare_version", None),
+        # LRU sum-of-weights caches for the density-density and
+        # density-shear (GGL) tomographic paths (GPU backend)
+        ("dd_sumofweights_cache", None),
+        ("ds_sumofweights_cache", None),
+        # Reusable device scratch: ntotpairs-sized per-pair buffers and
+        # aperture ElementwiseKernel numerator/denominator buffers
+        ("pair_scratch", None),
+        ("aperture_scratch", None),
+        # Cached unit-weight arrays for get_3x2pt_tomo(weights=None)
+        ("unit_weights_cache", None),
     )
     # Aperture filter geometry on host: pixel indices within each patch's
     # aperture, cos(2φ)/sin(2φ), filter values Q(θ), patch solid angles
