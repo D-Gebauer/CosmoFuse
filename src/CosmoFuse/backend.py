@@ -15,7 +15,7 @@ import logging
 from contextlib import nullcontext
 from pathlib import Path
 import warnings
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 from numba import njit, prange
@@ -155,14 +155,19 @@ def _cpu_aperture_shear_kernel(
 # ── CuPy ElementwiseKernel builders (GPU per-element operations) ──────────
 
 def _build_cupy_aperture_density_kernel(module: Any) -> Any:
-    """GPU kernel: per-pixel contribution to galaxy mean density M_g."""
+    """GPU kernel: per-pixel contribution to galaxy mean density M_g.
+
+    The filter geometry arrays (type letter ``Q``) may be narrower than the
+    map type ``T``; the ``(T)`` promotion at use is exact for float32 →
+    float64.
+    """
     return module.ElementwiseKernel(
-        "raw I Q_inds, raw T Q_val, raw T map_values, raw T weights",
+        "raw I Q_inds, raw Q Q_val, raw T map_values, raw T weights",
         "T out_num, T out_den",
         """
         const I idx = Q_inds[i];
         const T w = weights[idx];
-        out_num = w * map_values[idx] * Q_val[i];
+        out_num = w * map_values[idx] * (T)Q_val[i];
         out_den = w;
         """,
         "gpu_aperture_density_kernel",
@@ -171,21 +176,213 @@ def _build_cupy_aperture_density_kernel(module: Any) -> Any:
 
 
 def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
-    """GPU kernel: per-pixel contribution to aperture mass M_ap via γ_t·Q(θ)."""
+    """GPU kernel: per-pixel contribution to aperture mass M_ap via γ_t·Q(θ).
+
+    The filter geometry arrays (type letter ``Q``) may be narrower than the
+    map type ``T``; the ``(T)`` promotion at use is exact for float32 →
+    float64.
+    """
     return module.ElementwiseKernel(
-        "raw I Q_inds, raw T Q_cos, raw T Q_sin, raw T Q_val,"
+        "raw I Q_inds, raw Q Q_cos, raw Q Q_sin, raw Q Q_val,"
         " raw T g1, raw T g2, raw T weights",
         "T out_num, T out_den",
         """
         const I idx = Q_inds[i];
         const T w = weights[idx];
-        const T gt = -g1[idx] * Q_cos[i] - g2[idx] * Q_sin[i];
-        out_num = w * gt * Q_val[i];
+        const T gt = -g1[idx] * (T)Q_cos[i] - g2[idx] * (T)Q_sin[i];
+        out_num = w * gt * (T)Q_val[i];
         out_den = w;
         """,
         "gpu_aperture_shear_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
     )
+
+
+# ── Block-reduced aperture RawKernels (all tomo bins in one launch) ───────
+# Replace the per-pixel ElementwiseKernel + add.reduceat path with a single
+# launch over (patch, tomo bin) blocks; the wrappers fall back (return
+# False) when no raw compiler is available so callers can use the legacy
+# ElementwiseKernel path.
+
+def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int]:
+    """Return (array, row stride in elements) for a 2D device view.
+
+    The kernel requires a contiguous innermost dimension; strided views
+    such as ``shear[:, 0]`` of a ``(nz, 2, npix)`` array satisfy this and
+    are passed without a copy — only their row stride differs.
+    """
+    if arr.strides[-1] != arr.itemsize:
+        arr = module.ascontiguousarray(arr)
+    return arr, int(arr.strides[0] // arr.itemsize)
+
+
+def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
+    """Builder for the GPU block-reduced tomographic aperture-mass kernel."""
+    kernel_cache: dict[tuple[str, str], Any] = {}
+
+    def _get_or_build_raw_kernel(map_c_type: str, q_c_type: str) -> Optional[Any]:
+        key = (map_c_type, q_c_type)
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
+            return cached
+
+        name_expression = f"gpu_aperture_shear_tomo<{map_c_type}, {q_c_type}>"
+        source = _prepare_cuda_source("aperture_tomo.cu")
+
+        try:
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
+        except Exception as exc:
+            logger.warning(
+                "Aperture-shear tomo RawKernel compilation failed; using elementwise path: %s",
+                exc,
+            )
+            kernel_cache[key] = None
+            return None
+
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_aperture_tomo_shear_kernel(
+        g1: Any,
+        g2: Any,
+        weights: Any,
+        q_inds: Any,
+        q_cos: Any,
+        q_sin: Any,
+        q_val: Any,
+        q_offsets: Any,
+        q_patch_area: Any,
+        out_num: Any,
+        out_den: Any,
+    ) -> bool:
+        if not _has_raw_cuda_compiler(module):
+            return False
+        if g1.ndim != 2 or g2.ndim != 2 or weights.ndim != 2:
+            return False
+
+        map_c_type = "float" if weights.dtype == module.float32 else "double"
+        q_c_type = "float" if q_cos.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, q_c_type)
+        if raw_kernel is None:
+            return False
+
+        g1, g1_stride = _aperture_tomo_prepare_planar(module, g1)
+        g2, g2_stride = _aperture_tomo_prepare_planar(module, g2)
+        if g1_stride != g2_stride:
+            g1 = module.ascontiguousarray(g1)
+            g2 = module.ascontiguousarray(g2)
+            g1_stride = g2_stride = int(g1.shape[1])
+        weights, w_stride = _aperture_tomo_prepare_planar(module, weights)
+
+        npatches = int(q_offsets.shape[0] - 1)
+        ntomo = int(g1.shape[0])
+        threads = 256
+        blocks = (max(1, npatches), max(1, ntomo), 1)
+        raw_kernel(
+            blocks,
+            (threads,),
+            (
+                g1,
+                g2,
+                np.int64(g1_stride),
+                weights,
+                np.int64(w_stride),
+                q_inds,
+                q_cos,
+                q_sin,
+                q_val,
+                q_offsets,
+                q_patch_area,
+                out_num,
+                out_den,
+                np.int32(npatches),
+                np.int32(ntomo),
+            ),
+        )
+        return True
+
+    return _cupy_aperture_tomo_shear_kernel
+
+
+def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
+    """Builder for the GPU block-reduced tomographic aperture-density kernel."""
+    kernel_cache: dict[tuple[str, str], Any] = {}
+
+    def _get_or_build_raw_kernel(map_c_type: str, q_c_type: str) -> Optional[Any]:
+        key = (map_c_type, q_c_type)
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            # May be None: a previously failed compilation is cached negatively
+            # so it is not retried (and re-logged) on every call.
+            return cached
+
+        name_expression = f"gpu_aperture_density_tomo<{map_c_type}, {q_c_type}>"
+        source = _prepare_cuda_source("aperture_tomo.cu")
+
+        try:
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
+        except Exception as exc:
+            logger.warning(
+                "Aperture-density tomo RawKernel compilation failed; using elementwise path: %s",
+                exc,
+            )
+            kernel_cache[key] = None
+            return None
+
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_aperture_tomo_density_kernel(
+        values: Any,
+        weights: Any,
+        q_inds: Any,
+        q_val: Any,
+        q_offsets: Any,
+        q_patch_area: Any,
+        out_num: Any,
+        out_den: Any,
+    ) -> bool:
+        if not _has_raw_cuda_compiler(module):
+            return False
+        if values.ndim != 2 or weights.ndim != 2:
+            return False
+
+        map_c_type = "float" if weights.dtype == module.float32 else "double"
+        q_c_type = "float" if q_val.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, q_c_type)
+        if raw_kernel is None:
+            return False
+
+        values, v_stride = _aperture_tomo_prepare_planar(module, values)
+        weights, w_stride = _aperture_tomo_prepare_planar(module, weights)
+
+        npatches = int(q_offsets.shape[0] - 1)
+        ntomo = int(values.shape[0])
+        threads = 256
+        blocks = (max(1, npatches), max(1, ntomo), 1)
+        raw_kernel(
+            blocks,
+            (threads,),
+            (
+                values,
+                np.int64(v_stride),
+                weights,
+                np.int64(w_stride),
+                q_inds,
+                q_val,
+                q_offsets,
+                q_patch_area,
+                out_num,
+                out_den,
+                np.int32(npatches),
+                np.int32(ntomo),
+            ),
+        )
+        return True
+
+    return _cupy_aperture_tomo_density_kernel
 
 
 # ── Single-pair 2PCF kernels ─────────────────────────────────────────────
@@ -504,6 +701,7 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
         comb_i: Any,
         comb_j: Any,
         out_num: Any,
+        out_den: Any,
     ) -> bool:
         nzbins = int(density_map.shape[1])
         if nzbins > _MAX_VECTOR_TOMO_BINS:
@@ -534,6 +732,7 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
                 comb_i,
                 comb_j,
                 out_num,
+                out_den,
                 np.int32(ncomb),
                 np.int64(nbins_total),
                 np.int64(npairs),
@@ -597,6 +796,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         comb_i: Any,
         comb_j: Any,
         out_num: Any,
+        out_den: Any,
     ) -> bool:
         nlens_bins = int(density_map.shape[1])
         nsource_bins = int(shear_map.shape[1])
@@ -646,6 +846,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
                 comb_i,
                 comb_j,
                 out_num,
+                out_den,
                 np.int32(ncomb),
                 np.int64(nbins_total),
                 np.int64(npairs),
@@ -944,6 +1145,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         comb_i: Any,
         comb_j: Any,
         out_num: Any,
+        out_den: Any,
     ) -> bool:
         nzbins = int(shear_map.shape[1])
         if nzbins > _MAX_VECTOR_TOMO_BINS:
@@ -989,6 +1191,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
                 comb_i,
                 comb_j,
                 out_num,
+                out_den,
                 np.int32(ncomb),
                 np.int64(nbins_total),
                 np.int64(npairs),
@@ -1221,17 +1424,21 @@ def _cpu_3x2pt_tomo_fused_kernel(
 
 
 def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str, str, int, int], Any] = {}
+    kernel_cache: dict[tuple[str, str, str, str, int, int], Any] = {}
+    # One non-blocking stream per section, created lazily on first launch
+    # (per device: each Backend instance gets its own builder closure).
+    section_streams: list = []
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
         complex_c_type: str,
         suffix: str,
         index_c_type: str,
+        q_c_type: str,
         n_density_bins: int,
         n_shear_bins: int,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, index_c_type, n_density_bins, n_shear_bins)
+        key = (map_c_type, suffix, index_c_type, q_c_type, n_density_bins, n_shear_bins)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
@@ -1240,7 +1447,7 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
 
         name_expression = (
             f"gpu_3x2pt_tomo_fused<{map_c_type}, {complex_c_type}, "
-            f"{index_c_type}, {n_density_bins}, {n_shear_bins}>"
+            f"{index_c_type}, {q_c_type}, {n_density_bins}, {n_shear_bins}>"
         )
         source = _prepare_cuda_source("tomo_fused_3x2pt.cu")
 
@@ -1305,11 +1512,13 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         n_shear_bins = int(shear_map.shape[1])
         map_c_type = "float" if density_map.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
+        q_c_type = "float" if q_cos.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
             suffix,
             index_c_type,
+            q_c_type,
             n_density_bins,
             n_shear_bins,
         )
@@ -1323,55 +1532,78 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         n_dd_comb = int(dd_comb_i.shape[0])
         n_ds_comb = int(ds_comb_i.shape[0])
 
-        max_x = max(1, nbins_total, npatches)
-        max_y = max(1, n_shear_bins, n_density_bins, 2 * n_ss_comb, 2 * n_dd_comb, n_ds_comb)
-        threads = 256
-        blocks = (max_x, max_y, 5)
-
-        raw_kernel(
-            blocks,
-            (threads,),
-            (
-                density_map,
-                shear_map,
-                density_weights,
-                shear_weights,
-                ind_i,
-                ind_j,
-                rot_i,
-                rot_j,
-                pair_offsets,
-                np.int64(nbins_total),
-                np.int32(npatches),
-                np.int32(npix),
-                q_inds,
-                q_cos,
-                q_sin,
-                q_val,
-                q_offsets,
-                q_patch_area,
-                ss_comb_i,
-                ss_comb_j,
-                np.int32(n_ss_comb),
-                dd_comb_i,
-                dd_comb_j,
-                np.int32(n_dd_comb),
-                ds_comb_i,
-                ds_comb_j,
-                np.int32(n_ds_comb),
-                out_ma_num,
-                out_ma_den,
-                out_mg_num,
-                out_mg_den,
-                out_xip_num,
-                out_xim_num,
-                out_xipm_den,
-                out_xig_num,
-                out_xig_den,
-                out_xit_num,
-                out_xit_den,
-            ),
+        # One launch per correlation section with an exactly-sized grid,
+        # instead of one dense (max_x, max_y, 5) grid that is mostly no-op
+        # blocks at realistic sizes.
+        section_grids = (
+            (npatches, n_shear_bins),        # z=0  M_ap
+            (npatches, n_density_bins),      # z=1  M_g
+            (nbins_total, 2 * n_ss_comb),    # z=2  xi+/-
+            (nbins_total, 2 * n_dd_comb),    # z=3  xi_g
+            (nbins_total, n_ds_comb),        # z=4  xi_t
         )
+        threads = 256
+        base_args = (
+            density_map,
+            shear_map,
+            density_weights,
+            shear_weights,
+            ind_i,
+            ind_j,
+            rot_i,
+            rot_j,
+            pair_offsets,
+            np.int64(nbins_total),
+            np.int32(npatches),
+            np.int32(npix),
+            q_inds,
+            q_cos,
+            q_sin,
+            q_val,
+            q_offsets,
+            q_patch_area,
+            ss_comb_i,
+            ss_comb_j,
+            np.int32(n_ss_comb),
+            dd_comb_i,
+            dd_comb_j,
+            np.int32(n_dd_comb),
+            ds_comb_i,
+            ds_comb_j,
+            np.int32(n_ds_comb),
+            out_ma_num,
+            out_ma_den,
+            out_mg_num,
+            out_mg_den,
+            out_xip_num,
+            out_xim_num,
+            out_xipm_den,
+            out_xig_num,
+            out_xig_den,
+            out_xit_num,
+            out_xit_den,
+        )
+
+        if not section_streams:
+            section_streams.extend(
+                module.cuda.Stream(non_blocking=True) for _ in range(5)
+            )
+
+        # The sections write disjoint outputs -> run them concurrently.
+        current = module.cuda.get_current_stream()
+        ready = current.record()                 # inputs staged on current stream
+        for z, (gx, gy) in enumerate(section_grids):
+            if gx <= 0 or gy <= 0:
+                continue
+            stream = section_streams[z]
+            stream.wait_event(ready)
+            with stream:
+                raw_kernel(
+                    (int(gx), int(gy), 1),
+                    (threads,),
+                    base_args + (np.int32(z),),
+                )
+            current.wait_event(stream.record())  # downstream default-stream work waits
         return True
 
     return _cupy_3x2pt_tomo_fused_kernel
@@ -1445,6 +1677,8 @@ class Backend:
         xipm_tomo_vectorized_kernel: Optional[Any] = None,
         aperture_density_kernel: Optional[Any] = None,
         aperture_shear_kernel: Optional[Any] = None,
+        aperture_tomo_shear_kernel: Optional[Any] = None,
+        aperture_tomo_density_kernel: Optional[Any] = None,
         kernel_density_density: Optional[Any] = None,
         kernel_density_shear: Optional[Any] = None,
         kernel_density_density_tomo_vectorized: Optional[Any] = None,
@@ -1459,6 +1693,8 @@ class Backend:
         self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
         self.aperture_density_kernel = aperture_density_kernel
         self.aperture_shear_kernel = aperture_shear_kernel
+        self.aperture_tomo_shear_kernel = aperture_tomo_shear_kernel
+        self.aperture_tomo_density_kernel = aperture_tomo_density_kernel
         self.kernel_density_density = kernel_density_density
         self.kernel_density_shear = kernel_density_shear
         self.kernel_density_density_tomo_vectorized = (
@@ -1705,6 +1941,8 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 xipm_tomo_vectorized_kernel=_build_cupy_tomo_vectorized_kernel(cupy),
                 aperture_density_kernel=_build_cupy_aperture_density_kernel(cupy),
                 aperture_shear_kernel=_build_cupy_aperture_shear_kernel(cupy),
+                aperture_tomo_shear_kernel=_build_cupy_aperture_tomo_shear_kernel(cupy),
+                aperture_tomo_density_kernel=_build_cupy_aperture_tomo_density_kernel(cupy),
                 kernel_density_density=_build_cupy_density_density_corr_kernel(cupy),
                 kernel_density_shear=_build_cupy_density_shear_corr_kernel(cupy),
                 kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(cupy),

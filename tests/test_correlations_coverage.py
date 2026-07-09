@@ -1948,7 +1948,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIn("shear", captured)
         np.testing.assert_allclose(captured["shear"][:, 0, 1], -3.0)
 
-    def test_compute_3x2pt_tomo_fused_xig_cross_numpy_and_non_numpy_paths(self):
+    def test_compute_3x2pt_tomo_fused_xig_cross_same_estimator_on_both_paths(self):
         corr = self._make_small_cpu_corr()
 
         density_maps = np.array(
@@ -2021,8 +2021,9 @@ class TestCorrelationCoverage(unittest.TestCase):
             corr.backend.to_numpy = original_to_numpy
 
         xi_g_fake_gpu = out_fake_gpu[4]
-        expected_non_numpy = 0.5 * ((ab_num / ab_den) + (ba_num / ba_den))
-        self.assertAlmostEqual(xi_g_fake_gpu[1, 0, 0], expected_non_numpy)
+        # Both post-processing paths symmetrise cross-bin xi_g as the ratio
+        # of summed orientations (num_ab+num_ba)/(den_ab+den_ba).
+        self.assertAlmostEqual(np.asarray(xi_g_fake_gpu)[1, 0, 0], expected_numpy)
 
     def test_density_density_tomo_vectorized_gc_auto_cross_directional_sum_branch(self):
         corr = self._make_small_cpu_corr()
@@ -2115,13 +2116,15 @@ class TestCorrelationCoverage(unittest.TestCase):
         original_to_numpy = corr.backend.to_numpy
         original_kernel = corr.backend.kernel_3x2pt_tomo_fused
 
+        # The filter geometry uploads at rotation precision (Q_inds as
+        # uint32, Q_offsets as int64).
         q_signatures = {
             (np.asarray(corr.Q_inds_flat, dtype=np.uint32).shape, np.dtype(np.uint32).str),
-            (np.asarray(corr.Q_cos_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
-            (np.asarray(corr.Q_sin_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
-            (np.asarray(corr.Q_val_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+            (np.asarray(corr.Q_cos_flat, dtype=corr.rotation_dtype).shape, corr.rotation_dtype.str),
+            (np.asarray(corr.Q_sin_flat, dtype=corr.rotation_dtype).shape, corr.rotation_dtype.str),
+            (np.asarray(corr.Q_val_flat, dtype=corr.rotation_dtype).shape, corr.rotation_dtype.str),
             (np.asarray(corr.Q_offsets, dtype=np.int64).shape, np.dtype(np.int64).str),
-            (np.asarray(corr.Q_patch_area_flat, dtype=corr.map_dtype).shape, np.dtype(corr.map_dtype).str),
+            (np.asarray(corr.Q_patch_area_flat, dtype=corr.rotation_dtype).shape, corr.rotation_dtype.str),
         }
         q_upload_count = 0
 
@@ -3271,43 +3274,10 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.assertEqual(spy_compute.call_count, 0)
             self.assertEqual(spy_fp.call_count, 0)
 
-    def test_vectorized_shear_shear_same_w_reuses_cache(self):
-        """On the GPU-style branch the fingerprint cache avoids
-        recomputing the sum-of-weights for identical weight maps."""
-        nzbins = 2
-        shear_maps = np.random.rand(nzbins, 2, self.npix)
-        w = np.random.rand(nzbins, self.npix)
-        self._setup_mock_pairs()
-
-        nzbin_combs = 3
-        stub = (
-            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
-            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
-        )
-        self.corr.backend.name = "cupy"
-        orig_to_device = self.corr.backend.to_device
-        orig_to_numpy = self.corr.backend.to_numpy
-        self.corr.backend.to_device = lambda arr, stream=None: np.asarray(arr)
-        self.corr.backend.to_numpy = lambda arr, stream=None: np.asarray(arr)
-        try:
-            with patch.object(
-                self.corr,
-                "_xipm_tomo_vectorized",
-                return_value=stub,
-            ), patch.object(
-                self.corr,
-                "_compute_tomo_sumofweights",
-                wraps=self.corr._compute_tomo_sumofweights,
-            ) as spy_compute:
-                self.corr.vectorized_shear_shear(shear_maps, w)
-                self.corr.vectorized_shear_shear(shear_maps, w)
-                self.assertEqual(spy_compute.call_count, 1)
-        finally:
-            self.corr.backend.name = "numpy"
-            self.corr.backend.to_device = orig_to_device
-            self.corr.backend.to_numpy = orig_to_numpy
-
-    def test_vectorized_shear_shear_changed_w_recomputes(self):
+    def test_vectorized_shear_shear_gpu_branch_skips_sumofweights_machinery(self):
+        """On the GPU-style branch the kernel accumulates the denominators
+        in-pass, so neither fingerprinting nor the reduce machinery runs —
+        even when the weights change between calls."""
         nzbins = 2
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.random.rand(nzbins, self.npix)
@@ -3330,14 +3300,57 @@ class TestCorrelationCoverage(unittest.TestCase):
                 self.corr,
                 "_xipm_tomo_vectorized",
                 return_value=stub,
-            ), patch.object(
+            ) as spy_vectorized, patch.object(
                 self.corr,
                 "_compute_tomo_sumofweights",
-                wraps=self.corr._compute_tomo_sumofweights,
-            ) as spy_compute:
+                side_effect=AssertionError("sum-of-weights reduction should be skipped"),
+            ), patch.object(
+                self.corr,
+                "_fingerprint_weights",
+                side_effect=AssertionError("fingerprinting should be skipped"),
+            ):
                 self.corr.vectorized_shear_shear(shear_maps, w)
                 self.corr.vectorized_shear_shear(shear_maps, w_changed)
-                self.assertEqual(spy_compute.call_count, 2)
+                # sumofweights_dev is passed to the kernel path as None so
+                # the in-kernel denominators are used.
+                for call in spy_vectorized.call_args_list:
+                    self.assertIsNone(call.args[2])
+        finally:
+            self.corr.backend.name = "numpy"
+            self.corr.backend.to_device = orig_to_device
+            self.corr.backend.to_numpy = orig_to_numpy
+
+    def test_vectorized_shear_shear_gpu_branch_explicit_sumofweights_forwarded(self):
+        """An explicit sumofweights still bypasses the in-kernel denominators."""
+        nzbins = 2
+        nzbin_combs = 3
+        shear_maps = np.random.rand(nzbins, 2, self.npix)
+        w = np.random.rand(nzbins, self.npix)
+        explicit_sum = np.ones(
+            (2, nzbin_combs, self.corr.n_patches * self.corr.nbins), dtype=np.float64
+        )
+        self._setup_mock_pairs()
+
+        stub = (
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+            np.zeros((nzbin_combs, self.corr.n_patches, self.corr.nbins)),
+        )
+        self.corr.backend.name = "cupy"
+        orig_to_device = self.corr.backend.to_device
+        orig_to_numpy = self.corr.backend.to_numpy
+        self.corr.backend.to_device = lambda arr, stream=None: np.asarray(arr)
+        self.corr.backend.to_numpy = lambda arr, stream=None: np.asarray(arr)
+        try:
+            with patch.object(
+                self.corr,
+                "_xipm_tomo_vectorized",
+                return_value=stub,
+            ) as spy_vectorized:
+                self.corr.vectorized_shear_shear(
+                    shear_maps, w, sumofweights=explicit_sum
+                )
+                passed = spy_vectorized.call_args.args[2]
+                np.testing.assert_allclose(np.asarray(passed), explicit_sum)
         finally:
             self.corr.backend.name = "numpy"
             self.corr.backend.to_device = orig_to_device

@@ -178,3 +178,18 @@ tmp/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# LLM agent context files and directories
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+AGENTS.md
+GEMINI.md
+.gemini/
+.codex/
+.cursor/
+.cursorrules
+.windsurfrules
+.aider*
+.github/copilot-instructions.md
+llms.txt

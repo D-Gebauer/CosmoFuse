@@ -49,6 +49,7 @@ __global__ void gpu_fused_tomo_reduce_ds(
     const int* comb_i,        /* lens tomo bin for each combination      */
     const int* comb_j,        /* source tomo bin for each combination    */
     T* out_num,               /* output: weighted delta_g*gamma_t numerators     */
+    T* out_den,               /* output: A->B plus B->A weight sums          */
     const int ncomb,
     const long long nbins_total,
     const long long npairs)
@@ -67,6 +68,7 @@ __global__ void gpu_fused_tomo_reduce_ds(
     const long long stop = bin_offsets[bin_flat + 1];
 
     T sum_val = (T)0.0;
+    T sum_w = (T)0.0;
 
     for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
         const long long idx_a = (long long)ind_i[tid];
@@ -86,12 +88,9 @@ __global__ void gpu_fused_tomo_reduce_ds(
             + shear[shear_base_ab + 1] * rot_ab.y
         );
 
-        sum_val += (
-            lens_weights[lens_idx_ab]
-            * source_weights[source_idx_ab]
-            * density[lens_idx_ab]
-            * gamma_t_ab
-        );
+        const T w_ab = lens_weights[lens_idx_ab] * source_weights[source_idx_ab];
+        sum_w += w_ab;
+        sum_val += w_ab * density[lens_idx_ab] * gamma_t_ab;
 
         /* --- B->A: pixel b is lens, pixel a is source --- */
         const long long lens_idx_ba = idx_b * (long long)LENS_TOMO_BINS + lens_bin;
@@ -103,19 +102,17 @@ __global__ void gpu_fused_tomo_reduce_ds(
             + shear[shear_base_ba + 1] * rot_ba.y
         );
 
-        sum_val += (
-            lens_weights[lens_idx_ba]
-            * source_weights[source_idx_ba]
-            * density[lens_idx_ba]
-            * gamma_t_ba
-        );
+        const T w_ba = lens_weights[lens_idx_ba] * source_weights[source_idx_ba];
+        sum_w += w_ba;
+        sum_val += w_ba * density[lens_idx_ba] * gamma_t_ba;
     }
 
-    sum_val = block_reduce_sum<T>(sum_val);
+    block_reduce_sum_pair<T>(sum_val, sum_w, &sum_val, &sum_w);
 
     if (lane == 0) {
         const long long out_idx =
             ((long long)comb_idx) * nbins_total + bin_flat;
         out_num[out_idx] = sum_val;
+        out_den[out_idx] = sum_w;
     }
 }

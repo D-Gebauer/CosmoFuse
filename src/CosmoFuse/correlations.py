@@ -909,34 +909,31 @@ class Correlation:
             return
 
         module = self.backend.module
-        map_backend_dtype = getattr(module, self.map_dtype.name)
 
+        # The filter geometry stays at rotation precision on device (the
+        # kernels promote it to the map type at use, which is exact for
+        # float32 -> float64): halves the persistent aperture memory and
+        # its upload when rotation_precision is float32.
         q_inds_u32 = np.asarray(self.Q_inds_flat, dtype=np.uint32)
         self.compute_context.Q_inds_dev = module.ascontiguousarray(
             self.backend.to_device(q_inds_u32)
         )
         self.compute_context.Q_cos_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.map_dtype)).astype(
-                map_backend_dtype, copy=False
-            )
+            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.rotation_dtype))
         )
         self.compute_context.Q_sin_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.map_dtype)).astype(
-                map_backend_dtype, copy=False
-            )
+            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.rotation_dtype))
         )
         self.compute_context.Q_val_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.map_dtype)).astype(
-                map_backend_dtype, copy=False
-            )
+            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.rotation_dtype))
         )
         self.compute_context.Q_offsets_dev = module.ascontiguousarray(
             self.backend.to_device(np.asarray(self.Q_offsets, dtype=np.int64))
         )
         self.compute_context.Q_patch_area_dev = module.ascontiguousarray(
             self.backend.to_device(
-                np.asarray(self.Q_patch_area_flat, dtype=self.map_dtype)
-            ).astype(map_backend_dtype, copy=False)
+                np.asarray(self.Q_patch_area_flat, dtype=self.rotation_dtype)
+            )
         )
 
     def _get_or_create_fused_input_buffers(
@@ -1231,6 +1228,32 @@ class Correlation:
         g2_dev = self._to_backend_array(g2_arr, dtype=backend_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
 
+        tomo_kernel = getattr(self.backend, "aperture_tomo_shear_kernel", None)
+        if tomo_kernel is not None:
+            # Single launch over (patch,) blocks with ntomo=1: avoids the two
+            # aperture-sized temporaries and the reduceat pass below.
+            out_num = self.backend.zeros((1, self.n_patches), dtype=backend_dtype)
+            out_den = self.backend.zeros((1, self.n_patches), dtype=backend_dtype)
+            launched = tomo_kernel(
+                g1_dev.reshape(1, -1),
+                g2_dev.reshape(1, -1),
+                w_dev.reshape(1, -1),
+                Q_inds_dev,
+                Q_cos_dev,
+                Q_sin_dev,
+                Q_val_dev,
+                Q_offsets_dev,
+                Q_patch_area_dev,
+                out_num,
+                out_den,
+            )
+            if launched:
+                # Numerator is already area-scaled inside the kernel.
+                aperture_shear = self._normalize_by_weights(out_num, out_den)[0]
+                if return_device and self.backend.name == "cupy":
+                    return aperture_shear
+                return self.backend.to_numpy(aperture_shear)
+
         weighted_num, weighted_den = self._get_aperture_scratch(
             Q_inds_dev.shape[0], backend_dtype
         )
@@ -1284,6 +1307,29 @@ class Correlation:
         Q_patch_area_dev = self.compute_context.Q_patch_area_dev
         map_values_dev = self._to_backend_array(map_values_arr, dtype=backend_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
+
+        tomo_kernel = getattr(self.backend, "aperture_tomo_density_kernel", None)
+        if tomo_kernel is not None:
+            # Single launch over (patch,) blocks with ntomo=1: avoids the two
+            # aperture-sized temporaries and the reduceat pass below.
+            out_num = self.backend.zeros((1, self.n_patches), dtype=backend_dtype)
+            out_den = self.backend.zeros((1, self.n_patches), dtype=backend_dtype)
+            launched = tomo_kernel(
+                map_values_dev.reshape(1, -1),
+                w_dev.reshape(1, -1),
+                Q_inds_dev,
+                Q_val_dev,
+                Q_offsets_dev,
+                Q_patch_area_dev,
+                out_num,
+                out_den,
+            )
+            if launched:
+                # Numerator is already area-scaled inside the kernel.
+                aperture_density = self._normalize_by_weights(out_num, out_den)[0]
+                if return_device and self.backend.name == "cupy":
+                    return aperture_density
+                return self.backend.to_numpy(aperture_density)
 
         weighted_num, weighted_den = self._get_aperture_scratch(
             Q_inds_dev.shape[0], backend_dtype
@@ -1953,31 +1999,6 @@ class Correlation:
         """Backend-native dtype matching self.index_dtype (e.g. cupy.int32 or numpy.int64)."""
         return getattr(self.backend.module, self.index_dtype.name)
 
-    def _sumofweights_cache_get_or_compute(
-        self, cache_attr: str, key: Any, compute: Callable[[], Any]
-    ) -> Any:
-        """Small LRU cache for per-weight-set sum-of-weights arrays.
-
-        Entries are invalidated when the pair geometry changes
-        (``prepare_version``) and capped so per-map weights cannot
-        accumulate device arrays without bound.
-        """
-        ctx = self.compute_context
-        entry = getattr(ctx, cache_attr, None)
-        if not isinstance(entry, dict) or entry.get("__version__") != ctx.prepare_version:
-            entry = {"__version__": ctx.prepare_version}
-            setattr(ctx, cache_attr, entry)
-        if key in entry:
-            value = entry.pop(key)
-            entry[key] = value  # move to end (LRU)
-            return value
-        value = compute()
-        entry[key] = value
-        while len(entry) > 33:  # 32 entries + the version marker
-            oldest = next(k for k in entry if k != "__version__")
-            entry.pop(oldest)
-        return value
-
     def _get_pair_scratch(self, dtype: Any, count: int) -> Tuple[Any, ...]:
         """Reusable ntotpairs-sized device scratch buffers.
 
@@ -2294,8 +2315,13 @@ class Correlation:
 
         map_backend_dtype = getattr(module, self.map_dtype.name)
         nbins_total = int(self.n_patches * self.nbins)
+        # Auto-combination B→A rows are never written by the kernel, so both
+        # buffers must stay zero-initialised (do not switch to empty scratch).
         out_num = self.backend.zeros(
             (2, 2 * nzbin_combs, nbins_total), dtype=map_backend_dtype
+        )
+        out_den = self.backend.zeros(
+            (2 * nzbin_combs, nbins_total), dtype=map_backend_dtype
         )
 
         launched = tomo_kernel(
@@ -2309,9 +2335,15 @@ class Correlation:
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
         if not launched:
             return None
+
+        if sumofweights_dev is None:
+            # Denominators accumulated inside the kernel: rows 2k are the
+            # A→B weight sums, rows 2k+1 the B→A sums.
+            sumofweights_dev = module.stack((out_den[0::2], out_den[1::2]), axis=0)
 
         xip_reduced = out_num[0]
         xim_reduced = out_num[1]
@@ -2427,13 +2459,8 @@ class Correlation:
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-        _weights_fingerprint_source: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute tomographic shear 2PCFs xi+/xi-.
-
-        If ``sumofweights`` is provided explicitly, weight fingerprint/cache
-        checks are bypassed.
-        """
+        """Compute tomographic shear 2PCFs xi+/xi-."""
         if self.inds_dev is None:
             self.prepare()
 
@@ -2445,39 +2472,11 @@ class Correlation:
         shear_maps_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
 
-        if sumofweights is None and self.backend.name == "numpy":
-            # CPU path: the vectorized kernel accumulates the weight sums
-            # itself, so neither fingerprinting nor a separate reduction
-            # pass is needed.
+        if sumofweights is None:
+            # Both backends: the vectorized kernel accumulates the weight
+            # sums (denominators) in the same pass over the pairs, so no
+            # separate reduction or fingerprint/cache machinery is needed.
             sumofweights_dev = None
-        elif sumofweights is None:
-            w_fingerprint = self._fingerprint_weights(
-                w_arr if _weights_fingerprint_source is None else _weights_fingerprint_source
-            )
-            cache = self.compute_context._tomo_sumofweights_cache
-            cache_is_valid = (
-                cache is not None
-                and self.compute_context._tomo_sumofweights_cache_w_fingerprint
-                == w_fingerprint
-                and self.compute_context._tomo_sumofweights_cache_prepare_version
-                == self.compute_context.prepare_version
-                and len(cache.shape) >= 2
-                and cache.shape[0] == 2
-                and cache.shape[1] == nzbin_combs
-            )
-            if cache_is_valid:
-                sumofweights_dev = cache
-            else:
-                sumofweights_dev = self._compute_tomo_sumofweights(
-                    w_dev, nzbins, nzbin_combs
-                )
-                self.compute_context._tomo_sumofweights_cache = sumofweights_dev
-                self.compute_context._tomo_sumofweights_cache_w_fingerprint = (
-                    w_fingerprint
-                )
-                self.compute_context._tomo_sumofweights_cache_prepare_version = (
-                    self.compute_context.prepare_version
-                )
         else:
             sumofweights_arr = (
                 sumofweights
@@ -2542,6 +2541,46 @@ class Correlation:
 
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
+        kernel = getattr(self.backend, "aperture_tomo_shear_kernel", None)
+        if kernel is not None and self.backend.name == "cupy":
+            module = self.backend.module
+            map_backend_dtype = getattr(module, self.map_dtype.name)
+            if self.compute_context.Q_inds_dev is None:
+                self._prepare_aperture_device_buffers()
+            ctx = self.compute_context
+            shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
+            w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
+            if g1_fac != 1 or g2_fac != 1:
+                # Apply the sign flip before slicing the component views.
+                shear_dev = module.stack(
+                    (g1_fac * shear_dev[:, 0], g2_fac * shear_dev[:, 1]), axis=1
+                )
+            out_num = self.backend.zeros(
+                (nzbins, self.n_patches), dtype=map_backend_dtype
+            )
+            out_den = self.backend.zeros(
+                (nzbins, self.n_patches), dtype=map_backend_dtype
+            )
+            launched = kernel(
+                shear_dev[:, 0],  # views; strides passed explicitly
+                shear_dev[:, 1],
+                w_dev,
+                ctx.Q_inds_dev,
+                ctx.Q_cos_dev,
+                ctx.Q_sin_dev,
+                ctx.Q_val_dev,
+                ctx.Q_offsets_dev,
+                ctx.Q_patch_area_dev,
+                out_num,
+                out_den,
+            )
+            if launched:
+                # Numerator is already area-scaled inside the kernel.
+                M_a = self._normalize_by_weights(out_num, out_den)
+                if return_device:
+                    return M_a
+                return np.asarray(self.backend.to_numpy(M_a), dtype=self.map_dtype)
+
         keep_on_device = return_device and self.backend.name == "cupy"
         if keep_on_device:
             module = self.backend.module
@@ -2577,6 +2616,39 @@ class Correlation:
         w_arr = self._coerce_map_input_array(w)
 
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
+
+        kernel = getattr(self.backend, "aperture_tomo_density_kernel", None)
+        if kernel is not None and self.backend.name == "cupy":
+            module = self.backend.module
+            map_backend_dtype = getattr(module, self.map_dtype.name)
+            if self.compute_context.Q_inds_dev is None:
+                self._prepare_aperture_device_buffers()
+            ctx = self.compute_context
+            nzbins = int(density_arr.shape[0])
+            density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
+            w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
+            out_num = self.backend.zeros(
+                (nzbins, self.n_patches), dtype=map_backend_dtype
+            )
+            out_den = self.backend.zeros(
+                (nzbins, self.n_patches), dtype=map_backend_dtype
+            )
+            launched = kernel(
+                density_dev,
+                w_dev,
+                ctx.Q_inds_dev,
+                ctx.Q_val_dev,
+                ctx.Q_offsets_dev,
+                ctx.Q_patch_area_dev,
+                out_num,
+                out_den,
+            )
+            if launched:
+                # Numerator is already area-scaled inside the kernel.
+                M_g = self._normalize_by_weights(out_num, out_den)
+                if return_device:
+                    return M_g
+                return np.asarray(self.backend.to_numpy(M_g), dtype=self.map_dtype)
 
         keep_on_device = return_device and self.backend.name == "cupy"
         if keep_on_device:
@@ -2626,7 +2698,6 @@ class Correlation:
             flip_g1=flip_g1,
             flip_g2=flip_g2,
             return_device=return_device,
-            _weights_fingerprint_source=w_arr,
         )
         return M_a, xi_p, xi_m
 
@@ -2657,7 +2728,6 @@ class Correlation:
             sumofweights=sumofweights,
             gc_auto_correlations_only=gc_auto_correlations_only,
             return_device=return_device,
-            _weights_fingerprint_source=w_arr,
         )
         return M_g, xi_g
 
@@ -2712,7 +2782,6 @@ class Correlation:
             flip_g1=flip_g1,
             flip_g2=flip_g2,
             return_device=return_device,
-            _weights_fingerprint_sources=(density_w_arr, shear_w_arr),
         )
 
         if not return_N_ap and not return_M_ap:
@@ -2749,7 +2818,6 @@ class Correlation:
         sumofweights: Optional[np.ndarray],
         nzbins: int,
         gc_auto_correlations_only: bool = False,
-        _weights_fingerprint_source: Optional[np.ndarray] = None,
     ) -> Any:
         if self.inds_dev is None:
             self.prepare()
@@ -2781,46 +2849,9 @@ class Correlation:
             sumofweights_dev = self._normalize_tomo_sumofweights_directional(
                 sumofweights, nzbin_combs
             )
-        elif self.backend.name == "numpy":
-            # CPU kernel accumulates the denominators itself (below).
-            sumofweights_dev = None
         else:
-            fingerprint_src = (
-                weights if _weights_fingerprint_source is None
-                else _weights_fingerprint_source
-            )
-            cache_key = (
-                self._fingerprint_weights(fingerprint_src),
-                bool(gc_auto_correlations_only),
-                int(nzbins),
-            )
-
-            def _compute_dd_sums() -> Any:
-                if gc_auto_correlations_only:
-                    sums = self.backend.zeros(
-                        (2, nzbin_combs, nbins_total), dtype=map_backend_dtype
-                    )
-                    comb_i_np = np.asarray(self.backend.to_numpy(comb_i), dtype=np.int64)
-                    comb_j_np = np.asarray(self.backend.to_numpy(comb_j), dtype=np.int64)
-                    for k in range(nzbin_combs):
-                        i = int(comb_i_np[k])
-                        j = int(comb_j_np[k])
-                        sum_ij = self._reduce_pairs(
-                            w_dev[i][self.inds_dev[0]] * w_dev[j][self.inds_dev[1]]
-                        )
-                        sums[0, k] = sum_ij
-                        if i == j:
-                            sums[1, k] = sum_ij
-                        else:
-                            sums[1, k] = self._reduce_pairs(
-                                w_dev[j][self.inds_dev[0]] * w_dev[i][self.inds_dev[1]]
-                            )
-                    return sums
-                return self._compute_tomo_sumofweights(w_dev, nzbins, nzbin_combs)
-
-            sumofweights_dev = self._sumofweights_cache_get_or_compute(
-                "dd_sumofweights_cache", cache_key, _compute_dd_sums
-            )
+            # Both backends: the kernel accumulates the denominators itself.
+            sumofweights_dev = None
 
         inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
         inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
@@ -2859,7 +2890,10 @@ class Correlation:
                 out[k] = self._normalize_scalar_pairs(out_num[k], sum_k)
             return out
 
+        # Auto-combination B→A rows are never written by the kernel, so both
+        # buffers must stay zero-initialised (do not switch to empty scratch).
         out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
+        out_den = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
         launched = tomo_kernel(
             density_soa,
             w_soa,
@@ -2869,6 +2903,7 @@ class Correlation:
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
         if not launched:
             raise RuntimeError(
@@ -2877,13 +2912,21 @@ class Correlation:
 
         num_ab = out_num[0::2]
         num_ba = out_num[1::2]
+        if sumofweights_dev is None:
+            den_ab = out_den[0::2]
+            den_ba = out_den[1::2]
+        else:
+            den_ab = sumofweights_dev[0]
+            den_ba = sumofweights_dev[1]
         for k in range(nzbin_combs):
-            w_ab = self._normalize_scalar_pairs(num_ab[k], sumofweights_dev[0, k])
             if auto_comb[k]:
-                out[k] = w_ab
+                out[k] = self._normalize_scalar_pairs(num_ab[k], den_ab[k])
             else:
-                w_ba = self._normalize_scalar_pairs(num_ba[k], sumofweights_dev[1, k])
-                out[k] = half * (w_ab + w_ba)
+                # Symmetrise as the ratio of summed orientations — the same
+                # weighted estimator the CPU kernel accumulates directly.
+                out[k] = self._normalize_scalar_pairs(
+                    num_ab[k] + num_ba[k], den_ab[k] + den_ba[k]
+                )
 
         return out
 
@@ -2897,7 +2940,6 @@ class Correlation:
         nlens_bins: int,
         nsource_bins: int,
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
-        _weights_fingerprint_sources: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> Any:
         if self.inds_dev is None:
             self.prepare()
@@ -2965,7 +3007,7 @@ class Correlation:
             )
         else:
             out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
-            out_den = None
+            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
             launched = tomo_kernel(
                 density_soa,
                 shear_soa,
@@ -2979,6 +3021,7 @@ class Correlation:
                 comb_i,
                 comb_j,
                 out_num,
+                out_den,
             )
             if not launched:
                 raise RuntimeError(
@@ -2988,59 +3031,9 @@ class Correlation:
         num_ab = out_num
 
         if sumofweights is None:
-            if self.backend.name == "numpy":
-                # In-kernel denominator: already the A→B + B→A weight sum.
-                sum_total = out_den
-            else:
-                fingerprint_src_d = (
-                    density_w if _weights_fingerprint_sources is None
-                    else _weights_fingerprint_sources[0]
-                )
-                fingerprint_src_s = (
-                    shear_w if _weights_fingerprint_sources is None
-                    else _weights_fingerprint_sources[1]
-                )
-                if ggl_bin_combinations is None:
-                    comb_key: Any = ("full", int(nlens_bins), int(nsource_bins))
-                else:
-                    comb_key = tuple(
-                        (int(p[0]), int(p[1])) for p in ggl_bin_combinations
-                    )
-                cache_key = (
-                    self._fingerprint_weights(fingerprint_src_d),
-                    self._fingerprint_weights(fingerprint_src_s),
-                    comb_key,
-                )
-
-                def _compute_ds_sums() -> Any:
-                    comb_i_np = np.asarray(
-                        self.backend.to_numpy(comb_i_base), dtype=np.int64
-                    )
-                    comb_j_np = np.asarray(
-                        self.backend.to_numpy(comb_j_base), dtype=np.int64
-                    )
-                    sum_ab = self.backend.zeros(
-                        (nzbin_combs, nbins_total), dtype=map_backend_dtype
-                    )
-                    sum_ba = self.backend.zeros(
-                        (nzbin_combs, nbins_total), dtype=map_backend_dtype
-                    )
-                    for k in range(nzbin_combs):
-                        i = int(comb_i_np[k])
-                        j = int(comb_j_np[k])
-                        sum_ab[k] = self._reduce_pairs(
-                            density_w_dev[i][self.inds_dev[0]]
-                            * shear_w_dev[j][self.inds_dev[1]]
-                        )
-                        sum_ba[k] = self._reduce_pairs(
-                            density_w_dev[i][self.inds_dev[1]]
-                            * shear_w_dev[j][self.inds_dev[0]]
-                        )
-                    return sum_ab + sum_ba
-
-                sum_total = self._sumofweights_cache_get_or_compute(
-                    "ds_sumofweights_cache", cache_key, _compute_ds_sums
-                )
+            # In-kernel denominator: already the A→B + B→A weight sum
+            # (both backends).
+            sum_total = out_den
         else:
             if (
                 self._is_backend_native_array(sumofweights)
@@ -3079,7 +3072,6 @@ class Correlation:
         sumofweights: Optional[np.ndarray] = None,
         gc_auto_correlations_only: bool = False,
         return_device: bool = True,
-        _weights_fingerprint_source: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Compute tomographic galaxy clustering w(theta).
 
@@ -3096,7 +3088,6 @@ class Correlation:
             sumofweights,
             nzbins,
             gc_auto_correlations_only,
-            _weights_fingerprint_source=_weights_fingerprint_source,
         )
         if return_device and self.backend.name == "cupy":
             return self.backend.module.real(wtheta)
@@ -3113,7 +3104,6 @@ class Correlation:
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-        _weights_fingerprint_sources: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> np.ndarray:
         """Compute tomographic density-shear correlation with directional Lens->Source ordering.
 
@@ -3181,7 +3171,6 @@ class Correlation:
             nlens_bins,
             nsource_bins,
             ggl_bin_combinations=ggl_bin_combinations,
-            _weights_fingerprint_sources=_weights_fingerprint_sources,
         )
         if return_device and self.backend.name == "cupy":
             return self.backend.module.real(gammat)
@@ -3542,20 +3531,24 @@ class Correlation:
                 ab_idx = 2 * k
                 ba_idx = ab_idx + 1
 
-                _safe_div_into_device(
-                    out_xig_num[ab_idx].reshape((n_patches, self.nbins)),
-                    out_xig_den[ab_idx].reshape((n_patches, self.nbins)),
-                    xi_g_dev[k],
-                )
-
-                if not dd_auto[k]:
+                if dd_auto[k]:
                     _safe_div_into_device(
-                        out_xig_num[ba_idx].reshape((n_patches, self.nbins)),
-                        out_xig_den[ba_idx].reshape((n_patches, self.nbins)),
-                        tmp_a,
+                        out_xig_num[ab_idx].reshape((n_patches, self.nbins)),
+                        out_xig_den[ab_idx].reshape((n_patches, self.nbins)),
+                        xi_g_dev[k],
                     )
-                    xi_g_dev[k] += tmp_a
-                    xi_g_dev[k] *= half
+                else:
+                    # Symmetrise as the ratio of summed orientations — the
+                    # same weighted estimator as the CPU backend.
+                    _safe_div_into_device(
+                        (out_xig_num[ab_idx] + out_xig_num[ba_idx]).reshape(
+                            (n_patches, self.nbins)
+                        ),
+                        (out_xig_den[ab_idx] + out_xig_den[ba_idx]).reshape(
+                            (n_patches, self.nbins)
+                        ),
+                        xi_g_dev[k],
+                    )
 
             for k in range(ds_ncomb):
                 _safe_div_into_device(
@@ -3600,18 +3593,15 @@ class Correlation:
         for k in range(dd_ncomb):
             ab_idx = 2 * k
             ba_idx = ab_idx + 1
-            xig_ab = _safe_div(xig_num_np[ab_idx], xig_den_np[ab_idx]).reshape((n_patches, self.nbins))
             if dd_auto[k]:
-                xi_g[k] = xig_ab
+                xi_g[k] = _safe_div(xig_num_np[ab_idx], xig_den_np[ab_idx]).reshape((n_patches, self.nbins))
             else:
-                if self.backend.name == "numpy":
-                    xi_g[k] = _safe_div(
-                        xig_num_np[ab_idx] + xig_num_np[ba_idx],
-                        xig_den_np[ab_idx] + xig_den_np[ba_idx],
-                    ).reshape((n_patches, self.nbins))
-                else:
-                    xig_ba = _safe_div(xig_num_np[ba_idx], xig_den_np[ba_idx]).reshape((n_patches, self.nbins))
-                    xi_g[k] = half * (xig_ab + xig_ba)
+                # Symmetrise as the ratio of summed orientations — the same
+                # weighted estimator on both backends.
+                xi_g[k] = _safe_div(
+                    xig_num_np[ab_idx] + xig_num_np[ba_idx],
+                    xig_den_np[ab_idx] + xig_den_np[ba_idx],
+                ).reshape((n_patches, self.nbins))
 
         xit_num_np = np.asarray(self.backend.to_numpy(out_xit_num), dtype=self.map_dtype)
         xit_den_np = np.asarray(self.backend.to_numpy(out_xit_den), dtype=self.map_dtype)

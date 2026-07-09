@@ -35,6 +35,7 @@ __global__ void gpu_fused_tomo_reduce_dd(
     const int* comb_i,       /* tomo bin index for the "i" side               */
     const int* comb_j,       /* tomo bin index for the "j" side               */
     T* out_num,              /* output: weighted deltadelta numerators                */
+    T* out_den,              /* output: weight sums, one row per comb_ori     */
     const int ncomb,
     const long long nbins_total,
     const long long npairs)
@@ -59,8 +60,10 @@ __global__ void gpu_fused_tomo_reduce_dd(
     const long long stop = bin_offsets[bin_flat + 1];
 
     T sum_val = (T)0.0;
+    T sum_w = (T)0.0;
 
-    /* Sum w_a * w_b * delta_a * delta_b over all pairs in this angular bin */
+    /* Sum w_a * w_b * delta_a * delta_b over all pairs in this angular bin,
+       accumulating the weight sum (denominator) in the same pass */
     for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
         const long long idx_a = (long long)ind_i[tid];
         const long long idx_b = (long long)ind_j[tid];
@@ -76,19 +79,17 @@ __global__ void gpu_fused_tomo_reduce_dd(
         const long long base_a = idx_a * (long long)TOMO_BINS + ai;
         const long long base_b = idx_b * (long long)TOMO_BINS + bj;
 
-        sum_val += (
-            weights[base_a]
-            * weights[base_b]
-            * density[base_a]
-            * density[base_b]
-        );
+        const T w_pair = weights[base_a] * weights[base_b];
+        sum_w += w_pair;
+        sum_val += w_pair * density[base_a] * density[base_b];
     }
 
-    sum_val = block_reduce_sum<T>(sum_val);
+    block_reduce_sum_pair<T>(sum_val, sum_w, &sum_val, &sum_w);
 
     if (lane == 0) {
         const long long out_idx =
             ((long long)comb_ori) * nbins_total + bin_flat;
         out_num[out_idx] = sum_val;
+        out_den[out_idx] = sum_w;
     }
 }

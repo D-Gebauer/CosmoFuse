@@ -266,6 +266,23 @@ M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
 )
 ```
 
+**Overlapping uploads with compute (GPU)**:
+
+When measuring many maps in a loop, `PinnedMapPipeline` double-buffers the
+host→device transfers through pinned memory on a dedicated CUDA stream, so
+map k+1 uploads while map k computes (a no-op passthrough on CPU):
+
+```python
+from CosmoFuse import PinnedMapPipeline
+
+pipe = PinnedMapPipeline(correlation, {"shear": (nz, 2, npix), "w": (nz, npix)})
+dev = pipe.wait(pipe.stage({"shear": shear_np[0], "w": w_np[0]}))
+for k in range(nmaps):
+    nxt = pipe.stage({"shear": shear_np[k + 1], "w": w_np[k + 1]}) if k + 1 < nmaps else None
+    results.append(correlation.get_full_tomo_shear(dev["shear"], dev["w"]))
+    dev = pipe.wait(nxt)
+```
+
 ## Calculating i3PCFs
 
 The 8 i3PCFs can be computed with `CosmoFuse.correlation_helpers`:

@@ -1077,6 +1077,39 @@ class TestBackend(unittest.TestCase):
         self.assertFalse(ok2)
         self.assertEqual(len(compile_attempts), attempts_after_first)
 
+    @staticmethod
+    def _make_fake_cuda_namespace():
+        """Minimal stand-in for cupy.cuda: streams/events used by the
+        per-section fused launches."""
+
+        class FakeEvent:
+            pass
+
+        class FakeStream:
+            def __init__(self, non_blocking=False):
+                self.non_blocking = non_blocking
+
+            def record(self):
+                return FakeEvent()
+
+            def wait_event(self, _event):
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class FakeCuda:
+            Stream = FakeStream
+
+            @staticmethod
+            def get_current_stream():
+                return FakeStream()
+
+        return FakeCuda
+
     def test_cupy_3x2pt_tomo_fused_kernel_success_and_cache(self):
         compile_calls = {"count": 0}
         launches = []
@@ -1089,6 +1122,7 @@ class TestBackend(unittest.TestCase):
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
+            cuda = self._make_fake_cuda_namespace()
 
             @staticmethod
             def RawKernel(*_args, **_kwargs):
@@ -1133,7 +1167,26 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(kernel(*args))
         self.assertTrue(kernel(*args))
         self.assertEqual(compile_calls["count"], 1)
-        self.assertEqual(len(launches), 2)
+        # One launch per correlation section (5) for each of the two calls.
+        self.assertEqual(len(launches), 10)
+        # nbins_total=1, npatches=1, 1 tomo bin, 1 combination each:
+        expected_grids = [
+            (1, 1, 1),  # z=0 M_ap:  (npatches, n_shear_bins)
+            (1, 1, 1),  # z=1 M_g:   (npatches, n_density_bins)
+            (1, 2, 1),  # z=2 xi+/-: (nbins_total, 2 * n_ss_comb)
+            (1, 2, 1),  # z=3 xi_g:  (nbins_total, 2 * n_dd_comb)
+            (1, 1, 1),  # z=4 xi_t:  (nbins_total, n_ds_comb)
+        ]
+        for section, (launch, expected_grid) in enumerate(
+            zip(launches[:5], expected_grids)
+        ):
+            grid, block, launch_args = launch
+            self.assertEqual(grid, expected_grid)
+            self.assertEqual(block, (256,))
+            # The section selector is appended as the last kernel argument
+            # (after the 32 wrapper args + 6 derived size scalars).
+            self.assertEqual(int(launch_args[-1]), section)
+            self.assertEqual(len(launch_args), len(args) + 7)
 
     def test_cupy_3x2pt_tomo_fused_kernel_complex128_branch(self):
         class FakeKernel:
@@ -1145,6 +1198,7 @@ class TestBackend(unittest.TestCase):
             int32 = np.int32
             complex64 = np.complex64
             complex128 = np.complex128
+            cuda = self._make_fake_cuda_namespace()
 
             @staticmethod
             def RawKernel(_source, _kernel_name, options=None):
@@ -1235,6 +1289,7 @@ class TestBackend(unittest.TestCase):
                     np.array([0], dtype=np.int32),
                     np.array([0], dtype=np.int32),
                     np.zeros((2, 1), dtype=np.float32),
+                    np.zeros((2, 1), dtype=np.float32),
                 )
                 self.assertFalse(ok)
 
@@ -1266,6 +1321,7 @@ class TestBackend(unittest.TestCase):
             np.array([0, 0, 1], dtype=np.int32),
             np.array([0, 1, 1], dtype=np.int32),
             np.zeros((6, 1), dtype=np.float32),
+            np.zeros((6, 1), dtype=np.float32),
         )
         ok_cached = kernel(
             np.zeros((1, 2), dtype=np.float32),
@@ -1275,6 +1331,7 @@ class TestBackend(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
             np.array([0, 0, 1], dtype=np.int32),
             np.array([0, 1, 1], dtype=np.int32),
+            np.zeros((6, 1), dtype=np.float32),
             np.zeros((6, 1), dtype=np.float32),
         )
         self.assertTrue(ok)
@@ -1343,6 +1400,7 @@ class TestBackend(unittest.TestCase):
                     np.array([0], dtype=np.int32),
                     np.array([0], dtype=np.int32),
                     np.zeros((1, 1), dtype=np.float32),
+                    np.zeros((1, 1), dtype=np.float32),
                 )
                 self.assertFalse(ok)
 
@@ -1376,6 +1434,7 @@ class TestBackend(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
             np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float32),
             np.zeros((1, 1), dtype=np.float32),
         )
         self.assertTrue(ok)
@@ -1417,6 +1476,7 @@ class TestBackend(unittest.TestCase):
             np.array([0], dtype=np.int32),
             np.array([0], dtype=np.int32),
             np.zeros((1, 1), dtype=np.float32),
+            np.zeros((1, 1), dtype=np.float32),
         )
         self.assertTrue(kernel(*args))
         self.assertTrue(kernel(*args))
@@ -1449,6 +1509,7 @@ class TestBackend(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
             np.array([0], dtype=np.int32),
             np.array([0], dtype=np.int32),
+            np.zeros((1, 1), dtype=np.float64),
             np.zeros((1, 1), dtype=np.float64),
         )
         self.assertTrue(ok)
@@ -1507,6 +1568,7 @@ class TestBackend(unittest.TestCase):
                     np.array([0], dtype=np.int32),
                     np.array([0], dtype=np.int32),
                     np.zeros((2, 2, 1), dtype=np.complex64),
+                    np.zeros((2, 1), dtype=np.float32),
                 )
                 self.assertFalse(ok)
 
@@ -1539,6 +1601,7 @@ class TestBackend(unittest.TestCase):
         comb_i = np.array([0, 0, 1], dtype=np.int32)
         comb_j = np.array([0, 1, 1], dtype=np.int32)
         out_num = np.zeros((2, 6, 1), dtype=np.complex64)
+        out_den = np.zeros((6, 1), dtype=np.float32)
 
         ok1 = kernel(
             shear,
@@ -1551,6 +1614,7 @@ class TestBackend(unittest.TestCase):
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
         ok2 = kernel(
             shear,
@@ -1563,12 +1627,17 @@ class TestBackend(unittest.TestCase):
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
 
         self.assertTrue(ok1)
         self.assertTrue(ok2)
         self.assertEqual(rawkernel_calls["count"], 1)
         self.assertEqual(len(launches), 2)
+        # The launch tuple carries out_den directly after out_num.
+        launch_args = launches[0][2]
+        self.assertIs(launch_args[9], out_num)
+        self.assertIs(launch_args[10], out_den)
 
     def test_cupy_tomo_vectorized_kernel_complex128(self):
         class FakeKernel:
@@ -1601,6 +1670,7 @@ class TestBackend(unittest.TestCase):
         comb_i = np.array([0], dtype=np.int32)
         comb_j = np.array([0], dtype=np.int32)
         out_num = np.zeros((2, 1), dtype=np.float64)
+        out_den = np.zeros((2, 1), dtype=np.float64)
 
         ok = kernel(
             shear,
@@ -1613,6 +1683,7 @@ class TestBackend(unittest.TestCase):
             comb_i,
             comb_j,
             out_num,
+            out_den,
         )
         self.assertTrue(ok)
 
@@ -1645,12 +1716,14 @@ class TestBackend(unittest.TestCase):
         comb_i_2 = np.array([0, 0, 1], dtype=np.int32)
         comb_j_2 = np.array([0, 1, 1], dtype=np.int32)
         out_num_2 = np.zeros((2, 6, 1), dtype=np.complex64)
+        out_den_2 = np.zeros((6, 1), dtype=np.float32)
 
         shear_3 = np.zeros((1, 3, 2), dtype=np.float32)
         weights_3 = np.zeros((1, 3), dtype=np.float32)
         comb_i_3 = np.array([0, 0, 0, 1, 1, 2], dtype=np.int32)
         comb_j_3 = np.array([0, 1, 2, 1, 2, 2], dtype=np.int32)
         out_num_3 = np.zeros((2, 12, 1), dtype=np.complex64)
+        out_den_3 = np.zeros((12, 1), dtype=np.float32)
 
         ok_2 = kernel(
             shear_2,
@@ -1663,6 +1736,7 @@ class TestBackend(unittest.TestCase):
             comb_i_2,
             comb_j_2,
             out_num_2,
+            out_den_2,
         )
         ok_3 = kernel(
             shear_3,
@@ -1675,6 +1749,7 @@ class TestBackend(unittest.TestCase):
             comb_i_3,
             comb_j_3,
             out_num_3,
+            out_den_3,
         )
         ok_2_cached = kernel(
             shear_2,
@@ -1687,6 +1762,7 @@ class TestBackend(unittest.TestCase):
             comb_i_2,
             comb_j_2,
             out_num_2,
+            out_den_2,
         )
 
         self.assertTrue(ok_2)

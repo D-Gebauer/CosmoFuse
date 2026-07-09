@@ -24,18 +24,27 @@
  *        measuring the tangential shear of source galaxies around
  *        foreground lens positions.
  *
- * Grid layout (3D):
+ * Grid layout (2D, one launch per section):
  *   blockIdx.x = work item (patch index for z=0,1; angular bin for z=2,3,4)
  *   blockIdx.y = tomographic combination index
- *   blockIdx.z = correlation type selector (0-4, see above)
  *   threadIdx.x = parallel worker within the pair/pixel loop
+ *
+ * The correlation type selector z (0-4, see above) is passed as the
+ * `section` launch argument: the caller launches the kernel once per
+ * section with a grid sized exactly for that section, instead of one
+ * dense max-sized 3D grid full of no-op blocks.  The five sections write
+ * disjoint outputs, so the launches can run on concurrent streams.
  */
 
 __COMMON_CUDA_SOURCE__
 
 #include <cuComplex.h>
 
-template<typename T, typename C, typename I, int N_DENSITY, int N_SHEAR>
+/*
+ * QT -- scalar type of the aperture filter geometry (may be narrower than
+ *       the map type T; promotion to T at use is exact for float -> double)
+ */
+template<typename T, typename C, typename I, typename QT, int N_DENSITY, int N_SHEAR>
 __global__ void gpu_3x2pt_tomo_fused(
     /* --- Input maps (SoA layout, all tomo bins concatenated) --- */
     const T* density,        /* galaxy overdensity delta_g  [npix x N_DENSITY]      */
@@ -53,11 +62,11 @@ __global__ void gpu_3x2pt_tomo_fused(
     const int npix,
     /* --- Aperture filter geometry (for M_ap and M_g) --- */
     const unsigned int* q_inds,   /* pixel indices within each patch's aperture  */
-    const T* q_cos,               /* cos(2phi) of pixel w.r.t. patch centre        */
-    const T* q_sin,               /* sin(2phi) of pixel w.r.t. patch centre        */
-    const T* q_val,               /* Q(theta): compensated filter value              */
+    const QT* q_cos,              /* cos(2phi) of pixel w.r.t. patch centre        */
+    const QT* q_sin,              /* sin(2phi) of pixel w.r.t. patch centre        */
+    const QT* q_val,              /* Q(theta): compensated filter value              */
     const long long* q_offsets,   /* CSR offsets per patch                        */
-    const T* q_patch_area,        /* solid angle of each patch (steradians)       */
+    const QT* q_patch_area,       /* solid angle of each patch (steradians)       */
     /* --- Tomographic bin combinations for each correlation type --- */
     const int* ss_comb_i,    /* shear-shear: tomo bin for side i            */
     const int* ss_comb_j,    /* shear-shear: tomo bin for side j            */
@@ -79,12 +88,13 @@ __global__ void gpu_3x2pt_tomo_fused(
     T* out_xig_num,          /* xi_g numerator (galaxy clustering)                 */
     T* out_xig_den,          /* xi_g denominator                                  */
     T* out_xit_num,          /* xi_t numerator (galaxy-galaxy lensing)             */
-    T* out_xit_den)          /* xi_t denominator                                  */
+    T* out_xit_den,          /* xi_t denominator                                  */
+    const int section)       /* correlation type selector (0-4), one per launch */
 {
     const int lane = (int)threadIdx.x;
     const long long x = (long long)blockIdx.x;  /* patch or angular bin index */
     const int y = (int)blockIdx.y;               /* tomo combination index     */
-    const int z = (int)blockIdx.z;               /* correlation type selector  */
+    const int z = section;                       /* correlation type selector  */
 
     /* ================================================================
      * z=0 : Aperture mass M_ap(patch, tomo_bin)
@@ -109,14 +119,14 @@ __global__ void gpu_3x2pt_tomo_fused(
             const T g2 = shear[shear_idx + 1LL];
             const T wv = shear_w[w_idx];
             /* Tangential shear w.r.t. patch centre */
-            const T gt = -g1 * q_cos[idx] - g2 * q_sin[idx];
-            sum_num += wv * gt * q_val[idx];
+            const T gt = -g1 * (T)q_cos[idx] - g2 * (T)q_sin[idx];
+            sum_num += wv * gt * (T)q_val[idx];
             sum_den += wv;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
             const long long out_idx = (long long)y * (long long)npatches + x;
-            out_ma_num[out_idx] = q_patch_area[x] * sum_num;
+            out_ma_num[out_idx] = (T)q_patch_area[x] * sum_num;
             out_ma_den[out_idx] = sum_den;
         }
         return;
@@ -139,13 +149,13 @@ __global__ void gpu_3x2pt_tomo_fused(
             const unsigned int pix = q_inds[idx];
             const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;
             const T wv = density_w[d_idx];
-            sum_num += wv * density[d_idx] * q_val[idx];
+            sum_num += wv * density[d_idx] * (T)q_val[idx];
             sum_den += wv;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
             const long long out_idx = (long long)y * (long long)npatches + x;
-            out_mg_num[out_idx] = q_patch_area[x] * sum_num;
+            out_mg_num[out_idx] = (T)q_patch_area[x] * sum_num;
             out_mg_den[out_idx] = sum_den;
         }
         return;
