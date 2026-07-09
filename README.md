@@ -55,7 +55,7 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Calculate pairs for given mask & resolution once
 - Save/Load pairs using hdf5 files
 - Reuse pairs to measure i3PCFs across maps
-- Optimized backend kernels for Spin-0×Spin-0 ($w(\theta)$), Spin-0×Spin-2 ($\gamma_t$), and Spin-2×Spin-2 ($\xi_\pm$) workloads
+- Optimized backend kernels for Spin-0×Spin-0 ($`w(\theta)`$), Spin-0×Spin-2 ($\gamma_t$), and Spin-2×Spin-2 ($\xi_\pm$) workloads
 - Optimized tomographic kernels for all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
@@ -141,8 +141,6 @@ To load pairs and immediately release host-side pair arrays after backend prepar
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
 Pair files are written in a consolidated layout (format version 2) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable.
-
-Note: `index_precision` has been removed from the public API. Index buffers are now fixed to int64 internally.
 
 ### Aperture filters
 
