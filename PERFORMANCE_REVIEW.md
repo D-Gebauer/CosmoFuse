@@ -95,6 +95,9 @@ items 3/19/20, items 15 (streams/pinned overlap), 16 (combination tiling),
 17 (payload interleaving), 27 (float32 aperture upload), 28 (mixed
 precision), and the two architectural items 9 (multi-map batching) and 10
 (index compaction), which warrant their own API design and GPU validation.
+A step-by-step, code-complete implementation plan for all of these —
+including the validation harness (`benchmarks/bench_gpu_parity.py`) and
+per-step stop/go criteria — is in `GPU_IMPLEMENTATION_GUIDE.md`.
 
 ---
 
