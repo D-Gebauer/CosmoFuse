@@ -55,7 +55,7 @@ under matched conditions (4-core Linux container, Numba 0.66, JIT enabled;
 | `vectorized_density_density` (ξ_g) | 3887 ms | 625 ms | **6.2×** |
 | `vectorized_density_shear` (GGL, 25 combs) | 8023 ms | 1407 ms | **5.7×** |
 | `get_full_tomo_shear` (M_ap + ξ±) | 1973 ms | 894 ms | **2.2×** |
-| `get_3x2pt_tomo` (fused) | 4126 ms | 3872 ms | 1.07× |
+| `get_3x2pt_tomo` (fused) | 4126 ms | 2230 ms | **1.85×** |
 | `compute_shear_shear` (single-bin auto) | 136 ms | 52 ms | **2.6×** |
 | `compute_density_density` (single-bin) | 222 ms | 45 ms | **5.0×** |
 | `compute_density_shear` (single-bin) | 284 ms | 68 ms | **4.2×** |
@@ -79,12 +79,12 @@ compilations). Notes:
   accumulate their weight sums in the same pass, so the CPU measurement
   paths need neither fingerprinting nor separate reductions. The GPU paths
   got the item-1 LRU fingerprint caches instead.
-- Item 4: the loop interchange helps the standalone kernels (per-pair
-  index/rotation loads amortized over combinations) but measured *slower*
-  inside the fused 3×2pt kernel, where per-bin pair segments are
-  cache-resident and register accumulators win — there the fix kept the
-  original loop order and instead flattened `prange` over
-  (combination × bin) as item 22 prescribes (matching the CUDA grid).
+- Item 4: the loop interchange (pair loop outermost, combinations inner
+  with per-bin accumulator arrays) was applied to the standalone kernels
+  and to the ξ±/ξ_g/ξ_t sections of the fused 3×2pt kernel — both were
+  measured against a flattened comb-outer variant and won (fused path:
+  2230 ms vs 3872 ms). The aperture sections use item 22's flattened
+  `prange` over (tomo × patch).
 - Item 14: the `pix2vec` conversion was deliberately left out — verified
   impact is negligible and it perturbs results at the ULP level.
 
