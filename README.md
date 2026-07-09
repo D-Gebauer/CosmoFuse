@@ -150,7 +150,7 @@ The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated fil
 
 $$ Q(\theta) = \frac{\theta^2}{4\pi\theta_Q^4} \exp\left(-\frac{\theta^2}{2\theta_Q^2}\right) $$
 
-It peaks at $\theta = \sqrt{2}\,\theta_Q$ and has decayed to below $10^{-3}$ of its peak value at the $5\,\theta_Q$ truncation radius. `Q_T` remains available as a backwards-compatible alias (earlier versions misattributed this filter to Schneider et al. 1998 — the implemented formula was always the one above).
+It peaks at $\theta = \sqrt{2}\,\theta_Q$ and has decayed to below $10^{-3}$ of its peak value at the $5\,\theta_Q$ truncation radius.
 
 **`Q_schneider`** — the polynomial ($\ell = 1$) compensated filter of [Schneider et al. (1998)](https://arxiv.org/abs/astro-ph/9708143), which has compact support:
 
