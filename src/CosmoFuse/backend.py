@@ -633,11 +633,12 @@ def _build_cupy_density_density_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T density_a, raw T density_b, raw T w_a, raw T w_b,"
         " raw I ind_i, raw I ind_j",
-        "T out_w",
+        "A out_w",
         """
         const I i_idx = ind_i[i];
         const I j_idx = ind_j[i];
-        out_w = w_a[i_idx] * w_b[j_idx] * density_a[i_idx] * density_b[j_idx];
+        /* product at map precision T; stored at the accumulator type A */
+        out_w = (A)(w_a[i_idx] * w_b[j_idx] * density_a[i_idx] * density_b[j_idx]);
         """,
         "gpu_density_density_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
@@ -649,13 +650,14 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T density_lens, raw T g1_source, raw T g2_source,"
         " raw T w_lens, raw T w_source, raw I ind_i, raw I ind_j, raw C exp_j",
-        "T out_gt",
+        "A out_gt",
         """
         const I i_idx = ind_i[i];
         const I j_idx = ind_j[i];
         const C rot = exp_j[i];
         const T gamma_t = -g1_source[j_idx] * real(rot) + g2_source[j_idx] * imag(rot);
-        out_gt = w_lens[i_idx] * w_source[j_idx] * density_lens[i_idx] * gamma_t;
+        /* product at map precision T; stored at the accumulator type A */
+        out_gt = (A)(w_lens[i_idx] * w_source[j_idx] * density_lens[i_idx] * gamma_t);
         """,
         "gpu_density_shear_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
@@ -668,17 +670,21 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
 
 def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
     """Builder for GPU tomographic galaxy clustering ξ_g kernel."""
-    kernel_cache: dict[tuple[str, int, str], Any] = {}
+    kernel_cache: dict[tuple[str, int, str, str], Any] = {}
 
-    def _get_or_build_raw_kernel(map_c_type: str, nzbins: int, index_c_type: str) -> Optional[Any]:
-        key = (map_c_type, nzbins, index_c_type)
+    def _get_or_build_raw_kernel(
+        map_c_type: str, nzbins: int, index_c_type: str, acc_c_type: str
+    ) -> Optional[Any]:
+        key = (map_c_type, nzbins, index_c_type, acc_c_type)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
             # so it is not retried (and re-logged) on every call.
             return cached
 
-        name_expression = f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}, {index_c_type}>"
+        name_expression = (
+            f"gpu_fused_tomo_reduce_dd<{map_c_type}, {nzbins}, {index_c_type}, {acc_c_type}>"
+        )
         source = _prepare_cuda_source("density_density_tomo_vectorized.cu")
 
         try:
@@ -714,7 +720,9 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
-        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins, index_c_type)
+        # Accumulator type follows the orchestrator-allocated output buffers.
+        acc_c_type = "float" if out_num.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins, index_c_type, acc_c_type)
         if raw_kernel is None:
             return False
 
@@ -748,7 +756,7 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
 
 def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
     """Builder for GPU tomographic galaxy-galaxy lensing ξ_t kernel."""
-    kernel_cache: dict[tuple[str, str, int, int, str], Any] = {}
+    kernel_cache: dict[tuple[str, str, int, int, str, str], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
@@ -757,8 +765,9 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         nlens_bins: int,
         nsource_bins: int,
         index_c_type: str,
+        acc_c_type: str,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nlens_bins, nsource_bins, index_c_type)
+        key = (map_c_type, suffix, nlens_bins, nsource_bins, index_c_type, acc_c_type)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
@@ -767,7 +776,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
 
         name_expression = (
             f"gpu_fused_tomo_reduce_ds<{map_c_type}, {complex_c_type}, "
-            f"{nlens_bins}, {nsource_bins}, {index_c_type}>"
+            f"{nlens_bins}, {nsource_bins}, {index_c_type}, {acc_c_type}>"
         )
         source = _prepare_cuda_source("density_shear_tomo_vectorized.cu")
 
@@ -817,6 +826,8 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
 
         map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
+        # Accumulator type follows the orchestrator-allocated output buffers.
+        acc_c_type = "float" if out_num.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
@@ -824,6 +835,7 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
             nlens_bins,
             nsource_bins,
             index_c_type,
+            acc_c_type,
         )
         if raw_kernel is None:
             return False
@@ -1103,7 +1115,7 @@ def _cpu_vectorized_tomo_kernel(
 
 def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     """Builder for GPU tomographic cosmic shear ξ+/ξ- kernel."""
-    kernel_cache: dict[tuple[str, str, int, str], Any] = {}
+    kernel_cache: dict[tuple[str, str, int, str, str], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
@@ -1111,8 +1123,9 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         suffix: str,
         nzbins: int,
         index_c_type: str,
+        acc_c_type: str,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nzbins, index_c_type)
+        key = (map_c_type, suffix, nzbins, index_c_type, acc_c_type)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
@@ -1120,7 +1133,8 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         name_expression = (
-            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}, {index_c_type}>"
+            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}, "
+            f"{index_c_type}, {acc_c_type}>"
         )
         source = _prepare_cuda_source("tomo_vectorized_xipm.cu")
 
@@ -1165,12 +1179,16 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
+        # The accumulator type follows the (orchestrator-allocated) output
+        # buffers: float64 outputs on float32 maps select double accumulation.
+        acc_c_type = "float" if out_num.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
             suffix,
             nzbins,
             index_c_type,
+            acc_c_type,
         )
         if raw_kernel is None:
             return False
@@ -1427,7 +1445,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
 
 
 def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
-    kernel_cache: dict[tuple[str, str, str, str, int, int], Any] = {}
+    kernel_cache: dict[tuple[str, str, str, str, int, int, str], Any] = {}
     # One non-blocking stream per section, created lazily on first launch
     # (per device: each Backend instance gets its own builder closure).
     section_streams: list = []
@@ -1440,8 +1458,12 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         q_c_type: str,
         n_density_bins: int,
         n_shear_bins: int,
+        acc_c_type: str,
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, index_c_type, q_c_type, n_density_bins, n_shear_bins)
+        key = (
+            map_c_type, suffix, index_c_type, q_c_type,
+            n_density_bins, n_shear_bins, acc_c_type,
+        )
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
@@ -1450,7 +1472,7 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
 
         name_expression = (
             f"gpu_3x2pt_tomo_fused<{map_c_type}, {complex_c_type}, "
-            f"{index_c_type}, {q_c_type}, {n_density_bins}, {n_shear_bins}>"
+            f"{index_c_type}, {q_c_type}, {n_density_bins}, {n_shear_bins}, {acc_c_type}>"
         )
         source = _prepare_cuda_source("tomo_fused_3x2pt.cu")
 
@@ -1516,6 +1538,8 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
         map_c_type = "float" if density_map.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         q_c_type = "float" if q_cos.dtype == module.float32 else "double"
+        # Accumulator type follows the orchestrator-allocated output buffers.
+        acc_c_type = "float" if out_ma_num.dtype == module.float32 else "double"
         raw_kernel = _get_or_build_raw_kernel(
             map_c_type,
             complex_c_type,
@@ -1524,6 +1548,7 @@ def _build_cupy_3x2pt_tomo_fused_kernel(module: Any) -> Any:
             q_c_type,
             n_density_bins,
             n_shear_bins,
+            acc_c_type,
         )
         if raw_kernel is None:
             return False
@@ -1621,7 +1646,7 @@ def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
-        "T out_ab_p, T out_ab_m, T out_ba_p, T out_ba_m",
+        "A out_ab_p, A out_ab_m, A out_ba_p, A out_ba_m",
         """
         const I idx_i = ind_i[i];
         const I idx_j = ind_j[i];
@@ -1653,10 +1678,10 @@ def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
         const T bj_r = b1_j * er_j - b2_j * ei_j;
         const T bj_i = b1_j * ei_j + b2_j * er_j;
 
-        out_ab_p = bj_r * ai_r + bj_i * ai_i;   /* Re[gb_j' conj(ga_i')] */
-        out_ab_m = bj_r * ai_r - bj_i * ai_i;   /* Re[gb_j' ga_i']       */
-        out_ba_p = aj_r * bi_r + aj_i * bi_i;   /* Re[ga_j' conj(gb_i')] */
-        out_ba_m = aj_r * bi_r - aj_i * bi_i;   /* Re[ga_j' gb_i']       */
+        out_ab_p = (A)(bj_r * ai_r + bj_i * ai_i);   /* Re[gb_j' conj(ga_i')] */
+        out_ab_m = (A)(bj_r * ai_r - bj_i * ai_i);   /* Re[gb_j' ga_i']       */
+        out_ba_p = (A)(aj_r * bi_r + aj_i * bi_i);   /* Re[ga_j' conj(gb_i')] */
+        out_ba_m = (A)(aj_r * bi_r - aj_i * bi_i);   /* Re[ga_j' gb_i']       */
         """,
         "gpu_xipm_cross_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
@@ -1668,7 +1693,7 @@ def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g11, raw T g21, raw T g12, raw T g22, raw T w1, raw T w2,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
-        "T out_p, T out_m",
+        "A out_p, A out_m",
         """
         const I idx_i = ind_i[i];
         const I idx_j = ind_j[i];
@@ -1692,8 +1717,8 @@ def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
         const T b_r = b1 * er_j - b2 * ei_j;
         const T b_i = b1 * ei_j + b2 * er_j;
 
-        out_p = b_r * a_r + b_i * a_i;   /* Re[g_b' conj(g_a')] */
-        out_m = b_r * a_r - b_i * a_i;   /* Re[g_b' g_a']       */
+        out_p = (A)(b_r * a_r + b_i * a_i);   /* Re[g_b' conj(g_a')] */
+        out_m = (A)(b_r * a_r - b_i * a_i);   /* Re[g_b' g_a']       */
         """,
         "gpu_xipm_auto_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,

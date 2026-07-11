@@ -75,29 +75,34 @@ def smoke(device_id=0):
 
     backend = get_backend(device_id)
     combos = [
-        (np.float64, np.complex64, np.float32),
-        (np.float64, np.complex128, np.float64),
-        (np.float32, np.complex64, np.float32),
+        # (map dtype, rotation dtype, filter dtype, accumulator dtype)
+        (np.float64, np.complex64, np.float32, np.float64),
+        (np.float64, np.complex128, np.float64, np.float64),
+        (np.float32, np.complex64, np.float32, np.float32),
+        (np.float32, np.complex64, np.float32, np.float64),
     ]
-    for map_dtype, complex_dtype, q_dtype in combos:
+    for map_dtype, complex_dtype, q_dtype, acc_dtype in combos:
         for nz in (1, 2, 5):
-            label = f"map={np.dtype(map_dtype).name} rot={np.dtype(complex_dtype).name} q={np.dtype(q_dtype).name} nz={nz}"
+            label = (
+                f"map={np.dtype(map_dtype).name} rot={np.dtype(complex_dtype).name} "
+                f"q={np.dtype(q_dtype).name} acc={np.dtype(acc_dtype).name} nz={nz}"
+            )
             d = _inputs(cupy, map_dtype, complex_dtype, q_dtype, nz)
             nbins, ncomb, npatches = d["nbins"], d["ncomb"], d["npatches"]
 
             ok = backend.xipm_tomo_vectorized_kernel(
                 d["shear"], d["weights"], d["ind_i"], d["ind_j"],
                 d["rot_i"], d["rot_j"], d["offsets"], d["comb_i"], d["comb_j"],
-                _zeros(cupy, (2, 2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
+                _zeros(cupy, (2, 2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
             )
             assert ok, f"xipm wrapper declined: {label}"
 
             ok = backend.kernel_density_density_tomo_vectorized(
                 d["density"], d["weights"], d["ind_i"], d["ind_j"],
                 d["offsets"], d["comb_i"], d["comb_j"],
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
             )
             assert ok, f"dd wrapper declined: {label}"
 
@@ -105,8 +110,8 @@ def smoke(device_id=0):
                 d["density"], d["shear"], d["weights"], d["weights"],
                 d["ind_i"], d["ind_j"], d["rot_i"], d["rot_j"],
                 d["offsets"], d["comb_i"], d["comb_j"],
-                _zeros(cupy, (ncomb, nbins), map_dtype),
-                _zeros(cupy, (ncomb, nbins), map_dtype),
+                _zeros(cupy, (ncomb, nbins), acc_dtype),
+                _zeros(cupy, (ncomb, nbins), acc_dtype),
             )
             assert ok, f"ds wrapper declined: {label}"
 
@@ -137,17 +142,17 @@ def smoke(device_id=0):
                 d["q_offsets"], d["q_area"],
                 d["comb_i"], d["comb_j"], d["comb_i"], d["comb_j"],
                 d["comb_i"], d["comb_j"],
-                _zeros(cupy, (nz, npatches), map_dtype),
-                _zeros(cupy, (nz, npatches), map_dtype),
-                _zeros(cupy, (nz, npatches), map_dtype),
-                _zeros(cupy, (nz, npatches), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (2 * ncomb, nbins), map_dtype),
-                _zeros(cupy, (ncomb, nbins), map_dtype),
-                _zeros(cupy, (ncomb, nbins), map_dtype),
+                _zeros(cupy, (nz, npatches), acc_dtype),
+                _zeros(cupy, (nz, npatches), acc_dtype),
+                _zeros(cupy, (nz, npatches), acc_dtype),
+                _zeros(cupy, (nz, npatches), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (2 * ncomb, nbins), acc_dtype),
+                _zeros(cupy, (ncomb, nbins), acc_dtype),
+                _zeros(cupy, (ncomb, nbins), acc_dtype),
             )
             assert ok, f"fused wrapper declined: {label}"
 

@@ -320,6 +320,7 @@ class Correlation:
         device: Union[str, int] = "auto",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
+        accumulation_precision: str = "same",
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -337,6 +338,11 @@ class Correlation:
             device: Device to use for calculations ('cpu', 'gpu', 'auto', or GPU ID).
             map_precision: One of float32/float64 for map-like arrays.
             rotation_precision: One of float32/float64 for rotation/filter arrays.
+            accumulation_precision: "same" (default) accumulates the pair
+                sums at map precision; "float64" accumulates and reduces at
+                float64 even for float32 maps (recommended with
+                map_precision="float32": per-pair products are computed at
+                float32 but summed without float32 cancellation error).
 
         Raises:
             ValueError: If input parameters are invalid
@@ -358,6 +364,17 @@ class Correlation:
         )
         self.rotation_dtype = _normalize_precision(
             rotation_precision, _ALLOWED_FLOAT_PRECISIONS, "rotation_precision"
+        )
+        if accumulation_precision not in ("same", "float64"):
+            raise ValueError(
+                "accumulation_precision must be 'same' or 'float64', "
+                f"got {accumulation_precision!r}"
+            )
+        self.accumulation_precision = accumulation_precision
+        self.acc_dtype = (
+            self.map_dtype
+            if accumulation_precision == "same"
+            else np.dtype(np.float64)
         )
         npix = hp.nside2npix(nside)
         self.index_dtype = np.dtype(np.int32) if npix < 2**31 else np.dtype(np.int64)
@@ -519,6 +536,10 @@ class Correlation:
         if "map_mask" not in self.__dict__:
             self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
             self.map_mask[self.map_inds] = True
+        if "accumulation_precision" not in self.__dict__:
+            # Pickles from before the accumulation_precision kwarg existed.
+            self.accumulation_precision = "same"
+            self.acc_dtype = self.map_dtype
         self.backend = get_backend(self.device)
         if "aperture_shear_all_patches" not in self.__dict__:
             self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
@@ -1492,10 +1513,11 @@ class Correlation:
 
         if self.backend.name == "numpy":
             nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-            out_ab = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ab_w = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba_w = np.empty(nbins_total, dtype=self.map_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_ab = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ab_w = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba_w = np.empty(nbins_total, dtype=self.acc_dtype)
             offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
             density_density_kernel(
                 density1_dev,
@@ -1519,7 +1541,7 @@ class Correlation:
             if sum_ab is None:
                 sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
                 sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
-            out_ab, out_ba = self._get_pair_scratch(self.map_dtype, 2)
+            out_ab, out_ba = self._get_pair_scratch(self.acc_dtype, 2)
             density_density_kernel(
                 density1_dev,
                 density2_dev,
@@ -1582,10 +1604,11 @@ class Correlation:
 
         if self.backend.name == "numpy":
             nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-            out_ab = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ab_w = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba_w = np.empty(nbins_total, dtype=self.map_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_ab = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ab_w = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba_w = np.empty(nbins_total, dtype=self.acc_dtype)
             offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
             density_shear_kernel(
                 density_lens_dev,
@@ -1611,7 +1634,7 @@ class Correlation:
                 sum_ab = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
                 sum_ba = self._get_xipm_sumofweights(w_source_dev, w_lens_dev)
                 sumofweights_dev = sum_ab + sum_ba
-            out_ab, out_ba = self._get_pair_scratch(self.map_dtype, 2)
+            out_ab, out_ba = self._get_pair_scratch(self.acc_dtype, 2)
             density_shear_kernel(
                 density_lens_dev,
                 g1_source_dev,
@@ -1667,9 +1690,10 @@ class Correlation:
 
         if self.backend.name == "numpy":
             nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-            out_p = np.empty(nbins_total, dtype=self.map_dtype)
-            out_m = np.empty(nbins_total, dtype=self.map_dtype)
-            out_w = np.empty(nbins_total, dtype=self.map_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_p = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_m = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_w = np.empty(nbins_total, dtype=self.acc_dtype)
             offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
             xipm_auto_corr_kernel(
                 g1_dev,
@@ -1704,7 +1728,7 @@ class Correlation:
             # The kernel computes at map precision and emits the real parts
             # directly; only the reduced numerators are cast to the
             # historical rotation-precision output dtype (as on CPU).
-            out_p, out_m = self._get_pair_scratch(self.map_dtype, 2)
+            out_p, out_m = self._get_pair_scratch(self.acc_dtype, 2)
 
             xipm_auto_corr_kernel(
                 g1_dev,
@@ -1775,12 +1799,13 @@ class Correlation:
 
         if self.backend.name == "numpy":
             nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-            out_ab_p = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ab_m = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba_p = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba_m = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ab_w = np.empty(nbins_total, dtype=self.map_dtype)
-            out_ba_w = np.empty(nbins_total, dtype=self.map_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_ab_p = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ab_m = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba_p = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba_m = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ab_w = np.empty(nbins_total, dtype=self.acc_dtype)
+            out_ba_w = np.empty(nbins_total, dtype=self.acc_dtype)
             offsets = np.asarray(self.tot_bins_reduceat_dev, dtype=np.int64)
             xipm_cross_corr_kernel(
                 g11_dev,
@@ -1826,7 +1851,7 @@ class Correlation:
             # directly; only the reduced numerators are cast to the
             # historical rotation-precision output dtype (as on CPU).
             out_ab_p, out_ab_m, out_ba_p, out_ba_m = self._get_pair_scratch(
-                self.map_dtype, 4
+                self.acc_dtype, 4
             )
 
             xipm_cross_corr_kernel(
@@ -2191,7 +2216,8 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        return self._reduce_pairs(w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]])
+        product = w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]]
+        return self._reduce_pairs(product.astype(self.acc_dtype, copy=False))
 
     def _get_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
         w_fingerprint = (
@@ -2323,14 +2349,16 @@ class Correlation:
         )
 
         map_backend_dtype = getattr(module, self.map_dtype.name)
+        acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = int(self.n_patches * self.nbins)
         # Auto-combination B→A rows are never written by the kernel, so both
         # buffers must stay zero-initialised (do not switch to empty scratch).
+        # Allocated at the accumulation dtype: the kernel reduces into them.
         out_num = self.backend.zeros(
-            (2, 2 * nzbin_combs, nbins_total), dtype=map_backend_dtype
+            (2, 2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype
         )
         out_den = self.backend.zeros(
-            (2 * nzbin_combs, nbins_total), dtype=map_backend_dtype
+            (2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype
         )
 
         launched = tomo_kernel(
@@ -2402,9 +2430,10 @@ class Correlation:
         shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_scaled, w_dev)
 
         nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
-        out_p = np.empty((2 * nzbin_combs, nbins_total), dtype=self.map_dtype)
-        out_m = np.empty((2 * nzbin_combs, nbins_total), dtype=self.map_dtype)
-        out_w = np.empty((2 * nzbin_combs, nbins_total), dtype=self.map_dtype)
+        # The numba kernel inherits its accumulator dtype from these arrays.
+        out_p = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
+        out_m = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
+        out_w = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
         comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
             nzbins, nzbin_combs
         )
@@ -2839,6 +2868,7 @@ class Correlation:
 
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
+        acc_backend_dtype = getattr(module, self.acc_dtype.name)
         half = self.map_dtype.type(0.5)
         nbins_total = self.n_patches * self.nbins
 
@@ -2873,8 +2903,9 @@ class Correlation:
         )
 
         if self.backend.name == "numpy":
-            out_num = np.empty((nzbin_combs, nbins_total), dtype=map_backend_dtype)
-            out_den = np.empty((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_num = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
+            out_den = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
             tomo_kernel(
                 density_soa,
                 w_soa,
@@ -2901,8 +2932,9 @@ class Correlation:
 
         # Auto-combination B→A rows are never written by the kernel, so both
         # buffers must stay zero-initialised (do not switch to empty scratch).
-        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
-        out_den = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=map_backend_dtype)
+        # Allocated at the accumulation dtype: the kernel reduces into them.
+        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+        out_den = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype)
         launched = tomo_kernel(
             density_soa,
             w_soa,
@@ -2961,6 +2993,7 @@ class Correlation:
 
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
+        acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = self.n_patches * self.nbins
 
         density_dev = self._to_backend_array(density_maps, dtype=self.map_dtype)
@@ -2997,8 +3030,9 @@ class Correlation:
         )
 
         if self.backend.name == "numpy":
-            out_num = np.empty((nzbin_combs, nbins_total), dtype=map_backend_dtype)
-            out_den = np.empty((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            # The numba kernel inherits its accumulator dtype from these arrays.
+            out_num = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
+            out_den = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
             tomo_kernel(
                 density_soa,
                 shear_soa,
@@ -3015,8 +3049,9 @@ class Correlation:
                 out_den,
             )
         else:
-            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
-            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=map_backend_dtype)
+            # Allocated at the accumulation dtype: the kernel reduces into them.
+            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
             launched = tomo_kernel(
                 density_soa,
                 shear_soa,
@@ -3390,7 +3425,9 @@ class Correlation:
             ss_ncomb=ss_ncomb,
             dd_ncomb=dd_ncomb,
             ds_ncomb=ds_ncomb,
-            map_backend_dtype=map_backend_dtype,
+            # num/den buffers carry the accumulation dtype; the final
+            # normalized results are still produced at map precision.
+            map_backend_dtype=getattr(module, self.acc_dtype.name),
         )
 
         if self.backend.name == "numpy":

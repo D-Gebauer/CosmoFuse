@@ -101,9 +101,10 @@ class EmulatedCupyModule:
 
 
 def _emulate_xipm(params, grid, args):
-    """tomo_vectorized_xipm.cu :: gpu_fused_tomo_reduce_xipm<T, C, TOMO, I>."""
+    """tomo_vectorized_xipm.cu :: gpu_fused_tomo_reduce_xipm<T, C, TOMO, I, ACC>."""
     map_dtype = _SCALAR_TYPES[params[0]]
     tomo_bins = int(params[2])
+    acc = _SCALAR_TYPES[params[4]]
 
     (shear, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets,
      comb_i, comb_j, out_num, out_den, ncomb, nbins_total, _npairs) = args
@@ -156,14 +157,16 @@ def _emulate_xipm(params, grid, args):
             w_pair = weights_flat[idx_a_bin] * weights_flat[idx_b_bin]
             out_p_idx = comb_ori * nbins_total + bin_flat
             out_m_idx = (2 * ncomb + comb_ori) * nbins_total + bin_flat
-            num_flat[out_p_idx] = np.sum(w_pair * (b_r * a_r + b_i * a_i))
-            num_flat[out_m_idx] = np.sum(w_pair * (b_r * a_r - b_i * a_i))
-            den_flat[out_p_idx] = np.sum(w_pair)
+            # Per-pair products at map precision, accumulated at ACC.
+            num_flat[out_p_idx] = np.sum(w_pair * (b_r * a_r + b_i * a_i), dtype=acc)
+            num_flat[out_m_idx] = np.sum(w_pair * (b_r * a_r - b_i * a_i), dtype=acc)
+            den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
 
 
 def _emulate_dd(params, grid, args):
-    """density_density_tomo_vectorized.cu :: gpu_fused_tomo_reduce_dd<T, TOMO, I>."""
+    """density_density_tomo_vectorized.cu :: gpu_fused_tomo_reduce_dd<T, TOMO, I, ACC>."""
     tomo_bins = int(params[1])
+    acc = _SCALAR_TYPES[params[3]]
 
     (density, weights, ind_i, ind_j, bin_offsets, comb_i, comb_j,
      out_num, out_den, ncomb, nbins_total, _npairs) = args
@@ -197,14 +200,18 @@ def _emulate_dd(params, grid, args):
             base_b = idx_b * tomo_bins + bj
             w_pair = weights_flat[base_a] * weights_flat[base_b]
             out_idx = comb_ori * nbins_total + bin_flat
-            num_flat[out_idx] = np.sum(w_pair * density_flat[base_a] * density_flat[base_b])
-            den_flat[out_idx] = np.sum(w_pair)
+            # Per-pair products at map precision, accumulated at ACC.
+            num_flat[out_idx] = np.sum(
+                w_pair * density_flat[base_a] * density_flat[base_b], dtype=acc
+            )
+            den_flat[out_idx] = np.sum(w_pair, dtype=acc)
 
 
 def _emulate_ds(params, grid, args):
-    """density_shear_tomo_vectorized.cu :: gpu_fused_tomo_reduce_ds<T, C, L, S, I>."""
+    """density_shear_tomo_vectorized.cu :: gpu_fused_tomo_reduce_ds<T, C, L, S, I, ACC>."""
     lens_bins = int(params[2])
     source_bins = int(params[3])
+    acc = _SCALAR_TYPES[params[5]]
 
     (density, shear, lens_w, source_w, ind_i, ind_j, rot_i, rot_j,
      bin_offsets, comb_i, comb_j, out_num, out_den,
@@ -253,10 +260,11 @@ def _emulate_ds(params, grid, args):
             w_ba = lens_w_flat[lens_ba] * source_w_flat[src_ba]
 
             out_idx = comb_idx * nbins_total + bin_flat
+            # Per-pair products at map precision, accumulated at ACC.
             num_flat[out_idx] = np.sum(
-                w_ab * density_flat[lens_ab] * gt_ab
-            ) + np.sum(w_ba * density_flat[lens_ba] * gt_ba)
-            den_flat[out_idx] = np.sum(w_ab) + np.sum(w_ba)
+                w_ab * density_flat[lens_ab] * gt_ab, dtype=acc
+            ) + np.sum(w_ba * density_flat[lens_ba] * gt_ba, dtype=acc)
+            den_flat[out_idx] = np.sum(w_ab, dtype=acc) + np.sum(w_ba, dtype=acc)
 
 
 def _check_planar_stride(arr, stride):
@@ -323,13 +331,14 @@ def _emulate_aperture_density_tomo(params, grid, args):
 
 
 def _emulate_fused_3x2pt(params, grid, args):
-    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_fused<T, C, I, QT, ND, NS>.
+    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_fused<T, C, I, QT, ND, NS, ACC>.
 
     One call per section (the trailing launch argument selects it), like
     the per-section launches of the cupy wrapper.
     """
     n_density = int(params[4])
     n_shear = int(params[5])
+    acc = _SCALAR_TYPES[params[6]]
 
     (density, shear, density_w, shear_w, ind_i, ind_j, rot_i, rot_j,
      pair_offsets, nbins_total, npatches, _npix,
@@ -368,8 +377,10 @@ def _emulate_fused_3x2pt(params, grid, args):
                 shear_idx = (pix * n_shear + y) * 2
                 wv = shear_w_flat[pix * n_shear + y]
                 gt = -shear_flat[shear_idx] * qc - shear_flat[shear_idx + 1] * qs
-                ma_num[y * npatches + x] = q_patch_area[x] * np.sum(wv * gt * qv)
-                ma_den[y * npatches + x] = np.sum(wv)
+                ma_num[y * npatches + x] = acc(q_patch_area[x]) * np.sum(
+                    wv * gt * qv, dtype=acc
+                )
+                ma_den[y * npatches + x] = np.sum(wv, dtype=acc)
         return
 
     if section == 1:  # galaxy mean density M_g
@@ -386,10 +397,10 @@ def _emulate_fused_3x2pt(params, grid, args):
                     continue
                 d_idx = pix * n_density + y
                 wv = density_w_flat[d_idx]
-                mg_num[y * npatches + x] = q_patch_area[x] * np.sum(
-                    wv * density_flat[d_idx] * qv
+                mg_num[y * npatches + x] = acc(q_patch_area[x]) * np.sum(
+                    wv * density_flat[d_idx] * qv, dtype=acc
                 )
-                mg_den[y * npatches + x] = np.sum(wv)
+                mg_den[y * npatches + x] = np.sum(wv, dtype=acc)
         return
 
     if section == 2:  # cosmic shear xi+/xi-
@@ -428,9 +439,9 @@ def _emulate_fused_3x2pt(params, grid, args):
 
                 wv = shear_w_flat[pix_a * n_shear + ai] * shear_w_flat[pix_b * n_shear + bj]
                 out_idx = y * nbins_total + x
-                xip_num[out_idx] = np.sum(wv * (b_r * a_r + b_i * a_i))
-                xim_num[out_idx] = np.sum(wv * (b_r * a_r - b_i * a_i))
-                xipm_den[out_idx] = np.sum(wv)
+                xip_num[out_idx] = np.sum(wv * (b_r * a_r + b_i * a_i), dtype=acc)
+                xim_num[out_idx] = np.sum(wv * (b_r * a_r - b_i * a_i), dtype=acc)
+                xipm_den[out_idx] = np.sum(wv, dtype=acc)
         return
 
     if section == 3:  # galaxy clustering xi_g
@@ -457,8 +468,10 @@ def _emulate_fused_3x2pt(params, grid, args):
                 jb = pix_b * n_density + bj
                 wv = density_w_flat[ia] * density_w_flat[jb]
                 out_idx = y * nbins_total + x
-                xig_num[out_idx] = np.sum(wv * density_flat[ia] * density_flat[jb])
-                xig_den[out_idx] = np.sum(wv)
+                xig_num[out_idx] = np.sum(
+                    wv * density_flat[ia] * density_flat[jb], dtype=acc
+                )
+                xig_den[out_idx] = np.sum(wv, dtype=acc)
         return
 
     if section == 4:  # galaxy-galaxy lensing xi_t
@@ -496,9 +509,9 @@ def _emulate_fused_3x2pt(params, grid, args):
 
                 out_idx = y * nbins_total + x
                 xit_num[out_idx] = np.sum(
-                    w_ab * density_flat[lens_ab] * gt_ab
-                ) + np.sum(w_ba * density_flat[lens_ba] * gt_ba)
-                xit_den[out_idx] = np.sum(w_ab) + np.sum(w_ba)
+                    w_ab * density_flat[lens_ab] * gt_ab, dtype=acc
+                ) + np.sum(w_ba * density_flat[lens_ba] * gt_ba, dtype=acc)
+                xit_den[out_idx] = np.sum(w_ab, dtype=acc) + np.sum(w_ba, dtype=acc)
         return
 
     raise ValueError(f"Unknown fused section: {section}")

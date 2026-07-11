@@ -23,22 +23,27 @@ from pathlib import Path
 CUDA_DIR = Path(__file__).resolve().parent.parent / "src" / "CosmoFuse" / "cuda"
 
 # Representative production template instantiations per kernel source.
+# The trailing type of the pair-reduce kernels is the accumulator (ACC):
+# "same as map type", plus double-accumulation for float32 maps.
 NAME_EXPRESSIONS = {
     "tomo_vectorized_xipm.cu": [
-        "gpu_fused_tomo_reduce_xipm<double, cuFloatComplex, 1, int>",
-        "gpu_fused_tomo_reduce_xipm<double, cuFloatComplex, 5, int>",
-        "gpu_fused_tomo_reduce_xipm<double, cuDoubleComplex, 5, long long>",
-        "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, int>",
+        "gpu_fused_tomo_reduce_xipm<double, cuFloatComplex, 1, int, double>",
+        "gpu_fused_tomo_reduce_xipm<double, cuFloatComplex, 5, int, double>",
+        "gpu_fused_tomo_reduce_xipm<double, cuDoubleComplex, 5, long long, double>",
+        "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, int, float>",
+        "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, int, double>",
     ],
     "density_density_tomo_vectorized.cu": [
-        "gpu_fused_tomo_reduce_dd<double, 1, int>",
-        "gpu_fused_tomo_reduce_dd<double, 5, long long>",
-        "gpu_fused_tomo_reduce_dd<float, 2, int>",
+        "gpu_fused_tomo_reduce_dd<double, 1, int, double>",
+        "gpu_fused_tomo_reduce_dd<double, 5, long long, double>",
+        "gpu_fused_tomo_reduce_dd<float, 2, int, float>",
+        "gpu_fused_tomo_reduce_dd<float, 2, int, double>",
     ],
     "density_shear_tomo_vectorized.cu": [
-        "gpu_fused_tomo_reduce_ds<double, cuFloatComplex, 5, 5, int>",
-        "gpu_fused_tomo_reduce_ds<double, cuDoubleComplex, 1, 1, long long>",
-        "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 3, int>",
+        "gpu_fused_tomo_reduce_ds<double, cuFloatComplex, 5, 5, int, double>",
+        "gpu_fused_tomo_reduce_ds<double, cuDoubleComplex, 1, 1, long long, double>",
+        "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 3, int, float>",
+        "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 3, int, double>",
     ],
     "aperture_tomo.cu": [
         "gpu_aperture_shear_tomo<double, float>",
@@ -49,9 +54,10 @@ NAME_EXPRESSIONS = {
         "gpu_aperture_density_tomo<float, float>",
     ],
     "tomo_fused_3x2pt.cu": [
-        "gpu_3x2pt_tomo_fused<double, cuFloatComplex, int, float, 5, 5>",
-        "gpu_3x2pt_tomo_fused<double, cuDoubleComplex, long long, double, 2, 2>",
-        "gpu_3x2pt_tomo_fused<float, cuFloatComplex, int, float, 1, 1>",
+        "gpu_3x2pt_tomo_fused<double, cuFloatComplex, int, float, 5, 5, double>",
+        "gpu_3x2pt_tomo_fused<double, cuDoubleComplex, long long, double, 2, 2, double>",
+        "gpu_3x2pt_tomo_fused<float, cuFloatComplex, int, float, 1, 1, float>",
+        "gpu_3x2pt_tomo_fused<float, cuFloatComplex, int, float, 1, 1, double>",
     ],
 }
 

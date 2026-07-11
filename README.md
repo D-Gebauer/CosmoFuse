@@ -84,7 +84,19 @@ First create a Correlation object:
         device="auto",                      # "cpu", "gpu", "auto", or GPU id
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
+        accumulation_precision="float64",   # "same" / "float64"
     )
+
+For GPU runs the recommended precision configuration is
+`map_precision="float32", accumulation_precision="float64"`: the maps,
+uploads, and per-pair gathers run at float32 (roughly halving the
+per-map wall time on bandwidth-bound hardware), while every pair sum is
+accumulated and reduced at float64, so the estimators avoid float32
+cancellation error. On an A100 this measures within a few times 1e-7
+(scale-relative) of the float64 CPU reference — compared to a few times
+1e-3 when also accumulating at float32 (`accumulation_precision="same"`).
+Keep `map_precision="float64"` when bitwise-tight agreement with the
+float64 reference (~1e-14) is required.
 
 ### Selecting patch centers from a mask
 

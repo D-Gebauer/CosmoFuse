@@ -40,10 +40,12 @@ __COMMON_CUDA_SOURCE__
 
 
 /*
- * QT -- scalar type of the aperture filter geometry (may be narrower than
- *       the map type T; promotion to T at use is exact for float -> double)
+ * QT  -- scalar type of the aperture filter geometry (may be narrower than
+ *        the map type T; promotion to T at use is exact for float -> double)
+ * ACC -- accumulator/output type (double for float32 maps with
+ *        accumulation_precision="float64"; otherwise same as T)
  */
-template<typename T, typename C, typename I, typename QT, int N_DENSITY, int N_SHEAR>
+template<typename T, typename C, typename I, typename QT, int N_DENSITY, int N_SHEAR, typename ACC>
 __global__ void gpu_3x2pt_tomo_fused(
     /* --- Input maps (SoA layout, all tomo bins concatenated) --- */
     const T* density,        /* galaxy overdensity delta_g  [npix x N_DENSITY]      */
@@ -77,17 +79,17 @@ __global__ void gpu_3x2pt_tomo_fused(
     const int* ds_comb_j,    /* density-shear: source tomo bin              */
     const int n_ds_comb,
     /* --- Output buffers (numerators and denominators) --- */
-    T* out_ma_num,           /* aperture mass numerator   [n_shear x npatches]   */
-    T* out_ma_den,           /* aperture mass denominator (sum of weights)        */
-    T* out_mg_num,           /* galaxy mean density numerator [n_density x npatches] */
-    T* out_mg_den,           /* galaxy mean density denominator                   */
-    T* out_xip_num,          /* xi+ numerator                                     */
-    T* out_xim_num,          /* xi- numerator                                     */
-    T* out_xipm_den,         /* xi+/xi- shared denominator (sum of weight products) */
-    T* out_xig_num,          /* xi_g numerator (galaxy clustering)                 */
-    T* out_xig_den,          /* xi_g denominator                                  */
-    T* out_xit_num,          /* xi_t numerator (galaxy-galaxy lensing)             */
-    T* out_xit_den,          /* xi_t denominator                                  */
+    ACC* out_ma_num,           /* aperture mass numerator   [n_shear x npatches]   */
+    ACC* out_ma_den,           /* aperture mass denominator (sum of weights)        */
+    ACC* out_mg_num,           /* galaxy mean density numerator [n_density x npatches] */
+    ACC* out_mg_den,           /* galaxy mean density denominator                   */
+    ACC* out_xip_num,          /* xi+ numerator                                     */
+    ACC* out_xim_num,          /* xi- numerator                                     */
+    ACC* out_xipm_den,         /* xi+/xi- shared denominator (sum of weight products) */
+    ACC* out_xig_num,          /* xi_g numerator (galaxy clustering)                 */
+    ACC* out_xig_den,          /* xi_g denominator                                  */
+    ACC* out_xit_num,          /* xi_t numerator (galaxy-galaxy lensing)             */
+    ACC* out_xit_den,          /* xi_t denominator                                  */
     const int section)       /* correlation type selector (0-4), one per launch */
 {
     const int lane = (int)threadIdx.x;
@@ -108,8 +110,8 @@ __global__ void gpu_3x2pt_tomo_fused(
         if (x >= npatches || y >= N_SHEAR) return;
         const long long start = q_offsets[x];
         const long long stop = q_offsets[x + 1];
-        T sum_num = (T)0.0;
-        T sum_den = (T)0.0;
+        ACC sum_num = (ACC)0.0;
+        ACC sum_den = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const unsigned int pix = q_inds[idx];
             const long long shear_idx = ((long long)pix * (long long)N_SHEAR + (long long)y) * 2LL;
@@ -119,13 +121,13 @@ __global__ void gpu_3x2pt_tomo_fused(
             const T wv = shear_w[w_idx];
             /* Tangential shear w.r.t. patch centre */
             const T gt = -g1 * (T)q_cos[idx] - g2 * (T)q_sin[idx];
-            sum_num += wv * gt * (T)q_val[idx];
-            sum_den += wv;
+            sum_num += (ACC)(wv * gt * (T)q_val[idx]);
+            sum_den += (ACC)wv;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
             const long long out_idx = (long long)y * (long long)npatches + x;
-            out_ma_num[out_idx] = (T)q_patch_area[x] * sum_num;
+            out_ma_num[out_idx] = (ACC)q_patch_area[x] * sum_num;
             out_ma_den[out_idx] = sum_den;
         }
         return;
@@ -142,19 +144,19 @@ __global__ void gpu_3x2pt_tomo_fused(
         if (x >= npatches || y >= N_DENSITY) return;
         const long long start = q_offsets[x];
         const long long stop = q_offsets[x + 1];
-        T sum_num = (T)0.0;
-        T sum_den = (T)0.0;
+        ACC sum_num = (ACC)0.0;
+        ACC sum_den = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const unsigned int pix = q_inds[idx];
             const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;
             const T wv = density_w[d_idx];
-            sum_num += wv * density[d_idx] * (T)q_val[idx];
-            sum_den += wv;
+            sum_num += (ACC)(wv * density[d_idx] * (T)q_val[idx]);
+            sum_den += (ACC)wv;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
             const long long out_idx = (long long)y * (long long)npatches + x;
-            out_mg_num[out_idx] = (T)q_patch_area[x] * sum_num;
+            out_mg_num[out_idx] = (ACC)q_patch_area[x] * sum_num;
             out_mg_den[out_idx] = sum_den;
         }
         return;
@@ -186,9 +188,9 @@ __global__ void gpu_3x2pt_tomo_fused(
 
         const long long start = pair_offsets[x];
         const long long stop = pair_offsets[x + 1];
-        T sum_p = (T)0.0;
-        T sum_m = (T)0.0;
-        T sum_w = (T)0.0;
+        ACC sum_p = (ACC)0.0;
+        ACC sum_m = (ACC)0.0;
+        ACC sum_w = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const long long pix_a = (long long)ind_i[idx];
             const long long pix_b = (long long)ind_j[idx];
@@ -213,9 +215,9 @@ __global__ void gpu_3x2pt_tomo_fused(
             const long long wa_idx = pix_a * (long long)N_SHEAR + (long long)ai;
             const long long wb_idx = pix_b * (long long)N_SHEAR + (long long)bj;
             const T wv = shear_w[wa_idx] * shear_w[wb_idx];
-            sum_w += wv;
-            sum_p += wv * (b_r * a_r + b_i * a_i);  /* xi+ */
-            sum_m += wv * (b_r * a_r - b_i * a_i);  /* xi- */
+            sum_w += (ACC)wv;
+            sum_p += (ACC)(wv * (b_r * a_r + b_i * a_i));  /* xi+ */
+            sum_m += (ACC)(wv * (b_r * a_r - b_i * a_i));  /* xi- */
         }
         block_reduce_sum_triple(sum_p, sum_m, sum_w, &sum_p, &sum_m, &sum_w);
         if (lane == 0) {
@@ -250,16 +252,16 @@ __global__ void gpu_3x2pt_tomo_fused(
 
         const long long start = pair_offsets[x];
         const long long stop = pair_offsets[x + 1];
-        T sum_num = (T)0.0;
-        T sum_den = (T)0.0;
+        ACC sum_num = (ACC)0.0;
+        ACC sum_den = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const long long pix_a = (long long)ind_i[idx];
             const long long pix_b = (long long)ind_j[idx];
             const long long ia = pix_a * (long long)N_DENSITY + (long long)ai;
             const long long jb = pix_b * (long long)N_DENSITY + (long long)bj;
             const T wv = density_w[ia] * density_w[jb];
-            sum_den += wv;
-            sum_num += wv * density[ia] * density[jb];
+            sum_den += (ACC)wv;
+            sum_num += (ACC)(wv * density[ia] * density[jb]);
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
@@ -286,8 +288,8 @@ __global__ void gpu_3x2pt_tomo_fused(
         const int source_bin = ds_comb_j[y];
         const long long start = pair_offsets[x];
         const long long stop = pair_offsets[x + 1];
-        T sum_num = (T)0.0;
-        T sum_den = (T)0.0;
+        ACC sum_num = (ACC)0.0;
+        ACC sum_den = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const long long pix_a = (long long)ind_i[idx];
             const long long pix_b = (long long)ind_j[idx];
@@ -299,8 +301,8 @@ __global__ void gpu_3x2pt_tomo_fused(
             const C ex_ab = rot_j[idx];
             const T gt_ab = -shear[src_ab_base] * ex_ab.x + shear[src_ab_base + 1LL] * ex_ab.y;
             const T w_ab = density_w[lens_ab] * shear_w[src_ab];
-            sum_num += w_ab * density[lens_ab] * gt_ab;
-            sum_den += w_ab;
+            sum_num += (ACC)(w_ab * density[lens_ab] * gt_ab);
+            sum_den += (ACC)w_ab;
 
             /* B->A: pixel b = lens, pixel a = source */
             const long long lens_ba = pix_b * (long long)N_DENSITY + (long long)lens_bin;
@@ -309,8 +311,8 @@ __global__ void gpu_3x2pt_tomo_fused(
             const C ex_ba = rot_i[idx];
             const T gt_ba = -shear[src_ba_base] * ex_ba.x + shear[src_ba_base + 1LL] * ex_ba.y;
             const T w_ba = density_w[lens_ba] * shear_w[src_ba];
-            sum_num += w_ba * density[lens_ba] * gt_ba;
-            sum_den += w_ba;
+            sum_num += (ACC)(w_ba * density[lens_ba] * gt_ba);
+            sum_den += (ACC)w_ba;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {

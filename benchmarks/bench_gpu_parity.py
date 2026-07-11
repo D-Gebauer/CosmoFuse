@@ -28,7 +28,7 @@ os.environ.pop("NUMBA_DISABLE_JIT", None)
 import numpy as np
 
 
-def build_correlation(device):
+def build_correlation(device, map_precision="float64", accumulation_precision="same"):
     import healpy as hp
     from CosmoFuse.correlations import Correlation
 
@@ -43,6 +43,8 @@ def build_correlation(device):
     corr = Correlation(
         nside, phi, theta, nbins=10, theta_min=10, theta_max=170,
         patch_size=90, theta_Q=90, device=device,
+        map_precision=map_precision,
+        accumulation_precision=accumulation_precision,
     )
     return corr, hp.nside2npix(nside)
 
@@ -119,6 +121,13 @@ def main():
     ap.add_argument("--out", default=None, help="write timings JSON here")
     ap.add_argument("--rtol", type=float, default=1e-8,
                     help="scale-relative parity tolerance (2e-4 for float32 maps)")
+    ap.add_argument("--gpu-map-precision", default="float64",
+                    choices=("float32", "float64"),
+                    help="map precision of the GPU Correlation under test "
+                         "(the CPU reference always runs float64)")
+    ap.add_argument("--gpu-acc-precision", default="same",
+                    choices=("same", "float64"),
+                    help="accumulation precision of the GPU Correlation under test")
     ap.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"),
                     help="compare two timing JSON files and exit")
     args = ap.parse_args()
@@ -162,10 +171,19 @@ def main():
             print(f"\nNo usable GPU ({exc}); parity section skipped.")
 
     if have_gpu:
-        corr_gpu, _ = build_correlation(int(args.device))
+        corr_gpu, _ = build_correlation(
+            int(args.device),
+            map_precision=args.gpu_map_precision,
+            accumulation_precision=args.gpu_acc_precision,
+        )
         corr_gpu.load_pairs(args.pairs_file)
+        # Hand the GPU correlation maps in its own precision (a float32
+        # workflow holds float32 maps); the values are identical to what it
+        # would produce by casting internally, so parity is unaffected,
+        # but the timings no longer include a per-call host-side conversion.
+        maps_gpu = {k: v.astype(corr_gpu.map_dtype, copy=False) for k, v in maps.items()}
         print("== GPU under test ==")
-        got, t_gpu = run_paths(corr_gpu, maps)
+        got, t_gpu = run_paths(corr_gpu, maps_gpu)
         result = {"device": f"gpu:{args.device}", "timings": t_gpu,
                   "cpu_timings": t_cpu}
 

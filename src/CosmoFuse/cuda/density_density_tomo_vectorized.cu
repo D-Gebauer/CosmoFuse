@@ -24,8 +24,10 @@ __COMMON_CUDA_SOURCE__
 /*
  * T          -- scalar type (float / double)
  * TOMO_BINS  -- number of tomographic redshift bins (compile-time constant)
+ * ACC        -- accumulator/output type (double for float32 maps with
+ *              accumulation_precision="float64"; otherwise same as T)
  */
-template<typename T, int TOMO_BINS, typename I>
+template<typename T, int TOMO_BINS, typename I, typename ACC>
 __global__ void gpu_fused_tomo_reduce_dd(
     const T* density,        /* galaxy overdensity delta_g per pixel per tomo bin */
     const T* weights,        /* per-pixel, per-tomo-bin weights               */
@@ -34,8 +36,8 @@ __global__ void gpu_fused_tomo_reduce_dd(
     const long long* bin_offsets,  /* CSR offsets per angular bin              */
     const int* comb_i,       /* tomo bin index for the "i" side               */
     const int* comb_j,       /* tomo bin index for the "j" side               */
-    T* out_num,              /* output: weighted deltadelta numerators                */
-    T* out_den,              /* output: weight sums, one row per comb_ori     */
+    ACC* out_num,            /* output: weighted deltadelta numerators                */
+    ACC* out_den,            /* output: weight sums, one row per comb_ori     */
     const int ncomb,
     const long long nbins_total,
     const long long npairs)
@@ -59,8 +61,8 @@ __global__ void gpu_fused_tomo_reduce_dd(
     const long long start = bin_offsets[bin_flat];
     const long long stop = bin_offsets[bin_flat + 1];
 
-    T sum_val = (T)0.0;
-    T sum_w = (T)0.0;
+    ACC sum_val = (ACC)0.0;
+    ACC sum_w = (ACC)0.0;
 
     /* Sum w_a * w_b * delta_a * delta_b over all pairs in this angular bin,
        accumulating the weight sum (denominator) in the same pass */
@@ -80,11 +82,11 @@ __global__ void gpu_fused_tomo_reduce_dd(
         const long long base_b = idx_b * (long long)TOMO_BINS + bj;
 
         const T w_pair = weights[base_a] * weights[base_b];
-        sum_w += w_pair;
-        sum_val += w_pair * density[base_a] * density[base_b];
+        sum_w += (ACC)w_pair;
+        sum_val += (ACC)(w_pair * density[base_a] * density[base_b]);
     }
 
-    block_reduce_sum_pair<T>(sum_val, sum_w, &sum_val, &sum_w);
+    block_reduce_sum_pair<ACC>(sum_val, sum_w, &sum_val, &sum_w);
 
     if (lane == 0) {
         const long long out_idx =

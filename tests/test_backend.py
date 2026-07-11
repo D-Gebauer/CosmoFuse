@@ -1340,7 +1340,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(compile_calls["count"], 1)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_dd<float, 2, long long>",
+            "gpu_fused_tomo_reduce_dd<float, 2, long long, float>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
@@ -1441,7 +1441,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(len(compiled_sources), 1)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long>",
+            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long, float>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
@@ -1715,14 +1715,14 @@ class TestBackend(unittest.TestCase):
         weights_2 = np.zeros((1, 2), dtype=np.float32)
         comb_i_2 = np.array([0, 0, 1], dtype=np.int32)
         comb_j_2 = np.array([0, 1, 1], dtype=np.int32)
-        out_num_2 = np.zeros((2, 6, 1), dtype=np.complex64)
+        out_num_2 = np.zeros((2, 6, 1), dtype=np.float32)
         out_den_2 = np.zeros((6, 1), dtype=np.float32)
 
         shear_3 = np.zeros((1, 3, 2), dtype=np.float32)
         weights_3 = np.zeros((1, 3), dtype=np.float32)
         comb_i_3 = np.array([0, 0, 0, 1, 1, 2], dtype=np.int32)
         comb_j_3 = np.array([0, 1, 2, 1, 2, 2], dtype=np.int32)
-        out_num_3 = np.zeros((2, 12, 1), dtype=np.complex64)
+        out_num_3 = np.zeros((2, 12, 1), dtype=np.float32)
         out_den_3 = np.zeros((12, 1), dtype=np.float32)
 
         ok_2 = kernel(
@@ -1771,11 +1771,11 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(len(compiled_sources), 2)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, long long>",
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, long long, float>",
         )
         self.assertEqual(
             compiled_sources[1][1],
-            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3, long long>",
+            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3, long long, float>",
         )
         for _source, _kernel_name, options in compiled_sources:
             self.assertEqual(options, ("--use_fast_math", "--std=c++14"))

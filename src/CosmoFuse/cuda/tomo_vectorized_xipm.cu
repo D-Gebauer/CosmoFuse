@@ -27,8 +27,10 @@ __COMMON_CUDA_SOURCE__
  * C            -- complex type (cuFloatComplex / cuDoubleComplex) for rotations
  * TOMO_BINS_T  -- number of tomographic redshift bins (compile-time constant
  *                for efficient index arithmetic)
+ * ACC          -- accumulator/output type (double for float32 maps with
+ *                accumulation_precision="float64"; otherwise same as T)
  */
-template<typename T, typename C, int TOMO_BINS_T, typename I>
+template<typename T, typename C, int TOMO_BINS_T, typename I, typename ACC>
 __global__ void gpu_fused_tomo_reduce_xipm(
     const T* shear,          /* complex shear gamma = (gamma_1, gamma_2) interleaved,
                                 layout: [npix x TOMO_BINS x 2]           */
@@ -41,8 +43,8 @@ __global__ void gpu_fused_tomo_reduce_xipm(
                                       per angular separation bin           */
     const int* comb_i,       /* tomographic bin index for the "i" side     */
     const int* comb_j,       /* tomographic bin index for the "j" side     */
-    T* out_num,              /* output numerators [xi+ block | xi- block]    */
-    T* out_den,              /* weight sums, one row per comb_ori            */
+    ACC* out_num,            /* output numerators [xi+ block | xi- block]    */
+    ACC* out_den,            /* weight sums, one row per comb_ori            */
     const int ncomb,         /* number of unique tomo-bin combinations     */
     const long long nbins_total,
     const long long npairs)
@@ -67,9 +69,9 @@ __global__ void gpu_fused_tomo_reduce_xipm(
     const long long start = bin_offsets[bin_flat];
     const long long stop = bin_offsets[bin_flat + 1];
 
-    T sum_p = (T)0.0;   /* accumulator for xi+ numerator */
-    T sum_m = (T)0.0;   /* accumulator for xi- numerator */
-    T sum_w = (T)0.0;   /* accumulator for the weight sum (denominator) */
+    ACC sum_p = (ACC)0.0;   /* accumulator for xi+ numerator */
+    ACC sum_m = (ACC)0.0;   /* accumulator for xi- numerator */
+    ACC sum_w = (ACC)0.0;   /* accumulator for the weight sum (denominator) */
 
     /* Loop over all pixel pairs in this angular bin */
     for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
@@ -109,7 +111,7 @@ __global__ void gpu_fused_tomo_reduce_xipm(
 
         T w_pair =
             weights[idx_a_bin] * weights[idx_b_bin];
-        sum_w += w_pair;
+        sum_w += (ACC)w_pair;
 
         const T a_R = ga1 * ea_R - ga2 * ea_I;
         const T a_I = ga1 * ea_I + ga2 * ea_R;
@@ -118,12 +120,12 @@ __global__ void gpu_fused_tomo_reduce_xipm(
 
         /* xi+ numerator: Re[gamma'_b * conj(gamma'_a)] = b_R*a_R + b_I*a_I
            xi- numerator: Re[gamma'_b * gamma'_a]        = b_R*a_R - b_I*a_I */
-        sum_p += w_pair * (b_R * a_R + b_I * a_I);
-        sum_m += w_pair * (b_R * a_R - b_I * a_I);
+        sum_p += (ACC)(w_pair * (b_R * a_R + b_I * a_I));
+        sum_m += (ACC)(w_pair * (b_R * a_R - b_I * a_I));
     }
 
     /* Parallel reduction: sum contributions from all threads in this block */
-    block_reduce_sum_triple<T>(sum_p, sum_m, sum_w, &sum_p, &sum_m, &sum_w);
+    block_reduce_sum_triple<ACC>(sum_p, sum_m, sum_w, &sum_p, &sum_m, &sum_w);
 
     /* Thread 0 writes the final bin result to global memory.
        Output layout: [xi+ for all comb_ori | xi- for all comb_ori];
