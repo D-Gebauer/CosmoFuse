@@ -159,7 +159,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(backend.name, "cupy")
         self.assertEqual(cupy.ElementwiseKernel.call_count, 6)
         for call in cupy.ElementwiseKernel.call_args_list:
-            self.assertEqual(call.kwargs.get("options"), ("--use_fast_math",))
+            self.assertEqual(call.kwargs.get("options"), ("--use_fast_math", "--std=c++14"))
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_to_device_cupy(self):
@@ -1342,7 +1342,7 @@ class TestBackend(unittest.TestCase):
             compiled_sources[0][1],
             "gpu_fused_tomo_reduce_dd<float, 2, long long>",
         )
-        self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
+        self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
     def test_cupy_density_shear_tomo_vectorized_kernel_failure_modes_return_false(self):
         cases = [
@@ -1443,7 +1443,7 @@ class TestBackend(unittest.TestCase):
             compiled_sources[0][1],
             "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long>",
         )
-        self.assertEqual(compiled_sources[0][2], ("--use_fast_math",))
+        self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
     def test_cupy_density_shear_tomo_vectorized_kernel_cache_reuse(self):
         compile_calls = {"count": 0}
@@ -1778,7 +1778,7 @@ class TestBackend(unittest.TestCase):
             "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3, long long>",
         )
         for _source, _kernel_name, options in compiled_sources:
-            self.assertEqual(options, ("--use_fast_math",))
+            self.assertEqual(options, ("--use_fast_math", "--std=c++14"))
 
 if __name__ == "__main__":
     unittest.main()

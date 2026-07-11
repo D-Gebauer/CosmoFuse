@@ -44,6 +44,21 @@ class TestCorrelationCoverage(unittest.TestCase):
             nbins=self.nbins,
         )
 
+    def _use_cpu_corr(self):
+        """Replace self.corr with a CPU-pinned instance.
+
+        Tests asserting CPU-path behaviour (e.g. in-kernel weight sums,
+        host-side fingerprint caches) call this first so they do not pick
+        up a CUDA backend when the suite runs on a GPU machine.
+        """
+        self.corr = Correlation(
+            nside=self.nside,
+            phi_center=self.phi_center,
+            theta_center=self.theta_center,
+            nbins=self.nbins,
+            device="cpu",
+        )
+
     def _setup_mock_pairs(self):
         self.corr.pair_inds = [np.array([[10, 20], [30, 40]], dtype=np.uint32)]
         self.corr.pair_exp2phi = [
@@ -289,8 +304,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             xip, xim = self.corr.vectorized_shear_shear(shear_maps, w)
 
         spy_vectorized.assert_called_once()
-        np.testing.assert_allclose(xip, xip_mock)
-        np.testing.assert_allclose(xim, xim_mock)
+        np.testing.assert_allclose(self.corr.backend.to_numpy(xip), xip_mock)
+        np.testing.assert_allclose(self.corr.backend.to_numpy(xim), xim_mock)
 
     def test_xipm_auto_return_numpy_false(self):
         corr = self._make_small_cpu_corr()
@@ -3035,6 +3050,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         """CPU path accumulates the weight sums inside the kernel: the
         separate gather+reduce sum-of-weights machinery is never invoked,
         and the result matches an explicitly provided sum-of-weights."""
+        self._use_cpu_corr()
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3062,6 +3078,7 @@ class TestCorrelationCoverage(unittest.TestCase):
     def test_xipm_cross_skips_sumofweights_getter_on_cpu(self):
         """CPU path accumulates weight sums in-kernel, so the cached
         gather+reduce getter is not used at all."""
+        self._use_cpu_corr()
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3082,6 +3099,7 @@ class TestCorrelationCoverage(unittest.TestCase):
     def test_xipm_cross_matches_explicit_sumofweights_on_cpu(self):
         """In-kernel weight sums must reproduce the explicitly computed
         directional sums for the cross-correlation path."""
+        self._use_cpu_corr()
         self._setup_mock_pairs()
         g11 = np.random.rand(self.npix)
         g21 = np.random.rand(self.npix)
@@ -3112,6 +3130,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(xim_a, xim_b, rtol=1e-6, atol=1e-9)
 
     def test_xipm_sumofweights_legacy_single_entry_cache_migrates(self):
+        self._use_cpu_corr()
         self._setup_mock_pairs()
         w1 = np.random.rand(self.npix)
         w2 = np.random.rand(self.npix)

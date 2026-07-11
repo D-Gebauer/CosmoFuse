@@ -38,7 +38,6 @@
 
 __COMMON_CUDA_SOURCE__
 
-#include <cuComplex.h>
 
 /*
  * QT -- scalar type of the aperture filter geometry (may be narrower than

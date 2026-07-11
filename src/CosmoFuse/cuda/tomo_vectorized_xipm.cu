@@ -21,7 +21,6 @@
 
 __COMMON_CUDA_SOURCE__
 
-#include <cuComplex.h>
 
 /* --- Complex number helpers for precision-generic code --- */
 

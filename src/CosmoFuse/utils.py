@@ -24,7 +24,9 @@ def pixel2RaDec(
         pix_arr = np.asarray(pixel_indices)
         if np.issubdtype(pix_arr.dtype, np.unsignedinteger):
             max_int64 = np.iinfo(np.int64).max
-            if pix_arr.size > 0 and np.max(pix_arr) > max_int64:
+            # int(): under legacy (numpy<2) promotion, uint64 vs python-int
+            # comparison goes through float64 and loses the last bits.
+            if pix_arr.size > 0 and int(np.max(pix_arr)) > max_int64:
                 raise ValueError("pixel indices exceed int64 range")
         pix_for_healpy = pix_arr.astype(np.int64, copy=False)
 

@@ -1373,7 +1373,10 @@ class Correlation:
         size = 0
         ninds = []
         for i in range(self.n_patches):
-            patchsize = np.sum(self.bins[i])
+            # int(): np.sum over unsigned bins yields uint64, and under
+            # legacy (numpy<2) promotion `int + uint64` silently becomes
+            # float64, which is later rejected as an array shape.
+            patchsize = int(np.sum(self.bins[i]))
             size += patchsize
             ninds.append(patchsize)
 

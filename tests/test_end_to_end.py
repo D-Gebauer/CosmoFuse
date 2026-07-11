@@ -200,8 +200,8 @@ class TestEndToEnd(unittest.TestCase):
             w,
             flip_g1=True,
         )
-        xip = xip_full[0]
-        xim = xim_full[0]
+        xip = self.corr.backend.to_numpy(xip_full[0])
+        xim = self.corr.backend.to_numpy(xim_full[0])
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_auto)).max(), 0.0, delta=1e-6
@@ -224,8 +224,8 @@ class TestEndToEnd(unittest.TestCase):
             w,
             flip_g1=True,
         )
-        xip = xip_full[1]
-        xim = xim_full[1]
+        xip = self.corr.backend.to_numpy(xip_full[1])
+        xim = self.corr.backend.to_numpy(xim_full[1])
 
         self.assertAlmostEqual(
             np.abs(1 - (xip / self.xip_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -245,7 +245,7 @@ class TestEndToEnd(unittest.TestCase):
             self.density_maps,
             np.stack((self.w1, self.w2), axis=0),
         )
-        wtheta = wtheta_full[1]
+        wtheta = self.corr.backend.to_numpy(wtheta_full[1])
 
         self.assertAlmostEqual(
             np.abs(1 - (wtheta / self.wtheta_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -262,7 +262,7 @@ class TestEndToEnd(unittest.TestCase):
             np.stack((self.w1, self.w2), axis=0),
             flip_g1=True,
         )
-        gamma_t = gamma_t_full[1]
+        gamma_t = self.corr.backend.to_numpy(gamma_t_full[1])
 
         self.assertAlmostEqual(
             np.abs(1 - (gamma_t / self.gammat_treecorr_cross)).max(), 0.0, delta=1e-6
@@ -387,7 +387,7 @@ class TestEndToEnd(unittest.TestCase):
         w = self.w2
 
         m_a_ref = self._reference_maperture_shear_numpy(g1, g2, w)
-        m_a_corr = self.corr.get_aperture_shear(g1, g2, w)
+        m_a_corr = self.corr.backend.to_numpy(self.corr.get_aperture_shear(g1, g2, w))
 
         np.testing.assert_allclose(m_a_corr, m_a_ref, rtol=1e-8, atol=1e-10)
 
@@ -398,7 +398,7 @@ class TestEndToEnd(unittest.TestCase):
         w = self.w2
 
         m_g_ref = self._reference_maperture_density_numpy(density, w)
-        m_g_corr = self.corr.get_aperture_density(density, w)
+        m_g_corr = self.corr.backend.to_numpy(self.corr.get_aperture_density(density, w))
 
         np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
 

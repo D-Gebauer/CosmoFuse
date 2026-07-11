@@ -9,6 +9,38 @@
 #define BLOCK_SIZE 256
 
 /*
+ * Minimal self-contained subset of <cuComplex.h>.
+ *
+ * NVRTC only ships the CUDA built-in vector types (float2/double2); the
+ * cuComplex.h header lives in the full toolkit whose include path is not
+ * reliably discoverable from every CuPy install (conda builds, pip wheels
+ * on machines whose /usr/local/cuda points at an unrelated toolkit, ...).
+ * The kernels only need the two POD types, the constructors, and complex
+ * multiplication -- defined here with the exact same operations and
+ * evaluation order as the toolkit header, so results are bit-identical.
+ */
+typedef float2 cuFloatComplex;
+typedef double2 cuDoubleComplex;
+
+static __device__ inline cuFloatComplex make_cuFloatComplex(float r, float i) {
+    cuFloatComplex c; c.x = r; c.y = i; return c;
+}
+
+static __device__ inline cuDoubleComplex make_cuDoubleComplex(double r, double i) {
+    cuDoubleComplex c; c.x = r; c.y = i; return c;
+}
+
+static __device__ inline cuFloatComplex cuCmulf(cuFloatComplex a, cuFloatComplex b) {
+    return make_cuFloatComplex(a.x * b.x - a.y * b.y,
+                               a.x * b.y + a.y * b.x);
+}
+
+static __device__ inline cuDoubleComplex cuCmul(cuDoubleComplex a, cuDoubleComplex b) {
+    return make_cuDoubleComplex(a.x * b.x - a.y * b.y,
+                                a.x * b.y + a.y * b.x);
+}
+
+/*
  * Parallel sum reduction within a single thread block.
  * Each thread contributes its local accumulator `val` (e.g. a partial
  * xi+ numerator); the result in thread 0 is the total sum for the block.

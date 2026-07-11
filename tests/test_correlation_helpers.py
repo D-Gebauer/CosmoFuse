@@ -270,5 +270,7 @@ def test_filters_share_unit_normalisation(filter_fn):
     theta_ap = np.radians(theta_Q_arcmin / 60)
     theta = np.linspace(0.0, 8 * theta_ap, 400001)
     q = np.asarray(filter_fn(theta, theta_Q_arcmin), dtype=np.float64)
-    integral = 2 * np.pi * np.trapezoid(q * theta, theta)
+    # np.trapezoid is the numpy>=2 name; fall back for numpy 1.x
+    trapezoid = getattr(np, "trapezoid", None) or np.trapz
+    integral = 2 * np.pi * trapezoid(q * theta, theta)
     np.testing.assert_allclose(integral, 1.0, rtol=1e-5)

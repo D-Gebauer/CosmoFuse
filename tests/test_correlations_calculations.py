@@ -70,7 +70,10 @@ class TestCorrelationCalculations(unittest.TestCase):
         gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
         expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
 
-        self.assertAlmostEqual(M_a[0], expected_M_a)
+        # to_numpy: on a GPU backend the public getter returns a device array
+        self.assertAlmostEqual(
+            float(self.corr.backend.to_numpy(M_a)[0]), expected_M_a
+        )
 
     def test_get_aperture_shear_non_numpy_backend_path(self):
         g1 = np.random.rand(self.npix)
@@ -150,7 +153,10 @@ class TestCorrelationCalculations(unittest.TestCase):
             w[Q_inds]
         )
 
-        self.assertAlmostEqual(aperture_density[0], expected)
+        # to_numpy: on a GPU backend the public getter returns a device array
+        self.assertAlmostEqual(
+            float(self.corr.backend.to_numpy(aperture_density)[0]), expected
+        )
 
     def test_get_aperture_density_non_numpy_backend_path(self):
         """Covers non-numpy backend execution path for scalar aperture."""

@@ -27,7 +27,6 @@
 
 __COMMON_CUDA_SOURCE__
 
-#include <cuComplex.h>
 
 /*
  * T               -- scalar type (float / double)
