@@ -82,7 +82,34 @@ Per map-set, the pair kernels are 3.8 ms (ξ±), 6.9 ms (ds), 1.5 ms (dd),
 
 ## Real-world workload (DES Y3 i3PCF geometry)
 
-See `realworld_*` results in the PR/summary: production Q-patch pair
-files (`/e/ocean1/users/dgebauer/sbi/CosmoFuse/Q*/2PCF_pairs_512_15_250_8.h5`),
-real baryonified shear maps, 4 tomo bins, `get_full_tomo_shear`
-(flip_g1), CPU float64 reference cross-checked.
+Production Q-patch pair files
+(`/e/ocean1/users/dgebauer/sbi/CosmoFuse/Q*/2PCF_pairs_512_15_250_8.h5`),
+real baryonified shear maps (`gamma_0000.npy`, footprint 0), 4 tomo
+bins, `get_full_tomo_shear(..., flip_g1=True)`, DES Y3 mask at
+nside 512. Interleaved runs (two rounds, median of 8 calls each).
+
+| config | Q50 (1358 patches) | Q110 (917 patches) |
+|---|---|---|
+| a438504 + env-fix, float64 | 203 ms/call | 213 ms/call |
+| merged, float64 | 62 ms/call (3.3×) | 60 ms/call (3.6×) |
+| merged, float32 + float64 acc | 36 ms/call (5.6×) | 36 ms/call (5.9×) |
+
+Per-call time is nearly independent of Q — it is dominated by the
+per-map H2D upload + staging (same maps regardless of patch set),
+which is exactly what the nsys profile predicted. For reference, the
+Aug 2025 production log (`~/research/lfi/correlations/3PCF/log.txt`,
+older code *and* different hardware) worked out to ~3.4–4.3 s per
+call.
+
+Correctness on the real Q110 data vs the float64 CPU reference
+(max|Δ|/rms over all patches/bins):
+
+| config | M_a | ξ+ | ξ− |
+|---|---|---|---|
+| a438504 baseline | 6.6e-15 | 9.6e-08 | 1.9e-07 |
+| merged, float64 | 3.5e-15 | 7.1e-14 | 1.1e-13 |
+| merged, float32 + f64 acc | 4.1e-07 | 4.0e-07 | 4.2e-07 |
+
+(The baseline's 1e-7 ξ± rows are the pre-existing rotation-precision
+bug fixed in commit 17b9204, visible on real data.) Q50 shows the
+same pattern (merged float64: ≤ 3.4e-14).
