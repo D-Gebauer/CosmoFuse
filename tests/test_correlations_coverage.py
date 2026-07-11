@@ -2427,10 +2427,12 @@ class TestCorrelationCoverage(unittest.TestCase):
             out_ba_p,
             out_ba_m,
         ):
-            out_ab_p[...] = 1.0 + 0.0j
-            out_ab_m[...] = 2.0 + 0.0j
-            out_ba_p[...] = 3.0 + 0.0j
-            out_ba_m[...] = 4.0 + 0.0j
+            # The GPU pair kernels emit the real parts of the estimators
+            # directly into map-dtype scratch buffers.
+            out_ab_p[...] = 1.0
+            out_ab_m[...] = 2.0
+            out_ba_p[...] = 3.0
+            out_ba_m[...] = 4.0
 
         corr.backend.xipm_cross_corr_kernel = fake_kernel
         g11 = np.ones(12, dtype=np.float64)

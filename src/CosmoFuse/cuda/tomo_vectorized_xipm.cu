@@ -22,34 +22,6 @@
 __COMMON_CUDA_SOURCE__
 
 
-/* --- Complex number helpers for precision-generic code --- */
-
-template<typename C>
-__device__ inline C complex_make(double re, double im);
-
-template<>
-__device__ inline cuFloatComplex complex_make<cuFloatComplex>(double re, double im) {
-    return make_cuFloatComplex((float)re, (float)im);
-}
-
-template<>
-__device__ inline cuDoubleComplex complex_make<cuDoubleComplex>(double re, double im) {
-    return make_cuDoubleComplex(re, im);
-}
-
-template<typename C>
-__device__ inline C complex_mul(C a, C b);
-
-template<>
-__device__ inline cuFloatComplex complex_mul<cuFloatComplex>(cuFloatComplex a, cuFloatComplex b) {
-    return cuCmulf(a, b);
-}
-
-template<>
-__device__ inline cuDoubleComplex complex_mul<cuDoubleComplex>(cuDoubleComplex a, cuDoubleComplex b) {
-    return cuCmul(a, b);
-}
-
 /*
  * T            -- scalar type (float / double) for map values and weights
  * C            -- complex type (cuFloatComplex / cuDoubleComplex) for rotations
@@ -120,21 +92,29 @@ __global__ void gpu_fused_tomo_reduce_xipm(
         const long long base_a = idx_a_bin * 2;
         const long long base_b = idx_b_bin * 2;
 
-        const C g_a = complex_make<C>((double)shear[base_a], (double)shear[base_a + 1]);
-        const C g_b = complex_make<C>((double)shear[base_b], (double)shear[base_b + 1]);
+        const T ga1 = shear[base_a];
+        const T ga2 = shear[base_a + 1];
+        const T gb1 = shear[base_b];
+        const T gb2 = shear[base_b + 1];
 
-        /* Rotate shears into the pair frame: gamma' = gamma * e^{2iphi} */
-        C term_a = complex_mul<C>(g_a, exp_a);
-        C term_b = complex_mul<C>(g_b, exp_b);
+        /* Rotate shears into the pair frame: gamma' = gamma * e^{2iphi}.
+           The multiply runs at map precision T (the rotation components are
+           promoted, exact for float -> double) to match the CPU reference
+           kernel and the fused 3x2pt kernel; doing it at C precision would
+           truncate float64 maps to float32 mid-computation. */
+        const T ea_R = (T)exp_a.x;
+        const T ea_I = (T)exp_a.y;
+        const T eb_R = (T)exp_b.x;
+        const T eb_I = (T)exp_b.y;
 
         T w_pair =
             weights[idx_a_bin] * weights[idx_b_bin];
         sum_w += w_pair;
 
-        const T a_R = (T)term_a.x;
-        const T a_I = (T)term_a.y;
-        const T b_R = (T)term_b.x;
-        const T b_I = (T)term_b.y;
+        const T a_R = ga1 * ea_R - ga2 * ea_I;
+        const T a_I = ga1 * ea_I + ga2 * ea_R;
+        const T b_R = gb1 * eb_R - gb2 * eb_I;
+        const T b_I = gb1 * eb_I + gb2 * eb_R;
 
         /* xi+ numerator: Re[gamma'_b * conj(gamma'_a)] = b_R*a_R + b_I*a_I
            xi- numerator: Re[gamma'_b * gamma'_a]        = b_R*a_R - b_I*a_I */

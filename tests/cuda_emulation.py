@@ -103,7 +103,6 @@ class EmulatedCupyModule:
 def _emulate_xipm(params, grid, args):
     """tomo_vectorized_xipm.cu :: gpu_fused_tomo_reduce_xipm<T, C, TOMO, I>."""
     map_dtype = _SCALAR_TYPES[params[0]]
-    complex_dtype = _SCALAR_TYPES[params[1]]
     tomo_bins = int(params[2])
 
     (shear, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets,
@@ -138,20 +137,21 @@ def _emulate_xipm(params, grid, args):
 
             idx_a_bin = idx_a * tomo_bins + ai
             idx_b_bin = idx_b * tomo_bins + bj
-            # complex_make<C> truncates the shear into the rotation
-            # precision before the complex multiply (cuCmulf for C=float).
-            g_a = (
-                shear_flat[idx_a_bin * 2] + 1j * shear_flat[idx_a_bin * 2 + 1]
-            ).astype(complex_dtype)
-            g_b = (
-                shear_flat[idx_b_bin * 2] + 1j * shear_flat[idx_b_bin * 2 + 1]
-            ).astype(complex_dtype)
-            term_a = g_a * exp_a
-            term_b = g_b * exp_b
-            a_r = term_a.real.astype(map_dtype)
-            a_i = term_a.imag.astype(map_dtype)
-            b_r = term_b.real.astype(map_dtype)
-            b_i = term_b.imag.astype(map_dtype)
+            # The rotation components are promoted to the map precision
+            # before the multiply (matches the CPU reference and the fused
+            # 3x2pt kernel; exact for float -> double).
+            ga1 = shear_flat[idx_a_bin * 2]
+            ga2 = shear_flat[idx_a_bin * 2 + 1]
+            gb1 = shear_flat[idx_b_bin * 2]
+            gb2 = shear_flat[idx_b_bin * 2 + 1]
+            ea_r = exp_a.real.astype(map_dtype)
+            ea_i = exp_a.imag.astype(map_dtype)
+            eb_r = exp_b.real.astype(map_dtype)
+            eb_i = exp_b.imag.astype(map_dtype)
+            a_r = ga1 * ea_r - ga2 * ea_i
+            a_i = ga1 * ea_i + ga2 * ea_r
+            b_r = gb1 * eb_r - gb2 * eb_i
+            b_i = gb1 * eb_i + gb2 * eb_r
 
             w_pair = weights_flat[idx_a_bin] * weights_flat[idx_b_bin]
             out_p_idx = comb_ori * nbins_total + bin_flat

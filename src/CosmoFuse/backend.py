@@ -1621,28 +1621,42 @@ def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g1a, raw T g2a, raw T g1b, raw T g2b, raw T wa, raw T wb,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
-        "C out_ab_p, C out_ab_m, C out_ba_p, C out_ba_m",
+        "T out_ab_p, T out_ab_m, T out_ba_p, T out_ba_m",
         """
         const I idx_i = ind_i[i];
         const I idx_j = ind_j[i];
 
-        C ga_i = C(g1a[idx_i], g2a[idx_i]);
-        C gb_i = C(g1b[idx_i], g2b[idx_i]);
-        C ga_j = C(g1a[idx_j], g2a[idx_j]);
-        C gb_j = C(g1b[idx_j], g2b[idx_j]);
+        /* Rotation components promoted to the map precision T before the
+           multiply (matches the CPU reference; exact for float -> double).
+           Only the real parts of the estimators are needed downstream, so
+           they are emitted directly at T. */
+        const T er_i = (T)exp_i[i].real();
+        const T ei_i = (T)exp_i[i].imag();
+        const T er_j = (T)exp_j[i].real();
+        const T ei_j = (T)exp_j[i].imag();
 
-        C exp_i_val = exp_i[i];
-        C exp_j_val = exp_j[i];
+        const T a1_i = g1a[idx_i] * wa[idx_i];
+        const T a2_i = g2a[idx_i] * wa[idx_i];
+        const T b1_i = g1b[idx_i] * wb[idx_i];
+        const T b2_i = g2b[idx_i] * wb[idx_i];
+        const T a1_j = g1a[idx_j] * wa[idx_j];
+        const T a2_j = g2a[idx_j] * wa[idx_j];
+        const T b1_j = g1b[idx_j] * wb[idx_j];
+        const T b2_j = g2b[idx_j] * wb[idx_j];
 
-        C ga_i_rot = C(g1a[idx_i] * wa[idx_i], g2a[idx_i] * wa[idx_i]) * exp_i_val;
-        C gb_i_rot = C(g1b[idx_i] * wb[idx_i], g2b[idx_i] * wb[idx_i]) * exp_i_val;
-        C ga_j_rot = C(g1a[idx_j] * wa[idx_j], g2a[idx_j] * wa[idx_j]) * exp_j_val;
-        C gb_j_rot = C(g1b[idx_j] * wb[idx_j], g2b[idx_j] * wb[idx_j]) * exp_j_val;
+        const T ai_r = a1_i * er_i - a2_i * ei_i;
+        const T ai_i = a1_i * ei_i + a2_i * er_i;
+        const T bi_r = b1_i * er_i - b2_i * ei_i;
+        const T bi_i = b1_i * ei_i + b2_i * er_i;
+        const T aj_r = a1_j * er_j - a2_j * ei_j;
+        const T aj_i = a1_j * ei_j + a2_j * er_j;
+        const T bj_r = b1_j * er_j - b2_j * ei_j;
+        const T bj_i = b1_j * ei_j + b2_j * er_j;
 
-        out_ab_p = gb_j_rot * conj(ga_i_rot);
-        out_ab_m = gb_j_rot * ga_i_rot;
-        out_ba_p = ga_j_rot * conj(gb_i_rot);
-        out_ba_m = ga_j_rot * gb_i_rot;
+        out_ab_p = bj_r * ai_r + bj_i * ai_i;   /* Re[gb_j' conj(ga_i')] */
+        out_ab_m = bj_r * ai_r - bj_i * ai_i;   /* Re[gb_j' ga_i']       */
+        out_ba_p = aj_r * bi_r + aj_i * bi_i;   /* Re[ga_j' conj(gb_i')] */
+        out_ba_m = aj_r * bi_r - aj_i * bi_i;   /* Re[ga_j' gb_i']       */
         """,
         "gpu_xipm_cross_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
@@ -1654,16 +1668,32 @@ def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
     return module.ElementwiseKernel(
         "raw T g11, raw T g21, raw T g12, raw T g22, raw T w1, raw T w2,"
         " raw I ind_i, raw I ind_j, raw C exp_i, raw C exp_j",
-        "C out_p, C out_m",
+        "T out_p, T out_m",
         """
         const I idx_i = ind_i[i];
         const I idx_j = ind_j[i];
 
-        C g2 = C(g11[idx_i] * w1[idx_i], g21[idx_i] * w1[idx_i]) * exp_i[i];
-        C g1 = C(g12[idx_j] * w2[idx_j], g22[idx_j] * w2[idx_j]) * exp_j[i];
+        /* Rotation components promoted to the map precision T before the
+           multiply (matches the CPU reference; exact for float -> double).
+           Only the real parts of the estimators are needed downstream, so
+           they are emitted directly at T. */
+        const T er_i = (T)exp_i[i].real();
+        const T ei_i = (T)exp_i[i].imag();
+        const T er_j = (T)exp_j[i].real();
+        const T ei_j = (T)exp_j[i].imag();
 
-        out_p = g1 * conj(g2);
-        out_m = g1 * g2;
+        const T a1 = g11[idx_i] * w1[idx_i];
+        const T a2 = g21[idx_i] * w1[idx_i];
+        const T b1 = g12[idx_j] * w2[idx_j];
+        const T b2 = g22[idx_j] * w2[idx_j];
+
+        const T a_r = a1 * er_i - a2 * ei_i;
+        const T a_i = a1 * ei_i + a2 * er_i;
+        const T b_r = b1 * er_j - b2 * ei_j;
+        const T b_i = b1 * ei_j + b2 * er_j;
+
+        out_p = b_r * a_r + b_i * a_i;   /* Re[g_b' conj(g_a')] */
+        out_m = b_r * a_r - b_i * a_i;   /* Re[g_b' g_a']       */
         """,
         "gpu_xipm_auto_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,

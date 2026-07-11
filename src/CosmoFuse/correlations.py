@@ -1699,14 +1699,12 @@ class Correlation:
             if sumofweights_dev is None:
                 sumofweights_dev = out_w
         else:
-            complex_dtype = (
-                self.backend.module.complex64
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else self.backend.module.complex128
-            )
             if sumofweights_dev is None:
                 sumofweights_dev = self._get_xipm_sumofweights(w_dev, w_dev)
-            out_p, out_m = self._get_pair_scratch(complex_dtype, 2)
+            # The kernel computes at map precision and emits the real parts
+            # directly; only the reduced numerators are cast to the
+            # historical rotation-precision output dtype (as on CPU).
+            out_p, out_m = self._get_pair_scratch(self.map_dtype, 2)
 
             xipm_auto_corr_kernel(
                 g1_dev,
@@ -1723,8 +1721,13 @@ class Correlation:
                 out_m,
             )
 
-            xip_num = self.backend.module.real(self._reduce_pairs(out_p))
-            xim_num = self.backend.module.real(self._reduce_pairs(out_m))
+            real_dtype = (
+                np.float32
+                if self.rotation_complex_dtype == np.dtype(np.complex64)
+                else np.float64
+            )
+            xip_num = self._reduce_pairs(out_p).astype(real_dtype, copy=False)
+            xim_num = self._reduce_pairs(out_m).astype(real_dtype, copy=False)
         xip_dev, xim_dev = self._normalize_xipm_pairs(xip_num, xim_num, sumofweights_dev)
 
         if return_numpy:
@@ -1815,17 +1818,15 @@ class Correlation:
             if sum_ba is None:
                 sum_ba = out_ba_w
         else:
-            complex_dtype = (
-                self.backend.module.complex64
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else self.backend.module.complex128
-            )
             if sum_ab is None:
                 sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
             if sum_ba is None:
                 sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
+            # The kernel computes at map precision and emits the real parts
+            # directly; only the reduced numerators are cast to the
+            # historical rotation-precision output dtype (as on CPU).
             out_ab_p, out_ab_m, out_ba_p, out_ba_m = self._get_pair_scratch(
-                complex_dtype, 4
+                self.map_dtype, 4
             )
 
             xipm_cross_corr_kernel(
@@ -1845,10 +1846,15 @@ class Correlation:
                 out_ba_m,
             )
 
-            xip_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_p))
-            xim_ab_num = self.backend.module.real(self._reduce_pairs(out_ab_m))
-            xip_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_p))
-            xim_ba_num = self.backend.module.real(self._reduce_pairs(out_ba_m))
+            real_dtype = (
+                np.float32
+                if self.rotation_complex_dtype == np.dtype(np.complex64)
+                else np.float64
+            )
+            xip_ab_num = self._reduce_pairs(out_ab_p).astype(real_dtype, copy=False)
+            xim_ab_num = self._reduce_pairs(out_ab_m).astype(real_dtype, copy=False)
+            xip_ba_num = self._reduce_pairs(out_ba_p).astype(real_dtype, copy=False)
+            xim_ba_num = self._reduce_pairs(out_ba_m).astype(real_dtype, copy=False)
 
         xip_ab_dev, xim_ab_dev = self._normalize_xipm_pairs(
             xip_ab_num, xim_ab_num, sum_ab
