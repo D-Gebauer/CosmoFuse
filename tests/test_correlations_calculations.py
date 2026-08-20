@@ -20,6 +20,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
+        np.random.seed(42)
         self.nside = 64
         self.phi_center = np.array([0.0])
         self.theta_center = np.array([np.pi / 4])
@@ -40,6 +41,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             theta_max=self.theta_max,
             patch_size=self.patch_size,
             theta_Q=self.theta_Q,
+            rotation_precision="float64",
         )
 
         # Mock Q data for one patch
@@ -323,6 +325,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
+                rotation_precision="float64",
             )
             new_corr.load_pairs(tmp.name)
             self.assertIsNotNone(new_corr.inds_dev)
