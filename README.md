@@ -59,6 +59,9 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Optimized tomographic kernels for all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
+- **Compact row space**: device buffers and indices only cover the unmasked pixels; maps can be passed full-sky or already cut to the footprint (`Correlation.row_pix` order) — no scatter, `npix / n_active` times less host→device traffic
+- **Static treecode (opt-in, `resolution_factor`)**: every angular bin is measured on the coarsest HEALPix level that still resolves it, cutting the pair geometry by orders of magnitude (nside 2048, $\theta_{\min}=5'$, ~900 patches fit on one GPU)
+- Combination-tiled GPU $\xi_\pm$ kernel (all tomographic combinations in one pass over the pairs) and a ring-buffer map loader (`RowSpaceMapLoader`) that keeps the GPU busy while measuring $10^5$ maps
 
 ## Installation
 Install using:
@@ -85,6 +88,9 @@ First create a Correlation object:
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
         accumulation_precision="float64",   # "same" / "float64"
+        resolution_factor=None,             # None = full resolution (default); e.g. 2.9 / 4 = static treecode
+        aperture_nside=None,                # None = map resolution; e.g. 512 = aperture statistics on the degraded map
+        pair_search_precision="auto",       # "float64" recommended for theta_min < ~10'
     )
 
 For GPU runs the recommended precision configuration is
@@ -152,7 +158,44 @@ To load pairs and immediately release host-side pair arrays after backend prepar
 
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
-Pair files are written in a consolidated layout (format version 2) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable.
+Pair files are written in a consolidated layout (format version 2) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable. Geometries with virtual rows (`resolution_factor` / `aperture_nside`) are written as format version 3 with different dataset names, so that CosmoFuse ≤ 4.20 refuses them instead of mis-reading them; full-resolution files stay version 2.
+
+### Choosing the resolution (`resolution_factor`)
+
+**The default is full resolution** (`resolution_factor=None`): every bin is measured on the map's own pixels, exactly as in previous versions (bit-for-bit). Explicit pair geometry grows as nside⁴, though: a 110′ patch holds 0.33 M pairs at nside 512 but 81 M at nside 2048 — ~2 TB for 1000 patches.
+
+With `resolution_factor=k` bin $b$ is measured on the coarsest HEALPix level whose pixel size $p$ satisfies $p \le \theta_{\rm lo}(b)/k$. Coarse cells are built **per patch** from the unmasked map pixels inside the patch disc (the patch window stays an exact top-hat), carry the weighted mean of their members and the sum of their weights, and sit at the centroid of their members. Because $W_I W_J \gamma_I \gamma_J = \sum_{i\in I}\sum_{j\in J} w_i w_j \gamma_i \gamma_j$, no pair is dropped and no noise is added — but every fine pair is binned and rotated with the geometry of its parent cells. **This is a different (windowed) estimator; use the same `resolution_factor` for data, simulations and covariances, and never mix it with full-resolution measurements** (the two agree in the mean to the numbers below, but their per-patch noise realisations differ, since pairs move between neighbouring bins).
+
+Measured on nside-2048 maps with the DES Y3 mask (5′–250′, 11 bins, 110′ patches; signal ratio to full resolution as a function of the effective $k_{\rm eff}=\theta_{\rm lo}/p \in [k, 2k)$):
+
+| $k_{\rm eff}$ | $\xi_-$ | $\gamma_t$ | $\xi_+$, $\xi_g$ | noise variance |
+| :--- | :--- | :--- | :--- | :--- |
+| ≈ 2.1 | −19 % | −2…−6 % | ≲ 1 % | unchanged |
+| ≈ 3.0 | −9 % | −2 % | ≲ 1 % | unchanged |
+| ≈ 4.3 | −5 % | −1…−2 % | < 0.7 % | unchanged |
+| ≈ 6.1 | −2.5 % | −0.4 % | < 0.3 % | unchanged |
+| ≈ 8.7 | −1 % | ≤ 0.3 % | < 0.3 % | unchanged |
+
+| `resolution_factor` | pairs / patch (nside 2048) | pair memory, 1000 patches |
+| :--- | :--- | :--- |
+| `None` (full) | 78 M | ~1.9 TB |
+| 2 | 0.25 M | 6 GB |
+| 2.9 | 0.64 M | 16 GB |
+| 4 | 1.4 M | 35 GB |
+| 5.8 | 3.0 M | 72 GB |
+
+With $\sqrt 2$-spaced bin edges (e.g. `theta_min=5`, `theta_max=5*2**5.5`, `nbins=11`) the levels change every second bin and $k_{\rm eff}$ alternates cleanly between $k$ and $\sqrt2\,k$.
+
+    corr = Correlation(2048, phi, theta, nbins=10, theta_min=5, theta_max=175,
+                       patch_size=110, theta_Q=110, mask=mask,
+                       resolution_factor=2.9, aperture_nside=512,
+                       map_precision="float32", accumulation_precision="float64")
+    corr.preprocess()
+    corr.level_table        # nside and k_eff per bin -- store it with every data vector
+
+Before pair finding a **preflight check** projects the pair memory from the mask and raises a `MemoryError` that names a `resolution_factor` that fits (budget: free device memory, or `memory_budget_gb=`), instead of failing with an out-of-memory error an hour into preprocessing. `load_pairs` adopts the resolution stored in the pair file and raises if the constructor explicitly asked for a different one.
+
+At small scales also set `pair_search_precision="float64"` (automatic with `resolution_factor`): a float32 pair search resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin. The stored rotation factors stay at `rotation_precision`, so this costs no memory.
 
 ### Aperture filters
 
@@ -176,9 +219,13 @@ Both filters are normalised to $\int Q(\theta)\, \mathrm{d}\Omega = 1$, so apert
 
     correlation.preprocess(aperture_filter=Q_schneider)
 
+Since $\theta_Q$ is much larger than a pixel, the aperture statistics do not need the map resolution: `aperture_nside=512` evaluates $M_a$/$M_g$ on the (weighted-mean, globally) degraded map — numerically the aperture statistic of an nside-512 analysis — and keeps the aperture geometry at that size (×16 smaller than at nside 2048). Default: the map resolution.
+
 ### Measuring Correlations
 
 The package supports 3 main probes: Cosmic Shear, Galaxy Clustering, and Galaxy-Galaxy Lensing (GGL).
+
+**Map inputs.** Every measurement method accepts maps whose last axis is either the full sky (`npix`) or the **row space** (`correlation.n_active` unmasked pixels in `correlation.row_pix` order, ascending RING). Full-sky maps are cut down on the fly; row-space maps are used as they are and are the fast path — masked pixels are never touched (they may be NaN). Any other length raises. Weight maps that are read-only (`w.flags.writeable = False`) are gathered, uploaded and degraded once and then reused.
 
 #### Probes & Inputs
 
@@ -278,7 +325,28 @@ M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
 )
 ```
 
-**Overlapping uploads with compute (GPU)**:
+**Measuring many maps (GPU)**:
+
+Store maps in row space (`correlation.to_row_space(full_sky_maps)`, together with `correlation.row_pix_hash`) and let `RowSpaceMapLoader` feed the GPU: reader threads fill a ring of pinned buffers directly from your files, uploads run on their own CUDA stream, and the device arrays arrive strictly in order. On an A100 this keeps the GPU > 95 % busy (DES Y3, 917 patches, 4 source bins: 26 ms per map-set at nside 512 full resolution; 78 ms at nside 2048, $\theta_{\min}=5'$, `resolution_factor=2.9`).
+
+```python
+from CosmoFuse import RowSpaceMapLoader
+
+w = np.ascontiguousarray(weights_full_sky[:, correlation.row_pix], dtype=np.float32)
+w.flags.writeable = False                      # fixed weights: uploaded/degraded once
+
+def read(path, out):                           # runs in a reader thread
+    out["shear"][...] = np.load(path, mmap_mode="r")   # (nz, 2, n_active), any dtype
+
+loader = RowSpaceMapLoader(correlation, {"shear": (nz, 2, correlation.n_active)},
+                           sources=files, read_fn=read, n_slots=4, n_readers=2,
+                           row_pix_hash=stored_hash)
+for k, dev in loader:                          # dev arrays are valid until the next iteration
+    M_a, xi_p, xi_m = correlation.get_full_tomo_shear(dev["shear"], w, flip_g1=True)
+    results.append([o.copy() for o in (M_a, xi_p, xi_m)])
+```
+
+**Overlapping uploads with compute, two slots (GPU)**:
 
 When measuring many maps in a loop, `PinnedMapPipeline` double-buffers the
 host→device transfers through pinned memory on a dedicated CUDA stream, so
