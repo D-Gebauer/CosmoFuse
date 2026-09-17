@@ -1,0 +1,23 @@
+{
+ "Q": 110,
+ "n_patches": 917,
+ "n_pairs": 265362423,
+ "pairs_per_bin": [
+  4952917,
+  9523559,
+  17755888,
+  30310274,
+  52557751,
+  75362336,
+  74899698
+ ],
+ "map_precision": "float32",
+ "acc": "float64",
+ "read_ms_per_set": 61.59537604876927,
+ "scatter_ms": 7.625903002917767,
+ "call_host_inputs_ms": 149.06247798353434,
+ "call_device_inputs_ms": 123.71194129809737,
+ "h2d_and_staging_ms": 25.350536685436964,
+ "xipm_pair_evals": 4245798768,
+ "device_pool_GB": 7.161984
+}

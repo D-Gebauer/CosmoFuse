@@ -1,0 +1,91 @@
+{
+ "production_512": {
+  "nside": 512,
+  "n_patches": 1353,
+  "total_pairs": 392854558,
+  "pairs_per_bin": [
+   6980064,
+   13401011,
+   24879176,
+   42690941,
+   73854011,
+   104857363,
+   103441617,
+   22750375
+  ],
+  "pairs_per_patch_min_med_max": [
+   84600,
+   306604,
+   322921
+  ],
+  "footprint_pixels": 364790,
+  "npix": 3145728,
+  "active_pixels_pairs": 345237,
+  "active_pixels_aperture": 354813,
+  "active_pixels_union": 354813,
+  "aperture_entries": 23072167,
+  "pair_bytes_GB": 9.428509392,
+  "aperture_bytes_GB": 0.369154672,
+  "preprocess_s": 21.028106539999953
+ },
+ "single_patch_fullres_512": {
+  "patch_pixels": 810,
+  "pairs_per_bin": [
+   1556,
+   1530,
+   1492,
+   5820,
+   11037,
+   19162,
+   34201,
+   59260,
+   85374,
+   87913,
+   20287
+  ],
+  "pairs": 327632,
+  "bytes_per_pair": 24,
+  "GB_per_1000_patches": 7.863168,
+  "pairfind_s": 0.009318146999930832
+ },
+ "single_patch_fullres_1024": {
+  "patch_pixels": 3195,
+  "pairs_per_bin": [
+   6122,
+   18062,
+   48167,
+   76878,
+   167251,
+   302208,
+   542810,
+   915930,
+   1338796,
+   1355662,
+   315000
+  ],
+  "pairs": 5086886,
+  "bytes_per_pair": 24,
+  "GB_per_1000_patches": 122.085264,
+  "pairfind_s": 0.1783477369999673
+ },
+ "single_patch_fullres_2048": {
+  "patch_pixels": 12756,
+  "pairs_per_bin": [
+   160017,
+   313768,
+   662320,
+   1310271,
+   2584090,
+   4781154,
+   8730944,
+   14663694,
+   21367826,
+   21598315,
+   4940166
+  ],
+  "pairs": 81112565,
+  "bytes_per_pair": 24,
+  "GB_per_1000_patches": 1946.70156,
+  "pairfind_s": 3.346356750999803
+ }
+}

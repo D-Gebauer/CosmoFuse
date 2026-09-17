@@ -1,0 +1,31 @@
+{
+ "Q": 110,
+ "n_patches": 917,
+ "n_pairs": 265362423,
+ "pairs_per_bin": [
+  4952917,
+  9523559,
+  17755888,
+  30310274,
+  52557751,
+  75362336,
+  74899698
+ ],
+ "map_precision": "float32",
+ "acc": "float64",
+ "read_ms_per_set": 9.63865566466536,
+ "scatter_ms": 7.626375183463097,
+ "call_host_inputs_ms": 32.408471684902906,
+ "call_device_inputs_ms": 24.741895496845245,
+ "call_rowspace_host_inputs_ms": 27.4895285256207,
+ "n_active": 369190,
+ "h2d_and_staging_ms": 7.666576188057661,
+ "xipm_pair_evals": 4245798768,
+ "device_pool_GB": 6.97659136,
+ "bitwise_equal_M_a": true,
+ "maxabsdiff_M_a": 0.0,
+ "bitwise_equal_xip": true,
+ "maxabsdiff_xip": 0.0,
+ "bitwise_equal_xim": true,
+ "maxabsdiff_xim": 0.0
+}

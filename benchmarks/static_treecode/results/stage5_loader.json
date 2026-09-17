@@ -1,0 +1,23 @@
+{
+ "A_512_k4.0_readers1": {
+  "serial_ms": 21.412545033464475,
+  "loader_ms": 11.472930399967092,
+  "device_only_ms": 11.039157398045063,
+  "gpu_idle_frac": 0.037808387813742295,
+  "bitwise_equal": true
+ },
+ "A_512_k4.0_readers2": {
+  "serial_ms": 21.420605646978533,
+  "loader_ms": 11.493812298535236,
+  "device_only_ms": 11.039157398045063,
+  "gpu_idle_frac": 0.03955649254408944,
+  "bitwise_equal": true
+ },
+ "A_512_k4.0_readers4": {
+  "serial_ms": 21.2758061742144,
+  "loader_ms": 11.46668694647295,
+  "device_only_ms": 11.039157398045063,
+  "gpu_idle_frac": 0.037284487701078506,
+  "bitwise_equal": true
+ }
+}
