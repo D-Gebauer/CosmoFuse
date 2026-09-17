@@ -28,6 +28,14 @@ from .correlation_helpers import (
     zeta_g_t as _zeta_g_t_helper,
 )
 from .pair_finder import PairFinder
+from .treecode import (
+    TreecodeGeometry,
+    assign_levels,
+    effective_resolution_factor,
+    is_power_of_two,
+    level_groups,
+    validate_resolution_factor,
+)
 from .utils import pixel2RaDec, select_patch_centers
 
 logger = logging.getLogger(__name__)
@@ -321,6 +329,10 @@ class Correlation:
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
         accumulation_precision: str = "same",
+        resolution_factor: Optional[float] = None,
+        aperture_nside: Optional[int] = None,
+        memory_budget_gb: Optional[float] = None,
+        pair_search_precision: str = "auto",
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -343,6 +355,34 @@ class Correlation:
                 float64 even for float32 maps (recommended with
                 map_precision="float32": per-pair products are computed at
                 float32 but summed without float32 cancellation error).
+            resolution_factor: ``None`` (default) measures every angular
+                bin on the full-resolution map.  A positive number ``k``
+                switches on the *static treecode*: bin ``b`` is measured on
+                the coarsest HEALPix level whose pixel size is
+                ``<= theta_lo(b) / k`` (per-patch cells, weighted means at
+                their centroids).  This cuts the number of pairs by orders
+                of magnitude at large separations, but it is a *different
+                (windowed) estimator*: use the same value for data,
+                simulations and covariances.  See :attr:`level_table`.
+            aperture_nside: ``None`` (default) evaluates the aperture
+                statistics at the map resolution.  A power-of-two nside
+                below ``nside`` evaluates them on the (globally) degraded
+                map instead, keeping the aperture geometry at that size.
+            memory_budget_gb: Budget for the preflight check that runs
+                before pair finding.  ``None`` uses the free device memory
+                on GPU backends (no check on CPU); ``float("inf")``
+                disables the check.
+            pair_search_precision: Precision of the pair *search*
+                (separations, binning, position angles); the stored
+                rotation factors always use ``rotation_precision``.
+                ``"rotation"`` is the historical behaviour (search at
+                rotation precision), ``"float64"`` searches at double
+                precision at no memory cost.  ``"auto"`` (default) keeps
+                the historical behaviour at full resolution and uses
+                float64 for the static treecode.  float32 resolves
+                separations only to ``d(theta)/theta ~ 6e-8 / theta^2``
+                (0.3 % at 15', 3 % at 5'): use ``"float64"`` for
+                ``theta_min`` below ~10'.
 
         Raises:
             ValueError: If input parameters are invalid
@@ -400,15 +440,50 @@ class Correlation:
             _compute_aperture_shear_all_patches
         )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(fastmath)
-        self._pair_finder = PairFinder(
-            nbins=self.nbins,
-            binedges=self.binedges,
-            index_dtype=self.index_dtype,
-            rotation_dtype=self.rotation_dtype,
-            rotation_complex_dtype=self.rotation_complex_dtype,
-            kernel=self._compute_pairs_kernel,
-        )
         self.radius_filter = 5 * self.theta_Q
+
+        self.resolution_factor = validate_resolution_factor(resolution_factor)
+        if pair_search_precision not in ("auto", "rotation", "float32", "float64"):
+            raise ValueError(
+                "pair_search_precision must be 'auto', 'rotation', 'float32' or "
+                f"'float64'; got {pair_search_precision!r}"
+            )
+        self.pair_search_precision = pair_search_precision
+        self._pair_finder = self._make_pair_finder()
+        if self._pair_finder.search_dtype == np.dtype(np.float32):
+            jitter = 6e-8 / self.theta_min**2
+            if jitter > 0.01:
+                logger.warning(
+                    "Pair search runs at float32: separations near theta_min="
+                    "%.1f' are only resolved to ~%.1f%%, so pairs are assigned "
+                    "to the wrong angular bin at that level. Pass "
+                    "pair_search_precision='float64' (no memory cost).",
+                    theta_min,
+                    100 * jitter,
+                )
+        self.level_nside = assign_levels(
+            self.binedges, self.nside, self.resolution_factor
+        )
+        if aperture_nside is not None:
+            aperture_nside = int(aperture_nside)
+            if (
+                not is_power_of_two(aperture_nside)
+                or not is_power_of_two(nside)
+                or aperture_nside > nside
+            ):
+                raise ValueError(
+                    "aperture_nside must be a power of two <= nside (and nside "
+                    f"a power of two); got aperture_nside={aperture_nside}, "
+                    f"nside={nside}"
+                )
+            if aperture_nside == nside:
+                aperture_nside = None
+        self.aperture_nside = aperture_nside
+        if memory_budget_gb is not None and not (memory_budget_gb > 0):
+            raise ValueError("memory_budget_gb must be positive")
+        self.memory_budget_gb = memory_budget_gb
+        # Host-side coarse-cell geometry (set by pair finding / load_pairs)
+        self._treecode: Optional[TreecodeGeometry] = None
 
         if mask is not None:
             if len(mask) != hp.nside2npix(self.nside):
@@ -475,7 +550,8 @@ class Correlation:
                 same filter to :meth:`preprocess` for consistency.
             **kwargs: Forwarded to the constructor (``nbins``,
                 ``theta_min``, ``theta_max``, ``device``, ``fastmath``,
-                ``map_precision``, ``rotation_precision``).
+                ``map_precision``, ``rotation_precision``,
+                ``resolution_factor``, ``aperture_nside``, ...).
 
         Raises:
             ValueError: If no candidate centre satisfies the masking
@@ -512,11 +588,27 @@ class Correlation:
             **kwargs,
         )
 
+    def _make_pair_finder(self) -> PairFinder:
+        mode = self.pair_search_precision
+        if mode == "auto":
+            mode = "rotation" if self.resolution_factor is None else "float64"
+        search_dtype = self.rotation_dtype if mode == "rotation" else np.dtype(mode)
+        return PairFinder(
+            nbins=self.nbins,
+            binedges=self.binedges,
+            index_dtype=self.index_dtype,
+            rotation_dtype=self.rotation_dtype,
+            rotation_complex_dtype=self.rotation_complex_dtype,
+            kernel=self._compute_pairs_kernel,
+            search_dtype=search_dtype,
+        )
+
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
         # map_mask is rebuilt from map_inds in __setstate__; dropping it keeps
         # the full-sky boolean array out of every pickle.
         state.pop('map_mask', None)
+        state.pop('_aperture_cells_cache', None)
         if 'backend' in state:
             del state['backend']
         if '_compute_pairs_kernel' in state:
@@ -540,20 +632,22 @@ class Correlation:
             # Pickles from before the accumulation_precision kwarg existed.
             self.accumulation_precision = "same"
             self.acc_dtype = self.map_dtype
+        if "resolution_factor" not in self.__dict__:
+            # Pickles from before the static treecode: full resolution.
+            self.resolution_factor = None
+            self.level_nside = assign_levels(self.binedges, self.nside, None)
+            self.aperture_nside = None
+            self.memory_budget_gb = None
+            self._treecode = None
         self.backend = get_backend(self.device)
         if "aperture_shear_all_patches" not in self.__dict__:
             self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
                 _compute_aperture_shear_all_patches
             )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
-        self._pair_finder = PairFinder(
-            nbins=self.nbins,
-            binedges=self.binedges,
-            index_dtype=self.index_dtype,
-            rotation_dtype=self.rotation_dtype,
-            rotation_complex_dtype=self.rotation_complex_dtype,
-            kernel=self._compute_pairs_kernel,
-        )
+        if "pair_search_precision" not in self.__dict__:
+            self.pair_search_precision = "rotation"  # historical behaviour
+        self._pair_finder = self._make_pair_finder()
         self.compute_context = ComputeContext()
         legacy_context_fields = (
             "inds_dev",
@@ -916,7 +1010,28 @@ class Correlation:
     def _prepare_aperture_flat(self) -> None:
         PairGeometry.prepare_aperture_flat(self)
 
+    def _aperture_row_inds(self) -> np.ndarray:
+        """Flat aperture pixel indices in the compact row space (host, cached)."""
+        ctx = self.compute_context
+        cached = getattr(ctx, "Q_rows_flat", None)
+        if cached is not None and cached[0] is self.Q_inds_flat:
+            return cached[1]
+        lut = self._global_to_row_lut()
+        if lut is None:
+            rows = self.Q_inds_flat
+        else:
+            rows = self._global_ids_to_rows(self.Q_inds_flat, lut)
+            if rows.size > 0 and int(rows.min()) < 0:
+                raise ValueError(
+                    "Aperture indices reference pixels outside the mask "
+                    "(map_inds); the aperture geometry does not belong to "
+                    "this mask."
+                )
+        ctx.Q_rows_flat = (self.Q_inds_flat, rows)
+        return rows
+
     def _invalidate_aperture_device_buffers(self) -> None:
+        self.compute_context.Q_rows_flat = None
         self.compute_context.Q_inds_dev = None
         self.compute_context.Q_cos_dev = None
         self.compute_context.Q_sin_dev = None
@@ -935,7 +1050,7 @@ class Correlation:
         # kernels promote it to the map type at use, which is exact for
         # float32 -> float64): halves the persistent aperture memory and
         # its upload when rotation_precision is float32.
-        q_inds_u32 = np.asarray(self.Q_inds_flat, dtype=np.uint32)
+        q_inds_u32 = np.asarray(self._aperture_row_inds(), dtype=np.uint32)
         self.compute_context.Q_inds_dev = module.ascontiguousarray(
             self.backend.to_device(q_inds_u32)
         )
@@ -1210,6 +1325,15 @@ class Correlation:
         g1_arr = self._coerce_map_input_array(g1)
         g2_arr = self._coerce_map_input_array(g2)
         w_arr = self._coerce_map_input_array(w)
+        (g1_arr, g2_arr), w_arr = self._expand_rows(
+            (g1_arr, g2_arr), w_arr, blocks="aperture"
+        )
+        return self._aperture_shear_rows(g1_arr, g2_arr, w_arr, return_device)
+
+    def _aperture_shear_rows(
+        self, g1_arr: Any, g2_arr: Any, w_arr: Any, return_device: bool = True
+    ) -> np.ndarray:
+        """Aperture mass of one map whose virtual rows are already appended."""
         kernel = getattr(self.backend, "aperture_shear_kernel", None)
         if kernel is None:
             raise RuntimeError(
@@ -1219,7 +1343,7 @@ class Correlation:
         if self.backend.name == "numpy":
             aperture_shear = np.zeros(self.n_patches, dtype=self.map_dtype)
             kernel(
-                self.Q_inds_flat,
+                self._aperture_row_inds(),
                 self.Q_cos_flat,
                 self.Q_sin_flat,
                 self.Q_val_flat,
@@ -1298,6 +1422,15 @@ class Correlation:
 
         map_values_arr = self._coerce_map_input_array(map_values)
         w_arr = self._coerce_map_input_array(w)
+        (map_values_arr,), w_arr = self._expand_rows(
+            (map_values_arr,), w_arr, blocks="aperture"
+        )
+        return self._aperture_density_rows(map_values_arr, w_arr, return_device)
+
+    def _aperture_density_rows(
+        self, map_values_arr: Any, w_arr: Any, return_device: bool = True
+    ) -> np.ndarray:
+        """Aperture density of one map whose virtual rows are already appended."""
         kernel = getattr(self.backend, "aperture_density_kernel", None)
         if kernel is None:
             raise RuntimeError(
@@ -1307,7 +1440,7 @@ class Correlation:
         if self.backend.name == "numpy":
             aperture_density = np.zeros(self.n_patches, dtype=self.map_dtype)
             kernel(
-                self.Q_inds_flat,
+                self._aperture_row_inds(),
                 self.Q_val_flat,
                 self.Q_offsets,
                 map_values_arr,
@@ -1409,10 +1542,14 @@ class Correlation:
         temp_bins_tot = np.empty((self.n_patches * self.nbins + 1), dtype=self.index_dtype)
         temp_bins_tot[0] = 0
 
+        # Device pair indices address the compact row space (host pair_inds
+        # keep HEALPix ids); remapped per patch so no pair-sized temporary
+        # is needed.
+        lut = self._global_to_row_lut()
         for i in range(self.n_patches):
-            temp_inds[:, first_patch_ind[i] : first_patch_ind[i + 1]] = self.pair_inds[
-                i
-            ]
+            temp_inds[:, first_patch_ind[i] : first_patch_ind[i + 1]] = (
+                self._global_ids_to_rows(self.pair_inds[i], lut)
+            )
             temp_exp2phi[:, first_patch_ind[i] : first_patch_ind[i + 1]] = (
                 self.pair_exp2phi[i]
             )
@@ -1420,6 +1557,13 @@ class Correlation:
             temp_bins_tot[1 + i * self.nbins : 1 + (i + 1) * self.nbins] = (
                 first_patch_ind[i] + self.bins[i].cumsum()
             )
+
+        if lut is not None and size > 0 and int(temp_inds.min()) < 0:
+            raise ValueError(
+                "Pair indices reference pixels outside the mask (map_inds); "
+                "the pair geometry does not belong to this mask."
+            )
+        del lut
 
         self.inds_dev = self.backend.to_device(temp_inds)
         module = self.backend.module
@@ -1491,10 +1635,12 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        density1_dev = self._to_backend_array(density1, dtype=self.map_dtype)
-        density2_dev = self._to_backend_array(density2, dtype=self.map_dtype)
-        w1_dev = self._to_backend_array(w1, dtype=self.map_dtype)
-        w2_dev = self._to_backend_array(w2, dtype=self.map_dtype)
+        density1_dev = self._map_to_device(density1)
+        density2_dev = self._map_to_device(density2)
+        w1_in = self._map_to_device(w1)
+        w2_in = self._map_to_device(w2)
+        (density1_dev,), w1_dev = self._expand_rows((density1_dev,), w1_in, "pairs")
+        (density2_dev,), w2_dev = self._expand_rows((density2_dev,), w2_in, "pairs")
 
         if sumofweights is not None:
             sum_ab = self._normalize_xipm_sumofweights(sumofweights)
@@ -1539,8 +1685,8 @@ class Correlation:
                 sum_ba = out_ba_w
         else:
             if sum_ab is None:
-                sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
-                sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
+                sum_ab = self._get_xipm_sumofweights(w1_in, w2_in, w1_dev, w2_dev)
+                sum_ba = self._get_xipm_sumofweights(w2_in, w1_in, w2_dev, w1_dev)
             out_ab, out_ba = self._get_pair_scratch(self.acc_dtype, 2)
             density_density_kernel(
                 density1_dev,
@@ -1585,11 +1731,17 @@ class Correlation:
         if self.inds_dev is None:
             self.prepare()
 
-        density_lens_dev = self._to_backend_array(density_lens, dtype=self.map_dtype)
-        g1_source_dev = self._to_backend_array(g1_source, dtype=self.map_dtype)
-        g2_source_dev = self._to_backend_array(g2_source, dtype=self.map_dtype)
-        w_lens_dev = self._to_backend_array(w_lens, dtype=self.map_dtype)
-        w_source_dev = self._to_backend_array(w_source, dtype=self.map_dtype)
+        density_lens_dev = self._map_to_device(density_lens)
+        g1_source_dev = self._map_to_device(g1_source)
+        g2_source_dev = self._map_to_device(g2_source)
+        w_lens_in = self._map_to_device(w_lens)
+        w_source_in = self._map_to_device(w_source)
+        (density_lens_dev,), w_lens_dev = self._expand_rows(
+            (density_lens_dev,), w_lens_in, "pairs"
+        )
+        (g1_source_dev, g2_source_dev), w_source_dev = self._expand_rows(
+            (g1_source_dev, g2_source_dev), w_source_in, "pairs"
+        )
 
         if sumofweights is not None:
             sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
@@ -1631,8 +1783,12 @@ class Correlation:
                 sumofweights_dev = out_ab_w + out_ba_w
         else:
             if sumofweights_dev is None:
-                sum_ab = self._get_xipm_sumofweights(w_lens_dev, w_source_dev)
-                sum_ba = self._get_xipm_sumofweights(w_source_dev, w_lens_dev)
+                sum_ab = self._get_xipm_sumofweights(
+                    w_lens_in, w_source_in, w_lens_dev, w_source_dev
+                )
+                sum_ba = self._get_xipm_sumofweights(
+                    w_source_in, w_lens_in, w_source_dev, w_lens_dev
+                )
                 sumofweights_dev = sum_ab + sum_ba
             out_ab, out_ba = self._get_pair_scratch(self.acc_dtype, 2)
             density_shear_kernel(
@@ -1673,9 +1829,10 @@ class Correlation:
         sumofweights: Optional[Union[np.ndarray, float]] = None,
         return_numpy: bool = True,
     ) -> Tuple[Any, Any]:
-        g1_dev = self._to_backend_array(g1, dtype=self.map_dtype)
-        g2_dev = self._to_backend_array(g2, dtype=self.map_dtype)
-        w_dev = self._to_backend_array(w, dtype=self.map_dtype)
+        g1_dev = self._map_to_device(g1)
+        g2_dev = self._map_to_device(g2)
+        w_in = self._map_to_device(w)
+        (g1_dev, g2_dev), w_dev = self._expand_rows((g1_dev, g2_dev), w_in, "pairs")
 
         if sumofweights is not None:
             sumofweights_dev = self._normalize_xipm_sumofweights(sumofweights)
@@ -1724,7 +1881,9 @@ class Correlation:
                 sumofweights_dev = out_w
         else:
             if sumofweights_dev is None:
-                sumofweights_dev = self._get_xipm_sumofweights(w_dev, w_dev)
+                sumofweights_dev = self._get_xipm_sumofweights(
+                    w_in, w_in, w_dev, w_dev
+                )
             # The kernel computes at map precision and emits the real parts
             # directly; only the reduced numerators are cast to the
             # historical rotation-precision output dtype (as on CPU).
@@ -1774,12 +1933,14 @@ class Correlation:
         sumofweights_ba: Optional[Union[np.ndarray, float]] = None,
         return_numpy: bool = True,
     ) -> Tuple[Any, Any]:
-        g11_dev = self._to_backend_array(g11, dtype=self.map_dtype)
-        g21_dev = self._to_backend_array(g21, dtype=self.map_dtype)
-        g12_dev = self._to_backend_array(g12, dtype=self.map_dtype)
-        g22_dev = self._to_backend_array(g22, dtype=self.map_dtype)
-        w1_dev = self._to_backend_array(w1, dtype=self.map_dtype)
-        w2_dev = self._to_backend_array(w2, dtype=self.map_dtype)
+        g11_dev = self._map_to_device(g11)
+        g21_dev = self._map_to_device(g21)
+        g12_dev = self._map_to_device(g12)
+        g22_dev = self._map_to_device(g22)
+        w1_in = self._map_to_device(w1)
+        w2_in = self._map_to_device(w2)
+        (g11_dev, g21_dev), w1_dev = self._expand_rows((g11_dev, g21_dev), w1_in, "pairs")
+        (g12_dev, g22_dev), w2_dev = self._expand_rows((g12_dev, g22_dev), w2_in, "pairs")
 
         if sumofweights_ab is not None:
             sum_ab = self._normalize_xipm_sumofweights(sumofweights_ab)
@@ -1844,9 +2005,9 @@ class Correlation:
                 sum_ba = out_ba_w
         else:
             if sum_ab is None:
-                sum_ab = self._get_xipm_sumofweights(w1_dev, w2_dev)
+                sum_ab = self._get_xipm_sumofweights(w1_in, w2_in, w1_dev, w2_dev)
             if sum_ba is None:
-                sum_ba = self._get_xipm_sumofweights(w2_dev, w1_dev)
+                sum_ba = self._get_xipm_sumofweights(w2_in, w1_in, w2_dev, w1_dev)
             # The kernel computes at map precision and emits the real parts
             # directly; only the reduced numerators are cast to the
             # historical rotation-precision output dtype (as on CPU).
@@ -2023,10 +2184,437 @@ class Correlation:
             backend_array = backend_array.astype(dtype, copy=False)
         return backend_array
 
-    def _coerce_map_input_array(self, array: Any) -> Any:
+    # ── Compact row space ───────────────────────────────────────────────
+    # Device map buffers and device pair/aperture indices live in a compact
+    # "row space": row r holds footprint pixel ``row_pix[r]`` (the unmasked
+    # pixels, ascending RING order).  Masked pixels are never referenced by
+    # a pair or an aperture, so nothing is lost; for a partial-sky survey
+    # the per-map upload and all per-map device copies shrink by the sky
+    # fraction.  Host-side ``pair_inds``/``Q_inds`` keep HEALPix ids.
+
+    @property
+    def npix(self) -> int:
+        """Number of full-sky HEALPix pixels at ``nside``."""
+        return int(hp.nside2npix(self.nside))
+
+    @property
+    def row_pix(self) -> np.ndarray:
+        """HEALPix (RING) pixel id of every row of the compact row space."""
+        return self.map_inds
+
+    @property
+    def n_active(self) -> int:
+        """Number of rows backed by a map pixel (= unmasked pixels)."""
+        return int(self.map_inds.size)
+
+    @property
+    def row_pix_hash(self) -> str:
+        """Digest of ``(nside, row_pix)``: store it next to row-space map
+        archives to detect archives written for a different mask."""
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(np.int64(self.nside).tobytes())
+        digest.update(np.ascontiguousarray(self.map_inds, dtype=np.int64).tobytes())
+        return digest.hexdigest()
+
+    def to_row_space(self, maps: np.ndarray, dtype: Optional[Any] = None) -> np.ndarray:
+        """Cut full-sky map(s) ``(..., npix)`` down to the row space
+        ``(..., n_active)`` -- the form measured fastest (no mask handling,
+        no gather, ``npix / n_active`` times less host→device traffic).  Do
+        this once when writing a map archive, not once per measurement."""
+        rows = self._gather_rows(np.asarray(maps))
+        return np.ascontiguousarray(rows, dtype=dtype or self.map_dtype)
+
+    def _aperture_cells(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Globally degraded aperture level: ``(cell_pix, indptr, child_rows)``.
+
+        ``cell_pix`` are the RING ids (at ``aperture_nside``) of the coarse
+        pixels with at least one unmasked child, ascending; the CSR arrays
+        list the child *rows* of every cell.  ``None`` at base resolution.
+        Global (not per-patch) degrading is right here: the aperture filter
+        *is* the window.
+        """
+        if self.aperture_nside is None:
+            return None
+        cache = self.__dict__.get("_aperture_cells_cache")
+        key = (int(self.aperture_nside), int(self.nside), id(self.map_inds))
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        shift = 2 * (int(np.log2(self.nside)) - int(np.log2(self.aperture_nside)))
+        nest = hp.ring2nest(self.nside, np.asarray(self.map_inds, dtype=np.int64))
+        parent = hp.nest2ring(self.aperture_nside, nest >> shift)
+        cell_pix, inv = np.unique(parent, return_inverse=True)
+        order = np.argsort(inv, kind="stable")
+        indptr = np.zeros(cell_pix.size + 1, dtype=np.int64)
+        indptr[1:] = np.cumsum(np.bincount(inv, minlength=cell_pix.size))
+        cells = (cell_pix.astype(np.int64), indptr, order.astype(np.int64))
+        self._aperture_cells_cache = (key, cells, self.map_inds)
+        return cells
+
+    @property
+    def n_aperture_cells(self) -> int:
+        cells = self._aperture_cells()
+        return 0 if cells is None else int(cells[0].size)
+
+    @property
+    def n_appended(self) -> int:
+        """Number of virtual rows behind the pixel rows.
+
+        Layout: ``[aperture level | treecode level 1 | level 2 | ...]``.
+        """
+        n_tree = 0 if self._treecode is None else int(self._treecode.n_cells)
+        return self.n_aperture_cells + n_tree
+
+    @property
+    def n_rows(self) -> int:
+        """Total number of rows of the device map buffers."""
+        return self.n_active + self.n_appended
+
+    @property
+    def level_table(self) -> Dict[str, Any]:
+        """Resolution used by every angular bin (read-only provenance).
+
+        Store this next to every measured data vector: a treecode
+        measurement is only comparable to measurements made with the same
+        table.
+        """
+        edges_arcmin = np.degrees(np.asarray(self.binedges, dtype=np.float64)) * 60.0
+        return {
+            "resolution_factor": self.resolution_factor,
+            "base_nside": int(self.nside),
+            "aperture_nside": int(self.aperture_nside or self.nside),
+            "theta_lo_arcmin": edges_arcmin[:-1].copy(),
+            "theta_hi_arcmin": edges_arcmin[1:].copy(),
+            "nside": np.asarray(self.level_nside, dtype=np.int64).copy(),
+            "effective_resolution_factor": effective_resolution_factor(
+                self.binedges, self.level_nside
+            ),
+        }
+
+    def _global_to_row_lut(self) -> Optional[np.ndarray]:
+        """HEALPix id -> row id lookup table (``None`` if rows == pixels)."""
+        npix = self.npix
+        if self.n_active == npix:
+            return None
+        lut = np.full(npix, -1, dtype=self.index_dtype)
+        lut[self.map_inds] = np.arange(self.n_active, dtype=self.index_dtype)
+        return lut
+
+    def _global_ids_to_rows(
+        self, ids: np.ndarray, lut: Optional[np.ndarray]
+    ) -> np.ndarray:
+        """Map global ids (pixel < npix <= virtual row) to device rows."""
+        if lut is None:
+            # rows == pixels, and virtual row a has id npix + a == n_active + a
+            return ids
+        if self.n_appended == 0:
+            return lut[ids]
+        npix = self.npix
+        virtual = ids >= npix
+        rows = lut[np.where(virtual, 0, ids)]
+        return np.where(virtual, ids - (npix - self.n_active), rows).astype(
+            self.index_dtype, copy=False
+        )
+
+    def _gather_rows(self, array: Any) -> Any:
+        """Restrict a map-like array to the row space along its last axis.
+
+        Accepts full-sky arrays (last axis ``npix``; gathered through
+        ``row_pix``) and row-space arrays (last axis ``n_active``; returned
+        unchanged).  Works for host and device arrays.
+        """
+        shape = getattr(array, "shape", ())
+        if len(shape) == 0:
+            return array
+        n_last = int(shape[-1])
+        n_active = self.n_active
+        if n_last == n_active:
+            return array
+        if n_last != self.npix:
+            raise ValueError(
+                "map arrays must have either npix="
+                f"{self.npix} (full sky) or n_active={n_active} (row space, "
+                f"see Correlation.row_pix) pixels along the last axis; got {n_last}"
+            )
         if self._is_backend_native_array(array):
-            return array.astype(self.map_dtype, copy=False)
-        return np.asarray(array, dtype=self.map_dtype)
+            ctx = self.compute_context
+            row_pix_dev = getattr(ctx, "row_pix_dev", None)
+            if row_pix_dev is None or int(row_pix_dev.shape[0]) != n_active:
+                row_pix_dev = self.backend.to_device(
+                    np.asarray(self.map_inds, dtype=np.int64)
+                )
+                ctx.row_pix_dev = row_pix_dev
+            return array[..., row_pix_dev]
+        return np.take(array, self.map_inds, axis=-1)
+
+    def _coerce_map_input_array(self, array: Any) -> Any:
+        """Row-space view of a map input at map precision (host or device).
+
+        Read-only host arrays (``arr.flags.writeable = False``) cannot change
+        content, so their row-space device copy is memoised on identity:
+        freeze fixed weight maps to gather and upload them only once.
+        """
+        if self._is_backend_native_array(array):
+            return self._gather_rows(array).astype(self.map_dtype, copy=False)
+        arr = np.asarray(array)
+        frozen = (
+            arr is array
+            and arr.ndim >= 1
+            and not arr.flags.writeable
+            and int(arr.shape[-1]) in (self.n_active, self.npix)
+        )
+        if not frozen:
+            return np.asarray(self._gather_rows(arr), dtype=self.map_dtype)
+
+        ctx = self.compute_context
+        memo = getattr(ctx, "frozen_map_memo", None)
+        if memo is None:
+            memo = ctx.frozen_map_memo = {}
+        key = (
+            id(arr),
+            arr.__array_interface__["data"][0],
+            arr.shape,
+            arr.dtype.str,
+            self.map_dtype.str,
+        )
+        entry = memo.get(key)
+        if entry is None:
+            rows = np.ascontiguousarray(self._gather_rows(arr), dtype=self.map_dtype)
+            if self.backend.name == "cupy":
+                rows = self._to_backend_array(rows, dtype=self.map_dtype)
+            else:
+                rows.flags.writeable = False
+            while len(memo) >= 16:
+                memo.pop(next(iter(memo)))
+            # Keep a reference to the source so its id() cannot be reused.
+            # entry[2] caches derived virtual-row weight blocks.
+            entry = memo[key] = (arr, rows, {})
+        return entry[1]
+
+    def _map_to_device(self, array: Any) -> Any:
+        """Row-space backend array at map precision for any accepted map input."""
+        return self._to_backend_array(
+            self._coerce_map_input_array(array), dtype=self.map_dtype
+        )
+
+    # ── Virtual rows (static treecode / coarse aperture level) ──────────────
+    # Coarse cells are appended as extra rows behind the pixel rows.  A cell
+    # row carries the weighted mean of its member pixels and the sum of
+    # their weights, so the (unchanged) kernels reproduce
+    #     W_I W_J g_I g_J = sum_i sum_j w_i w_j g_i g_j
+    # exactly.  The degrade operator is a chain of child->parent sums (real,
+    # all entries 1): pixels -> level 1 -> level 2 -> ...
+
+    def _degrade_operators(self, use_cupy: bool) -> Dict[str, Any]:
+        ctx = self.compute_context
+        cache = getattr(ctx, "degrade_ops", None)
+        if cache is None:
+            cache = ctx.degrade_ops = {}
+        kind = "cupy" if use_cupy else "numpy"
+        ops = cache.get(kind)
+        if ops is not None:
+            return ops
+
+        if use_cupy:
+            import cupyx.scipy.sparse as sparse
+
+            xp = self.backend.module
+        else:
+            import scipy.sparse as sparse
+
+            xp = np
+        dtype = self.acc_dtype
+
+        def csr(indptr: np.ndarray, indices: np.ndarray, n_cols: int) -> Any:
+            data = xp.ones(int(indices.size), dtype=dtype)
+            return sparse.csr_matrix(
+                (
+                    data,
+                    xp.asarray(np.asarray(indices, dtype=np.int32)),
+                    xp.asarray(np.asarray(indptr, dtype=np.int32)),
+                ),
+                shape=(int(indptr.size - 1), int(n_cols)),
+            )
+
+        n_ap = self.n_aperture_cells
+        ops = {"aperture": None, "chain": [], "ranges": []}
+        ap_cells = self._aperture_cells()
+        if ap_cells is not None:
+            ops["aperture"] = csr(ap_cells[1], ap_cells[2], self.n_active)
+        tree = self._treecode
+        if tree is not None:
+            lut = self._global_to_row_lut()
+            starts = tree.level_starts(first=n_ap)
+            n_src = self.n_active
+            for level in range(tree.n_levels):
+                indices = tree.child_indices[level]
+                if level == 0 and lut is not None:
+                    indices = lut[indices]
+                    if indices.size and int(indices.min()) < 0:
+                        raise ValueError(
+                            "Treecode cells reference pixels outside the mask."
+                        )
+                ops["chain"].append(csr(tree.child_indptr[level], indices, n_src))
+                ops["ranges"].append((int(starts[level]), int(starts[level + 1])))
+                n_src = int(tree.cells_per_level[level])
+        cache[kind] = ops
+        return ops
+
+    def _append_block(self, X: Any, blocks: str, use_cupy: bool) -> Any:
+        """Apply the degrade operators to ``X`` ``(n_active, C)`` and return
+        the virtual-row block ``(n_appended, C)`` (unfilled rows are zero)."""
+        xp = self.backend.module if use_cupy else np
+        ops = self._degrade_operators(use_cupy)
+        block = xp.zeros((self.n_appended, X.shape[1]), dtype=X.dtype)
+        if blocks in ("aperture", "all") and ops["aperture"] is not None:
+            block[: self.n_aperture_cells] = ops["aperture"] @ X
+        if blocks in ("pairs", "all"):
+            prev = X
+            for (start, stop), op in zip(ops["ranges"], ops["chain"]):
+                cur = op @ prev
+                block[start:stop] = cur
+                prev = cur
+        return block
+
+    def _expansion_scope(self) -> Any:
+        """Context manager: share virtual-row expansions between the leaf
+        computations of one public call (e.g. aperture + 2PCF pass of
+        ``get_full_tomo_shear``).  Inside the scope every expansion fills
+        *all* blocks once and is memoised on the identity of its inputs;
+        the memo is dropped on exit, so reused device buffers (e.g.
+        ``PinnedMapPipeline`` slots) can never produce a stale hit."""
+        owner = self
+
+        class _Scope:
+            def __enter__(self) -> None:
+                owner._expansion_depth = getattr(owner, "_expansion_depth", 0) + 1
+                if owner._expansion_depth == 1:
+                    owner._expansion_memo = {}
+
+            def __exit__(self, *exc: Any) -> None:
+                owner._expansion_depth -= 1
+                if owner._expansion_depth == 0:
+                    owner._expansion_memo = None
+
+        return _Scope()
+
+    def _weight_rows(self, weights: Any, w2: Any, blocks: str, use_cupy: bool) -> Any:
+        """Virtual-row block of the weights ``(n_appended, n_lead)``.
+
+        Cached for frozen (read-only host) weight maps, whose row-space
+        device copy is memoised and immutable by contract: with fixed survey
+        weights the weight rows are computed once, not once per map.
+        """
+        xp = self.backend.module if use_cupy else np
+        frozen = None
+        memo = getattr(self.compute_context, "frozen_map_memo", None)
+        if memo:
+            for entry in memo.values():
+                if entry[1] is weights:
+                    frozen = entry
+                    break
+        if frozen is not None and len(frozen) > 2 and frozen[2].get(blocks) is not None:
+            return frozen[2][blocks]
+        X = xp.ascontiguousarray(w2.T.astype(self.acc_dtype, copy=False))
+        W = self._append_block(X, blocks, use_cupy)
+        if frozen is not None and len(frozen) > 2:
+            frozen[2][blocks] = W
+        return W
+
+    def _expand_rows(
+        self, values: Sequence[Any], weights: Any, blocks: str = "all"
+    ) -> Tuple[List[Any], Any]:
+        """Append the virtual rows to row-space maps.
+
+        Args:
+            values: arrays with the same shape as ``weights``
+                (``(..., n_active)``), weighted by ``weights``.
+            weights: weight array ``(..., n_active)``.
+            blocks: which virtual rows to fill: ``"pairs"`` (treecode
+                cells), ``"aperture"`` (coarse aperture level) or ``"all"``.
+                Rows that are not filled are zero and must not be used.
+
+        Returns ``(values_rows, weights_rows)`` with last axis ``n_rows``.
+        At full resolution (no virtual rows) the inputs are returned
+        untouched -- the default path pays nothing.
+        """
+        n_appended = self.n_appended
+        if n_appended == 0:
+            return list(values), weights
+        if blocks == "aperture" and self.n_aperture_cells == 0:
+            return list(values), weights  # aperture indices address pixel rows
+        n_active = self.n_active
+        if int(weights.shape[-1]) != n_active:
+            raise ValueError(
+                f"expected row-space arrays with {n_active} rows; got {weights.shape}"
+            )
+
+        memo = getattr(self, "_expansion_memo", None)
+        if memo is not None:
+            blocks = "all"  # fill everything once, share between the leaves
+            key = (tuple(id(v) for v in values), id(weights))
+            hit = memo.get(key)
+            if hit is not None:
+                return list(hit[0]), hit[1]
+
+        use_cupy = not isinstance(weights, np.ndarray)
+        xp = self.backend.module if use_cupy else np
+        acc = self.acc_dtype
+        n_rows = n_active + n_appended
+
+        lead = tuple(int(n) for n in weights.shape[:-1])
+        n_lead = int(np.prod(lead)) if lead else 1
+        w2 = weights.reshape(n_lead, n_active)
+
+        W = self._weight_rows(weights, w2, blocks, use_cupy)  # (n_appended, n_lead)
+        nonzero = W != 0
+        inv_W = nonzero / xp.where(nonzero, W, 1)
+
+        w_rows = xp.empty((n_lead, n_rows), dtype=self.map_dtype)
+        w_rows[:, :n_active] = w2
+        w_rows[:, n_active:] = W.T
+        out = []
+        if values:
+            # (n_active, K * n_lead), accumulated at the accumulation dtype
+            X = xp.empty((n_active, len(values) * n_lead), dtype=acc)
+            for k, v in enumerate(values):
+                xp.multiply(
+                    w2.T, v.reshape(n_lead, n_active).T,
+                    out=X[:, k * n_lead : (k + 1) * n_lead],
+                )
+            block = self._append_block(X, blocks, use_cupy)
+            del X
+            for k, v in enumerate(values):
+                rows = xp.empty((n_lead, n_rows), dtype=self.map_dtype)
+                rows[:, :n_active] = v.reshape(n_lead, n_active)
+                rows[:, n_active:] = (block[:, k * n_lead : (k + 1) * n_lead] * inv_W).T
+                out.append(rows.reshape(lead + (n_rows,)))
+        w_rows = w_rows.reshape(lead + (n_rows,))
+        if memo is not None:
+            # keep the inputs alive so their ids cannot be reused in the scope
+            memo[key] = (out, w_rows, values, weights)
+        return list(out), w_rows
+
+    def _expand_shear_rows(
+        self, shear: Any, weights: Any, blocks: str = "all"
+    ) -> Tuple[Any, Any]:
+        """:meth:`_expand_rows` for planar shear ``(nz, 2, n_active)``."""
+        if self.n_appended == 0 or (
+            blocks == "aperture" and self.n_aperture_cells == 0
+        ):
+            return shear, weights
+        use_cupy = not isinstance(weights, np.ndarray)
+        xp = self.backend.module if use_cupy else np
+        memo = getattr(self, "_expansion_memo", None)
+        key = ("shear", id(shear), id(weights))
+        if memo is not None and key in memo:
+            return memo[key][0], memo[key][1]
+        (g1, g2), w_rows = self._expand_rows(
+            (shear[:, 0], shear[:, 1]), weights, blocks=blocks
+        )
+        shear_rows = xp.stack((g1, g2), axis=1)
+        if memo is not None:
+            memo[key] = (shear_rows, w_rows, shear, weights)
+        return shear_rows, w_rows
 
     @property
     def _index_device_dtype(self) -> Any:
@@ -2219,7 +2807,22 @@ class Correlation:
         product = w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]]
         return self._reduce_pairs(product.astype(self.acc_dtype, copy=False))
 
-    def _get_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
+    def _get_xipm_sumofweights(
+        self,
+        w1_dev: Any,
+        w2_dev: Any,
+        w1_rows: Optional[Any] = None,
+        w2_rows: Optional[Any] = None,
+    ) -> Any:
+        """Cached pair weight sums.
+
+        ``w*_dev`` identify the weight maps (cache key); ``w*_rows`` are the
+        same maps with the virtual rows appended (default: ``w*_dev``).
+        """
+        if w1_rows is None:
+            w1_rows = w1_dev
+        if w2_rows is None:
+            w2_rows = w2_dev
         w_fingerprint = (
             self._fingerprint_weights(w1_dev),
             self._fingerprint_weights(w2_dev),
@@ -2254,7 +2857,7 @@ class Correlation:
         if cached is not None:
             return cached
 
-        sumofweights_dev = self._compute_xipm_sumofweights(w1_dev, w2_dev)
+        sumofweights_dev = self._compute_xipm_sumofweights(w1_rows, w2_rows)
         cache[w_fingerprint] = sumofweights_dev
         # Bound the cache: with per-map weights every map adds entries, which
         # would otherwise accumulate device arrays without limit.
@@ -2267,6 +2870,9 @@ class Correlation:
     ) -> Any:
         if self.inds_dev is None:
             self.prepare()
+
+        if int(w_dev.shape[-1]) == self.n_active:
+            _, w_dev = self._expand_rows((), w_dev, "pairs")
 
         map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
         sumofweights_dev = self.backend.zeros(
@@ -2311,6 +2917,10 @@ class Correlation:
         tomo_kernel = getattr(self.backend, "xipm_tomo_vectorized_kernel", None)
         if tomo_kernel is None:
             return None
+
+        shear_maps_dev, w_dev = self._expand_shear_rows(
+            shear_maps_dev, w_dev, blocks="pairs"
+        )
 
         if self.backend.name == "numpy":
             return self._xipm_tomo_vectorized_cpu(
@@ -2588,6 +3198,9 @@ class Correlation:
             ctx = self.compute_context
             shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
             w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
+            shear_dev, w_dev = self._expand_shear_rows(
+                shear_dev, w_dev, blocks="aperture"
+            )
             if g1_fac != 1 or g2_fac != 1:
                 # Apply the sign flip before slicing the component views.
                 shear_dev = module.stack(
@@ -2626,20 +3239,21 @@ class Correlation:
             M_a = module.zeros([nzbins, self.n_patches], dtype=map_backend_dtype)
         else:
             M_a = np.zeros([nzbins, self.n_patches], dtype=self.map_dtype)
+        # Append the virtual rows once for all bins (shared with the 2PCF
+        # pass inside an expansion scope), then run the per-bin leaf.
+        shear_rows, w_rows = self._expand_shear_rows(
+            shear_maps_arr, w_arr, blocks="aperture"
+        )
         for i in range(nzbins):
             if g1_fac == 1 and g2_fac == 1:
                 # No sign flip: pass views instead of full-map copies.
-                g1_i = shear_maps_arr[i, 0]
-                g2_i = shear_maps_arr[i, 1]
+                g1_i = shear_rows[i, 0]
+                g2_i = shear_rows[i, 1]
             else:
-                g1_i = g1_fac * shear_maps_arr[i, 0]
-                g2_i = g2_fac * shear_maps_arr[i, 1]
-            M_a[i] = self.get_aperture_shear(
-                g1_i,
-                g2_i,
-                w_arr[i],
-                aperture_filter=None,
-                return_device=keep_on_device,
+                g1_i = g1_fac * shear_rows[i, 0]
+                g2_i = g2_fac * shear_rows[i, 1]
+            M_a[i] = self._aperture_shear_rows(
+                g1_i, g2_i, w_rows[i], return_device=keep_on_device
             )
         return M_a
 
@@ -2665,6 +3279,9 @@ class Correlation:
             nzbins = int(density_arr.shape[0])
             density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
             w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
+            (density_dev,), w_dev = self._expand_rows(
+                (density_dev,), w_dev, blocks="aperture"
+            )
             out_num = self.backend.zeros(
                 (nzbins, self.n_patches), dtype=map_backend_dtype
             )
@@ -2695,12 +3312,12 @@ class Correlation:
             M_g = module.zeros((density_arr.shape[0], self.n_patches), dtype=map_backend_dtype)
         else:
             M_g = np.zeros((density_arr.shape[0], self.n_patches), dtype=self.map_dtype)
+        (density_rows,), w_rows = self._expand_rows(
+            (density_arr,), w_arr, blocks="aperture"
+        )
         for i in range(density_arr.shape[0]):
-            M_g[i] = self.get_aperture_density(
-                density_arr[i],
-                w_arr[i],
-                aperture_filter=None,
-                return_device=keep_on_device,
+            M_g[i] = self._aperture_density_rows(
+                density_rows[i], w_rows[i], return_device=keep_on_device
             )
         return M_g
 
@@ -2721,22 +3338,23 @@ class Correlation:
         # and the 2PCF pass (each used to re-upload the same host arrays).
         shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-        M_a = self._compute_tomo_aperture_shear(
-            shear_dev,
-            w_dev,
-            aperture_filter=aperture_filter,
-            flip_g1=flip_g1,
-            flip_g2=flip_g2,
-            return_device=return_device,
-        )
-        xi_p, xi_m = self.vectorized_shear_shear(
-            shear_dev,
-            w_dev,
-            sumofweights=sumofweights,
-            flip_g1=flip_g1,
-            flip_g2=flip_g2,
-            return_device=return_device,
-        )
+        with self._expansion_scope():  # degrade once for both passes
+            M_a = self._compute_tomo_aperture_shear(
+                shear_dev,
+                w_dev,
+                aperture_filter=aperture_filter,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=return_device,
+            )
+            xi_p, xi_m = self.vectorized_shear_shear(
+                shear_dev,
+                w_dev,
+                sumofweights=sumofweights,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=return_device,
+            )
         return M_a, xi_p, xi_m
 
     def get_full_tomo_density(
@@ -2754,19 +3372,20 @@ class Correlation:
         # Upload once and share the device arrays between both passes.
         density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-        M_g = self._compute_tomo_aperture_density(
-            density_dev,
-            w_dev,
-            aperture_filter=aperture_filter,
-            return_device=return_device,
-        )
-        xi_g = self.vectorized_density_density(
-            density_dev,
-            w_dev,
-            sumofweights=sumofweights,
-            gc_auto_correlations_only=gc_auto_correlations_only,
-            return_device=return_device,
-        )
+        with self._expansion_scope():  # degrade once for both passes
+            M_g = self._compute_tomo_aperture_density(
+                density_dev,
+                w_dev,
+                aperture_filter=aperture_filter,
+                return_device=return_device,
+            )
+            xi_g = self.vectorized_density_density(
+                density_dev,
+                w_dev,
+                sumofweights=sumofweights,
+                gc_auto_correlations_only=gc_auto_correlations_only,
+                return_device=return_device,
+            )
         return M_g, xi_g
 
     def get_full_tomo_ggl(
@@ -2872,8 +3491,9 @@ class Correlation:
         half = self.map_dtype.type(0.5)
         nbins_total = self.n_patches * self.nbins
 
-        density_dev = self._to_backend_array(density_maps, dtype=self.map_dtype)
-        w_dev = self._to_backend_array(weights, dtype=self.map_dtype)
+        density_dev = self._map_to_device(density_maps)
+        w_dev = self._map_to_device(weights)
+        (density_dev,), w_dev = self._expand_rows((density_dev,), w_dev, "pairs")
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         w_soa = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
 
@@ -2996,10 +3616,16 @@ class Correlation:
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = self.n_patches * self.nbins
 
-        density_dev = self._to_backend_array(density_maps, dtype=self.map_dtype)
-        shear_dev = self._to_backend_array(shear_maps, dtype=self.map_dtype)
-        density_w_dev = self._to_backend_array(density_w, dtype=self.map_dtype)
-        shear_w_dev = self._to_backend_array(shear_w, dtype=self.map_dtype)
+        density_dev = self._map_to_device(density_maps)
+        shear_dev = self._map_to_device(shear_maps)
+        density_w_dev = self._map_to_device(density_w)
+        shear_w_dev = self._map_to_device(shear_w)
+        (density_dev,), density_w_dev = self._expand_rows(
+            (density_dev,), density_w_dev, "pairs"
+        )
+        shear_dev, shear_w_dev = self._expand_shear_rows(
+            shear_dev, shear_w_dev, blocks="pairs"
+        )
 
         density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
         shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
@@ -3342,10 +3968,16 @@ class Correlation:
         shear_dev = self._to_backend_array(shear_np, dtype=self.map_dtype)
         density_w_dev = self._to_backend_array(density_w_np, dtype=self.map_dtype)
         shear_w_dev = self._to_backend_array(shear_w_np, dtype=self.map_dtype)
+        (density_dev,), density_w_dev = self._expand_rows(
+            (density_dev,), density_w_dev, "all"
+        )
+        shear_dev, shear_w_dev = self._expand_shear_rows(
+            shear_dev, shear_w_dev, blocks="all"
+        )
 
         n_shear_bins = int(shear_np.shape[0])
         n_density_bins = int(density_np.shape[0])
-        npix = int(density_np.shape[1])
+        npix = int(density_dev.shape[1])  # rows of the device buffers
         (
             density_soa,
             shear_soa,

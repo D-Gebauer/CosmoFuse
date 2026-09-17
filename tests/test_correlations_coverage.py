@@ -1143,7 +1143,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 np.ones((3, 12), dtype=np.float64),
             )
 
-        with self.assertRaisesRegex(ValueError, "must have the same number of pixels"):
+        with self.assertRaisesRegex(ValueError, "map arrays must have either npix"):
             corr.vectorized_density_shear(
                 np.ones((2, 11), dtype=np.float64),
                 np.ones((2, 2, 12), dtype=np.float64),
@@ -1928,7 +1928,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_weights=np.ones((1, 12), dtype=np.float64),
             )
 
-        with self.assertRaisesRegex(ValueError, "must have the same number of pixels"):
+        with self.assertRaisesRegex(ValueError, "map arrays must have either npix"):
             corr._compute_3x2pt_tomo_fused(
                 shear_maps=np.ones((1, 2, 12), dtype=np.float64),
                 density_maps=np.ones((1, 11), dtype=np.float64),
@@ -2631,10 +2631,11 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.Q_val = [np.array([1.0], dtype=np.float64)]
         corr.Q_patch_area = [1.0]
 
-        shear_maps = np.zeros((2, 2, 3), dtype=np.float64)
-        shear_maps[0, 0] = np.array([1.0, 2.0, 3.0])
-        shear_maps[1, 0] = np.array([4.0, 5.0, 6.0])
-        w = np.ones((2, 3), dtype=np.float64)
+        # nside=1 -> 12 full-sky pixels; only the first three are paired.
+        shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
+        shear_maps[0, 0, :3] = np.array([1.0, 2.0, 3.0])
+        shear_maps[1, 0, :3] = np.array([4.0, 5.0, 6.0])
+        w = np.ones((2, 12), dtype=np.float64)
         sumofweights = np.full((2, 3, 1), 2.0, dtype=np.float64)
 
         called = {"value": False}

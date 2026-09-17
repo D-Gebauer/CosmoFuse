@@ -32,7 +32,7 @@ from CosmoFuse.backend import (
 )
 from CosmoFuse.correlations import Correlation
 
-from .cuda_emulation import EmulatedCupyModule
+from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 
 _EMULATED_KERNEL_ATTRS = (
     "xipm_tomo_vectorized_kernel",
@@ -78,8 +78,11 @@ def emulated_gpu(corr):
     backend.name = "cupy"
     backend.to_device = lambda arr, stream=None: np.asarray(arr)
     backend.to_numpy = lambda arr, stream=None: np.asarray(arr)
+    built = {}
     for name, builder in _BUILDERS.items():
-        setattr(backend, name, _counting(name, builder(EmulatedCupyModule)))
+        built[name] = builder(EmulatedCupyModule)
+        setattr(backend, name, _counting(name, built[name]))
+    calls["_built"] = built  # the raw wrapper callables (e.g. to toggle .tiled)
     try:
         yield calls
     finally:
@@ -193,6 +196,30 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
         self._allclose(M_a, self.ref_Ma)
         self._allclose(xip, self.ref_xip)
         self._allclose(xim, self.ref_xim)
+
+    def test_tiled_and_per_row_xipm_kernels_agree(self):
+        """The combination-tiled kernel (default) and the original
+        per-(bin, row) kernel share one launch contract and one result."""
+        m = self.maps
+        results = {}
+        for tiled in (True, False):
+            with emulated_gpu(self.corr) as calls:
+                wrapper = calls["_built"]["xipm_tomo_vectorized_kernel"]
+                self.assertTrue(wrapper.tiled)  # tiled is the default
+                wrapper.tiled = tiled
+                del LAUNCH_LOG[:]
+                results[tiled] = self.corr.vectorized_shear_shear(
+                    m["shear"], m["w_shear"], return_device=False
+                )
+                self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 1)
+                self.assertEqual(
+                    LAUNCH_LOG,
+                    ["gpu_tiled_tomo_reduce_xipm" if tiled else "gpu_fused_tomo_reduce_xipm"],
+                )
+        for a, b in zip(results[True], results[False]):
+            self._allclose(a, b)
+        self._allclose(results[True][0], self.ref_xip)
+        self._allclose(results[True][1], self.ref_xim)
 
     def test_full_tomo_shear_flip_g1(self):
         m = self.maps

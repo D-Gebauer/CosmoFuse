@@ -61,14 +61,21 @@ class TestPinnedMapPipelineStreamContract(unittest.TestCase):
             def __init__(self, ident):
                 self.ident = ident
 
+            def synchronize(self):
+                return None
+
         class FakeStream:
             def __init__(self):
                 self.entered = 0
                 self.recorded = 0
+                self.waited_on = []
 
             def record(self):
                 self.recorded += 1
                 return FakeEvent(self.recorded)
+
+            def wait_event(self, event):
+                self.waited_on.append(event.ident)
 
             def __enter__(self):
                 self.entered += 1
@@ -80,6 +87,12 @@ class TestPinnedMapPipelineStreamContract(unittest.TestCase):
         class FakeCurrentStream:
             def wait_event(self, event):
                 events.append(("wait", event.ident))
+
+            def record(self):
+                return FakeEvent("compute")
+
+            def synchronize(self):
+                return None
 
         class FakeDeviceArray:
             def __init__(self, shape, dtype):
@@ -121,6 +134,9 @@ class TestPinnedMapPipelineStreamContract(unittest.TestCase):
         self.assertEqual(upload_stream.entered, 1)
         self.assertEqual(upload_stream.recorded, 1)
         self.assertEqual(events, [])  # nothing waits until the swap
+        # The upload waits for the kernels queued so far: they may still
+        # read the device slot that is about to be overwritten.
+        self.assertEqual(upload_stream.waited_on, ["compute"])
 
         dev = pipe.wait(token)
         self.assertEqual(events, [("wait", 1)])

@@ -5,6 +5,8 @@ import healpy as hp
 import numpy as np
 import warnings
 
+from .treecode import TreecodeGeometry, assign_levels
+
 if TYPE_CHECKING:
     from .correlations import Correlation
 
@@ -16,9 +18,18 @@ class PairIOHandler:
     flat datasets with per-patch offset arrays, so loading is a handful
     of bulk reads instead of ~8 small datasets per patch.  Files written
     by older versions (one group per patch) are still readable.
+
+    Format version 3 is written only when virtual rows exist (static
+    treecode and/or a coarse aperture level).  Its index datasets use
+    *different names* (``tc_pair_inds``, ``tc_Q_inds``): CosmoFuse <= 4.20
+    accepts any ``format_version >= 2`` and would otherwise read virtual-row
+    ids as pixel ids (out-of-bounds gathers on the GPU); with the new names
+    old readers fail with a ``KeyError`` instead.  Full-resolution files are
+    still written as version 2 and stay readable by old versions.
     """
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
+    FULL_RESOLUTION_FORMAT_VERSION = 2
 
     @staticmethod
     def save_pairs(owner: "Correlation", filepath: str) -> None:
@@ -50,8 +61,37 @@ class PairIOHandler:
         q_offsets[1:] = np.cumsum(q_counts)
         total_q = int(q_offsets[-1])
 
+        treecode = getattr(owner, "_treecode", None)
+        virtual_rows = treecode is not None or owner.aperture_nside is not None
+        pair_name = "tc_pair_inds" if virtual_rows else "pair_inds"
+        q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
+
         with h5py.File(filepath, "w") as fp:
-            fp.attrs["format_version"] = PairIOHandler.FORMAT_VERSION
+            fp.attrs["format_version"] = (
+                PairIOHandler.FORMAT_VERSION
+                if virtual_rows
+                else PairIOHandler.FULL_RESOLUTION_FORMAT_VERSION
+            )
+            # Provenance of the estimator (ignored by old readers).
+            if owner.resolution_factor is not None:
+                fp.attrs["resolution_factor"] = float(owner.resolution_factor)
+            fp.attrs["aperture_nside"] = int(owner.aperture_nside or owner.nside)
+            fp.create_dataset(
+                "level_nside", data=np.asarray(owner.level_nside, dtype=np.int64)
+            )
+            if treecode is not None:
+                gp = fp.create_group("treecode")
+                gp.attrs["base_nside"] = int(treecode.base_nside)
+                gp.attrs["n_aperture_cells"] = int(owner.n_aperture_cells)
+                gp.create_dataset(
+                    "coarse_nsides", data=np.asarray(treecode.coarse_nsides, dtype=np.int64)
+                )
+                gp.create_dataset("cell_offsets", data=treecode.cell_offsets)
+                for level in range(treecode.n_levels):
+                    gp.create_dataset(f"child_indptr_{level}", data=treecode.child_indptr[level])
+                    gp.create_dataset(f"child_indices_{level}", data=treecode.child_indices[level])
+                    gp.create_dataset(f"cell_ra_{level}", data=treecode.cell_ra[level])
+                    gp.create_dataset(f"cell_dec_{level}", data=treecode.cell_dec[level])
             fp.attrs["nside"] = owner.nside
             fp.attrs["nbins"] = owner.nbins
             fp.attrs["theta_min"] = owner.theta_min
@@ -72,7 +112,7 @@ class PairIOHandler:
             fp.create_dataset("bins", data=bins_arr)
 
             d_inds = fp.create_dataset(
-                "pair_inds", shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
+                pair_name, shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
             )
             d_exp = fp.create_dataset(
                 "pair_exp2phi",
@@ -87,7 +127,7 @@ class PairIOHandler:
 
             q_inds_dtype = np.asarray(owner.Q_inds[0]).dtype if n_patches else owner.index_dtype
             q_val_dtype = np.asarray(owner.Q_val[0]).dtype if n_patches else owner.rotation_dtype
-            d_qi = fp.create_dataset("Q_inds", shape=(total_q,), dtype=q_inds_dtype)
+            d_qi = fp.create_dataset(q_name, shape=(total_q,), dtype=q_inds_dtype)
             d_qc = fp.create_dataset("Q_cos", shape=(total_q,), dtype=q_val_dtype)
             d_qs = fp.create_dataset("Q_sin", shape=(total_q,), dtype=q_val_dtype)
             d_qv = fp.create_dataset("Q_val", shape=(total_q,), dtype=q_val_dtype)
@@ -115,6 +155,13 @@ class PairIOHandler:
         owner._invalidate_prepared_state()
 
         with h5py.File(filepath, "r") as fp:
+            version = int(fp.attrs.get("format_version", 1))
+            if version > PairIOHandler.FORMAT_VERSION:
+                raise ValueError(
+                    f"{filepath} has pair-file format version {version}; this "
+                    f"CosmoFuse reads versions <= {PairIOHandler.FORMAT_VERSION}. "
+                    "Update CosmoFuse."
+                )
             if stop_ind is None:
                 stop_ind = fp.attrs["n_patches"]
             owner.nside = fp.attrs["nside"]
@@ -134,11 +181,63 @@ class PairIOHandler:
             owner.phi_center = fp["phi_center"][start_ind:stop_ind]
             owner.theta_center = fp["theta_center"][start_ind:stop_ind]
 
-            if int(fp.attrs.get("format_version", 1)) >= 2:
+            PairIOHandler._load_resolution(owner, fp, filepath)
+            if version >= 2:
                 PairIOHandler._load_pairs_v2(owner, fp, start_ind, stop_ind)
             else:
                 PairIOHandler._load_pairs_legacy(owner, fp, start_ind, stop_ind)
         owner.prepare(release_host_pairs=release_host_pairs)
+
+    @staticmethod
+    def _load_resolution(owner: "Correlation", fp: "h5py.File", filepath: str) -> None:
+        """Adopt the estimator definition stored in the file.
+
+        The file is authoritative for the geometry (as for nside, bins, ...).
+        An *explicitly requested* resolution that contradicts the file is an
+        error; silently measuring a different estimator than asked for is
+        not acceptable.
+        """
+        file_k = fp.attrs.get("resolution_factor", None)
+        file_k = None if file_k is None else float(file_k)
+        file_ap = int(fp.attrs.get("aperture_nside", owner.nside))
+        file_ap = None if file_ap == int(owner.nside) else file_ap
+        if "level_nside" in fp:
+            file_levels = fp["level_nside"][:].astype(np.int64)
+        else:
+            file_levels = assign_levels(owner.binedges, owner.nside, None)
+
+        asked_k, asked_ap = owner.resolution_factor, owner.aperture_nside
+        asked_levels = assign_levels(owner.binedges, owner.nside, asked_k)
+        if asked_k is not None and not np.array_equal(asked_levels, file_levels):
+            raise ValueError(
+                f"{filepath} was built with resolution_factor={file_k} "
+                f"(nside per bin {file_levels.tolist()}), but this Correlation "
+                f"asks for resolution_factor={asked_k} "
+                f"(nside per bin {asked_levels.tolist()})."
+            )
+        if asked_ap is not None and asked_ap != file_ap:
+            raise ValueError(
+                f"{filepath} was built with aperture_nside="
+                f"{file_ap or int(owner.nside)}, but this Correlation asks for "
+                f"aperture_nside={asked_ap}."
+            )
+        if (asked_k is None and file_k is not None) or (
+            asked_ap is None and file_ap is not None
+        ):
+            warnings.warn(
+                f"{filepath} defines a static-treecode estimator "
+                f"(resolution_factor={file_k}, aperture_nside="
+                f"{file_ap or int(owner.nside)}); adopting it. Pass the same "
+                "values to the constructor to silence this warning.",
+                UserWarning,
+                stacklevel=3,
+            )
+        owner.resolution_factor = file_k
+        owner.aperture_nside = file_ap
+        owner.level_nside = file_levels
+        owner._treecode = None
+        # bins / resolution may have changed: keep the pair finder in sync
+        owner._pair_finder = owner._make_pair_finder()
 
     @staticmethod
     def _load_pairs_v2(
@@ -150,14 +249,22 @@ class PairIOHandler:
         p0, p1 = int(pair_offsets[start_ind]), int(pair_offsets[stop_ind])
         q0, q1 = int(q_offsets[start_ind]), int(q_offsets[stop_ind])
 
+        virtual_rows = "tc_pair_inds" in fp
+        pair_name = "tc_pair_inds" if virtual_rows else "pair_inds"
+        q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
+
         # Bulk reads straight into the final flat arrays
-        pair_inds_flat = fp["pair_inds"][:, p0:p1].astype(owner.index_dtype, copy=False)
+        pair_inds_flat = fp[pair_name][:, p0:p1].astype(owner.index_dtype, copy=False)
+        if "treecode" in fp:
+            pair_inds_flat = PairIOHandler._load_treecode(
+                owner, fp["treecode"], pair_inds_flat, start_ind, stop_ind
+            )
         pair_exp2phi_flat = fp["pair_exp2phi"][:, p0:p1].astype(
             owner.rotation_complex_dtype, copy=False
         )
         bins_arr = fp["bins"][start_ind:stop_ind].astype(owner.index_dtype, copy=False)
 
-        q_inds_flat = fp["Q_inds"][q0:q1].astype(owner.index_dtype, copy=False)
+        q_inds_flat = fp[q_name][q0:q1].astype(owner.index_dtype, copy=False)
         q_cos_flat = fp["Q_cos"][q0:q1].astype(owner.rotation_dtype, copy=False)
         q_sin_flat = fp["Q_sin"][q0:q1].astype(owner.rotation_dtype, copy=False)
         q_val_flat = fp["Q_val"][q0:q1].astype(owner.rotation_dtype, copy=False)
@@ -198,6 +305,48 @@ class PairIOHandler:
         owner.Q_offsets = local_q_offsets
         owner.Q_patch_area_flat = np.asarray(q_patch_area, dtype=owner.rotation_dtype)
         owner._invalidate_aperture_device_buffers()
+
+    @staticmethod
+    def _load_treecode(
+        owner: "Correlation",
+        gp: "h5py.Group",
+        pair_inds_flat: np.ndarray,
+        start_ind: int,
+        stop_ind: int,
+    ) -> np.ndarray:
+        """Read the coarse-cell geometry of patches ``start_ind:stop_ind`` and
+        renumber the virtual-row pair ids of that slice."""
+        n_levels = int(gp["coarse_nsides"].shape[0])
+        full = TreecodeGeometry(
+            base_nside=int(gp.attrs["base_nside"]),
+            coarse_nsides=tuple(int(n) for n in gp["coarse_nsides"][:]),
+            cell_offsets=gp["cell_offsets"][:].astype(np.int64),
+            child_indptr=[gp[f"child_indptr_{lv}"][:] for lv in range(n_levels)],
+            child_indices=[gp[f"child_indices_{lv}"][:] for lv in range(n_levels)],
+            cell_ra=[gp[f"cell_ra_{lv}"][:] for lv in range(n_levels)],
+            cell_dec=[gp[f"cell_dec_{lv}"][:] for lv in range(n_levels)],
+        )
+        n_ap = int(gp.attrs["n_aperture_cells"])
+        if n_ap != owner.n_aperture_cells:
+            raise ValueError(
+                "The aperture level of the pair file does not match this mask "
+                f"({n_ap} vs {owner.n_aperture_cells} coarse aperture pixels)."
+            )
+        sliced = full.slice_patches(start_ind, stop_ind)
+        owner._treecode = sliced
+        if start_ind == 0 and stop_ind == full.n_patches:
+            return pair_inds_flat
+
+        npix = hp.nside2npix(owner.nside)
+        old_starts = full.level_starts(first=n_ap)
+        new_starts = sliced.level_starts(first=n_ap)
+        out = pair_inds_flat.astype(np.int64)
+        virtual = out >= npix + n_ap
+        a = out[virtual] - npix
+        level = np.searchsorted(old_starts, a, side="right") - 1
+        shift = new_starts[level] - old_starts[level] - full.cell_offsets[level, start_ind]
+        out[virtual] = a + shift + npix
+        return out.astype(owner.index_dtype, copy=False)
 
     @staticmethod
     def _load_pairs_legacy(

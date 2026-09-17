@@ -20,6 +20,13 @@ import numpy as np
 from tqdm import trange
 
 from .correlation_helpers import Q_crittenden
+from .treecode import (
+    PatchCells,
+    TreecodeGeometry,
+    build_patch_cells,
+    estimate_pairs_per_bin,
+    level_groups,
+)
 from .utils import pixel2RaDec
 
 if TYPE_CHECKING:
@@ -108,18 +115,184 @@ class PairGeometry:
         )
 
     @staticmethod
+    def coarse_nsides(owner: "Correlation") -> Tuple[int, ...]:
+        """Distinct coarse levels used by the 2PCF bins, descending nside."""
+        levels = {int(ns) for ns in owner.level_nside if int(ns) != int(owner.nside)}
+        return tuple(sorted(levels, reverse=True))
+
+    @staticmethod
+    def get_pairs_helper_levels(
+        owner: "Correlation",
+        i: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, PatchCells]:
+        """Static-treecode pair search for patch ``i``.
+
+        Every resolution level is searched only in the (contiguous) bin
+        range it owns.  Coarse pair indices are returned as ``npix +
+        patch-local cell index``; :meth:`calculate_pairs_2PCF` shifts them
+        to global virtual-row ids once all patches are known.
+        """
+        vec = hp.ang2vec(owner.theta_center[i], owner.phi_center[i])
+        patch_inds = hp.query_disc(
+            owner.nside, vec=vec, radius=np.radians(owner.patch_size / 60)
+        )
+        pix_inds = patch_inds[owner.map_mask[patch_inds]]
+        coarse = PairGeometry.coarse_nsides(owner)
+        cells = build_patch_cells(owner.nside, pix_inds, coarse)
+
+        npix = hp.nside2npix(owner.nside)
+        owner._pair_finder.kernel = owner._compute_pairs_kernel
+        all_inds, all_exp, all_ninds = [], [], []
+        for nside_b, b0, b1 in level_groups(owner.level_nside):
+            if nside_b == owner.nside:
+                ids = pix_inds
+                ra, dec = pixel2RaDec(pix_inds, owner.nside)
+                shift = 0
+            else:
+                level = coarse.index(nside_b)
+                ids = np.arange(cells.n_cells[level], dtype=np.int64)
+                ra, dec = cells.ra[level], cells.dec[level]
+                shift = npix
+            inds, exp2theta, ninds = owner._pair_finder.get_pairs_patch_flat(
+                ids, ra, dec, binedges=owner.binedges[b0 : b1 + 1]
+            )
+            if shift:
+                inds = inds + owner.index_dtype.type(shift)
+            all_inds.append(inds)
+            all_exp.append(exp2theta)
+            all_ninds.append(ninds)
+
+        return (
+            np.concatenate(all_inds, axis=1).astype(owner.index_dtype, copy=False),
+            np.concatenate(all_exp, axis=1).astype(
+                owner.rotation_complex_dtype, copy=False
+            ),
+            np.concatenate(all_ninds).astype(owner.index_dtype, copy=False),
+            cells,
+        )
+
+    @staticmethod
+    def preflight_pair_memory(owner: "Correlation") -> Optional[dict]:
+        """Project the pair memory *before* pair finding and fail early.
+
+        Uses the analytic pair-separation distribution of a disc with the
+        actual number of unmasked pixels per patch.  Raises ``MemoryError``
+        (naming a ``resolution_factor`` that fits) if the projection exceeds
+        the budget: ``owner.memory_budget_gb`` if given, otherwise the free
+        device memory on GPU backends.  Returns the projection.
+        """
+        budget = owner.memory_budget_gb
+        if budget is None:
+            if owner.backend.name != "cupy":
+                return None
+            try:
+                free_bytes, _ = owner.backend.module.cuda.runtime.memGetInfo()
+            except Exception:  # pragma: no cover - driver query failed
+                return None
+            budget = free_bytes / 1e9
+        if not np.isfinite(budget):
+            return None
+
+        radius = np.radians(owner.patch_size / 60)
+        n_pix = np.empty(owner.n_patches, dtype=np.int64)
+        for i in range(owner.n_patches):
+            vec = hp.ang2vec(owner.theta_center[i], owner.phi_center[i])
+            disc = hp.query_disc(owner.nside, vec=vec, radius=radius)
+            n_pix[i] = int(np.count_nonzero(owner.map_mask[disc]))
+
+        bytes_per_pair = 2 * owner.index_dtype.itemsize + 2 * owner.rotation_complex_dtype.itemsize
+
+        def projected_gb(level_nside: np.ndarray) -> float:
+            pairs = estimate_pairs_per_bin(
+                n_pix, owner.binedges, level_nside, owner.nside, radius
+            )
+            return float(pairs.sum() * bytes_per_pair / 1e9)
+
+        from .treecode import assign_levels, is_power_of_two
+
+        need = projected_gb(owner.level_nside)
+        report = {"projected_gb": need, "budget_gb": float(budget)}
+        if need <= budget:
+            return report
+
+        suggestion = None
+        if is_power_of_two(owner.nside):
+            current = owner.resolution_factor or np.inf
+            for k in (16.0, 11.6, 8.0, 5.8, 4.0, 2.9, 2.0):
+                if k >= current:
+                    continue
+                gb = projected_gb(assign_levels(owner.binedges, owner.nside, k))
+                if gb <= budget:
+                    suggestion = (k, gb)
+                    break
+        hint = (
+            f"resolution_factor={suggestion[0]:g} would need ~{suggestion[1]:.3g} GB."
+            if suggestion
+            else "No resolution_factor >= 2 fits; reduce the number of patches "
+            "(load_pairs(start_ind, stop_ind) chunks) or the angular range."
+        )
+        mode = (
+            "full resolution"
+            if owner.resolution_factor is None
+            else f"resolution_factor={owner.resolution_factor:g}"
+        )
+        raise MemoryError(
+            f"Projected pair geometry for {owner.n_patches} patches at nside "
+            f"{owner.nside} ({mode}): ~{need:.3g} GB, budget {budget:.3g} GB. "
+            f"{hint} (The static treecode is a different, windowed estimator: "
+            "use the same resolution_factor for data and simulations. Set "
+            "memory_budget_gb=float('inf') to skip this check.)"
+        )
+
+    @staticmethod
     def calculate_pairs_2PCF(owner: "Correlation") -> None:
+        PairGeometry.preflight_pair_memory(owner)
+
+        coarse = PairGeometry.coarse_nsides(owner)
         pair_inds, pair_exp2phi, bins = [], [], []
+        patch_cells: List[PatchCells] = []
         for i in trange(owner.n_patches, desc="2PCF pairs", unit=" patches"):
-            result = owner.__get_pairs_helper__(i)
+            if coarse:
+                result = PairGeometry.get_pairs_helper_levels(owner, i)
+                patch_cells.append(result[3])
+            else:
+                # Full resolution: the single-level search, unchanged.
+                result = owner.__get_pairs_helper__(i)
 
             pair_inds.append(result[0])
             pair_exp2phi.append(result[1])
             bins.append(result[2])
 
+        treecode = None
+        if coarse:
+            treecode = TreecodeGeometry.from_patches(owner.nside, coarse, patch_cells)
+            npix = hp.nside2npix(owner.nside)
+            if (
+                npix + owner.n_aperture_cells + treecode.n_cells
+                > np.iinfo(owner.index_dtype).max
+            ):
+                raise OverflowError(
+                    "pixel + coarse-cell ids exceed the index dtype range"
+                )
+            # patch-local cell index -> global virtual-row id
+            starts = treecode.level_starts(first=owner.n_aperture_cells)
+            groups = level_groups(owner.level_nside)
+            for i in range(owner.n_patches):
+                edges = np.concatenate(([0], np.cumsum(bins[i], dtype=np.int64)))
+                for nside_b, b0, b1 in groups:
+                    if nside_b == owner.nside:
+                        continue
+                    level = coarse.index(nside_b)
+                    shift = starts[level] + treecode.cell_offsets[level, i]
+                    if shift:
+                        pair_inds[i][:, edges[b0] : edges[b1]] += owner.index_dtype.type(
+                            shift
+                        )
+
         owner.pair_inds = pair_inds
         owner.pair_exp2phi = pair_exp2phi
         owner.bins = bins
+        owner._treecode = treecode
         owner._invalidate_prepared_state()
 
     @staticmethod
@@ -179,6 +352,14 @@ class PairGeometry:
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         vec = hp.ang2vec(owner.theta_center[i], owner.phi_center[i])
+        ap_cells = owner._aperture_cells()
+        if ap_cells is not None:
+            # Coarse aperture level: the statistic of the (weighted-mean)
+            # degraded map at ``aperture_nside``.  A coarse pixel is observed
+            # if any of its children is; indices are virtual-row ids.
+            return PairGeometry._get_pairs_M_a_coarse(
+                owner, i, vec, ap_cells[0], aperture_filter
+            )
         pix_center = hp.ang2pix(owner.nside, owner.theta_center[i], owner.phi_center[i])
         patch_inds = hp.query_disc(
             owner.nside, vec=vec, radius=np.radians(5 * owner.theta_Q / 60)
@@ -205,6 +386,43 @@ class PairGeometry:
             q_sin.astype(owner.rotation_dtype, copy=False),
             q_val.astype(owner.rotation_dtype, copy=False),
             qpix_inds.astype(owner.index_dtype, copy=False),
+            q_patch_area,
+        )
+
+    @staticmethod
+    def _get_pairs_M_a_coarse(
+        owner: "Correlation",
+        i: int,
+        vec: np.ndarray,
+        cell_pix: np.ndarray,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        nside_ap = int(owner.aperture_nside)
+        pix_center = hp.ang2pix(nside_ap, owner.theta_center[i], owner.phi_center[i])
+        disc = hp.query_disc(
+            nside_ap, vec=vec, radius=np.radians(5 * owner.theta_Q / 60)
+        )
+        disc = disc[disc != pix_center]
+        pos = np.searchsorted(cell_pix, disc)
+        pos = np.minimum(pos, max(cell_pix.size - 1, 0))
+        observed = (
+            cell_pix[pos] == disc if cell_pix.size else np.zeros(disc.size, dtype=bool)
+        )
+        qpix = disc[observed]
+        cell_index = pos[observed]
+
+        ra_center, dec_center = pixel2RaDec([pix_center], nside_ap)
+        q_ra, q_dec = pixel2RaDec(qpix, nside_ap)
+        q_cos, q_sin, q_val = PairGeometry.get_pairs_patch_M_a(
+            owner, q_ra, q_dec, ra_center, dec_center, aperture_filter=aperture_filter
+        )
+        q_patch_area = owner.rotation_dtype.type(qpix.size * hp.nside2pixarea(nside_ap))
+        npix = hp.nside2npix(owner.nside)
+        return (
+            q_cos.astype(owner.rotation_dtype, copy=False),
+            q_sin.astype(owner.rotation_dtype, copy=False),
+            q_val.astype(owner.rotation_dtype, copy=False),
+            (cell_index + npix).astype(owner.index_dtype, copy=False),
             q_patch_area,
         )
 

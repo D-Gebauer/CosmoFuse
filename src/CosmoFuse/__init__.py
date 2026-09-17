@@ -20,16 +20,17 @@ from .correlation_helpers import (
     zeta_g_t,
 )
 from .correlations import Correlation
-from .pipeline import PinnedMapPipeline
+from .pipeline import PinnedMapPipeline, RowSpaceMapLoader
 from .utils import pixel2RaDec, select_patch_centers
 
-__version__ = "4.20.0"
+__version__ = "4.21.0"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 
 __all__ = [
     "Correlation",
     "PinnedMapPipeline",
+    "RowSpaceMapLoader",
     "Q_T",
     "Q_crittenden",
     "Q_schneider",

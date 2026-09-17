@@ -13,7 +13,7 @@ Pairs are sorted by angular bin for cache-efficient access during
 the correlation measurement kernels.
 """
 
-from typing import Any, Callable, List, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -30,11 +30,19 @@ class PairFinder:
         rotation_dtype: np.dtype,
         rotation_complex_dtype: np.dtype,
         kernel: Callable[..., Tuple[np.ndarray, ...]],
+        search_dtype: Optional[np.dtype] = None,
     ) -> None:
         self.nbins = nbins
         self.binedges = binedges
         self.index_dtype = index_dtype
         self.rotation_dtype = rotation_dtype
+        # Precision of the pair *search* (positions, separations, binning,
+        # position angles).  The stored rotation factors are always cast to
+        # the rotation precision.  float32 resolves cos(theta) only to
+        # ~6e-8, i.e. d(theta)/theta ~ 6e-8 / theta^2: 0.3 % at 15', 3 % at 5'.
+        self.search_dtype = (
+            np.dtype(rotation_dtype) if search_dtype is None else np.dtype(search_dtype)
+        )
         self.rotation_complex_dtype = rotation_complex_dtype
         self.kernel = kernel
 
@@ -52,9 +60,9 @@ class PairFinder:
                       Row 0 = e^{2iφ_i}, row 1 = e^{2iφ_j}, where φ is the
                       position angle used to rotate shear into the pair frame.
         """
-        ra_local = np.asarray(ra, dtype=self.rotation_dtype)
-        dec_local = np.asarray(dec, dtype=self.rotation_dtype)
-        binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
+        ra_local = np.asarray(ra, dtype=self.search_dtype)
+        dec_local = np.asarray(dec, dtype=self.search_dtype)
+        binedges_local = np.asarray(self.binedges, dtype=self.search_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
 
         if patch_inds_local.size < 2:
@@ -128,22 +136,34 @@ class PairFinder:
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
+        binedges: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Like :meth:`get_pairs_patch` but without the per-bin split.
+
+        Args:
+            binedges: Optional contiguous sub-range of the bin edges (the
+                static treecode searches every resolution level only in
+                the bins it owns).  Defaults to all bins.
 
         Returns:
             all_inds: (2, npairs) index array, sorted by angular bin.
             exp2phi:  (2, npairs) complex rotation factors, same order.
-            ninds:    (nbins,) number of pairs per angular bin.
+            ninds:    (nbins,) number of pairs per angular bin (of the
+                      edges searched).
         Avoids splitting the sorted pair arrays into per-bin copies that
         the caller would immediately re-concatenate.
         """
-        ra_local = np.asarray(ra, dtype=self.rotation_dtype)
-        dec_local = np.asarray(dec, dtype=self.rotation_dtype)
-        binedges_local = np.asarray(self.binedges, dtype=self.rotation_dtype)
+        ra_local = np.asarray(ra, dtype=self.search_dtype)
+        dec_local = np.asarray(dec, dtype=self.search_dtype)
+        if binedges is None:
+            binedges = self.binedges
+            nbins = self.nbins
+        else:
+            nbins = len(binedges) - 1
+        binedges_local = np.asarray(binedges, dtype=self.search_dtype)
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
 
-        empty_counts = np.zeros(self.nbins, dtype=np.int64)
+        empty_counts = np.zeros(nbins, dtype=np.int64)
         if patch_inds_local.size < 2:
             return (
                 np.empty((2, 0), dtype=self.index_dtype),
@@ -176,7 +196,7 @@ class PairFinder:
 
         # Sort by angular bin for contiguous memory access in correlation kernels
         order = np.argsort(bin_indices, kind="stable")
-        ninds = np.bincount(bin_indices, minlength=self.nbins).astype(np.int64)
+        ninds = np.bincount(bin_indices, minlength=nbins).astype(np.int64)
 
         all_inds = np.empty((2, npairs), dtype=self.index_dtype)
         all_inds[0] = inds_a[order]

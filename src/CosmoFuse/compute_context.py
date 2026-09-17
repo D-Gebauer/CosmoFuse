@@ -31,6 +31,13 @@ class ComputeContext:
         ("tot_bins_dev", None),
         ("tot_bins_reduceat_dev", None),
         ("ntotpairs", 0),
+        # Row space: device copy of row_pix, host aperture row indices and
+        # the (backend-specific) degrade operators of the virtual rows
+        ("row_pix_dev", None),
+        ("Q_rows_flat", None),
+        ("degrade_ops", None),
+        # Row-space device copies of read-only (frozen) host map inputs
+        ("frozen_map_memo", None),
     )
     # Cached weight sums Σw_i·w_j used to normalise ξ and γ_t estimators;
     # invalidated when weights change or pairs are re-prepared

@@ -1113,9 +1113,42 @@ def _cpu_vectorized_tomo_kernel(
             out_w[out_row_ba, b] = acc_ba_w[comb_idx]
 
 
+_UPPER_TRIANGLE_CHECKED: dict[tuple[int, int, int], bool] = {}
+
+
+def _is_upper_triangle(comb_i: Any, comb_j: Any, nzbins: int) -> bool:
+    """True if (comb_i, comb_j) is the row-major upper triangle of nzbins.
+
+    The (tiny) device arrays are compared once per array object and cached
+    by identity: the orchestrator caches and reuses them across calls.
+    """
+    key = (id(comb_i), id(comb_j), int(nzbins))
+    cached = _UPPER_TRIANGLE_CHECKED.get(key)
+    if cached is not None:
+        return cached
+    expect = [(i, j) for i in range(nzbins) for j in range(i, nzbins)]
+    to_host = lambda a: np.asarray(a.get() if hasattr(a, "get") else a)
+    ci, cj = to_host(comb_i), to_host(comb_j)
+    ok = ci.size == len(expect) and all(
+        (int(a), int(b)) == e for a, b, e in zip(ci, cj, expect)
+    )
+    if len(_UPPER_TRIANGLE_CHECKED) > 64:
+        _UPPER_TRIANGLE_CHECKED.clear()
+    _UPPER_TRIANGLE_CHECKED[key] = ok
+    return ok
+
+
 def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
-    """Builder for GPU tomographic cosmic shear ξ+/ξ- kernel."""
-    kernel_cache: dict[tuple[str, str, int, str, str], Any] = {}
+    """Builder for GPU tomographic cosmic shear ξ+/ξ- kernel.
+
+    Two kernels share one launch contract: the combination-*tiled* kernel
+    (default; one block per angular bin walks every pair once and
+    accumulates all tomographic rows) and the original per-(bin, row)
+    kernel.  The pair loop is memory-bandwidth bound, so tiling cuts the
+    traffic per pair by ~2*ncomb.  Set ``kernel.tiled = False`` on the
+    returned callable to select the original kernel.
+    """
+    kernel_cache: dict[tuple[str, str, str, int, str, str], Any] = {}
 
     def _get_or_build_raw_kernel(
         map_c_type: str,
@@ -1124,8 +1157,9 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         nzbins: int,
         index_c_type: str,
         acc_c_type: str,
+        kernel_name: str = "gpu_fused_tomo_reduce_xipm",
     ) -> Optional[Any]:
-        key = (map_c_type, suffix, nzbins, index_c_type, acc_c_type)
+        key = (kernel_name, map_c_type, suffix, nzbins, index_c_type, acc_c_type)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
@@ -1133,7 +1167,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
             return cached
 
         name_expression = (
-            f"gpu_fused_tomo_reduce_xipm<{map_c_type}, {complex_c_type}, {nzbins}, "
+            f"{kernel_name}<{map_c_type}, {complex_c_type}, {nzbins}, "
             f"{index_c_type}, {acc_c_type}>"
         )
         source = _prepare_cuda_source("tomo_vectorized_xipm.cu")
@@ -1182,22 +1216,39 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         # The accumulator type follows the (orchestrator-allocated) output
         # buffers: float64 outputs on float32 maps select double accumulation.
         acc_c_type = "float" if out_num.dtype == module.float32 else "double"
-        raw_kernel = _get_or_build_raw_kernel(
-            map_c_type,
-            complex_c_type,
-            suffix,
-            nzbins,
-            index_c_type,
-            acc_c_type,
+        ncomb = int(comb_i.shape[0])
+        # The tiled kernel generates the upper triangle of tomographic
+        # combinations (i <= j, row-major) at compile time -- the layout
+        # Correlation._get_tomo_combination_indices produces.
+        tiled = bool(_cupy_tomo_vectorized_kernel.tiled) and _is_upper_triangle(
+            comb_i, comb_j, nzbins
         )
+        raw_kernel = None
+        if tiled:
+            raw_kernel = _get_or_build_raw_kernel(
+                map_c_type, complex_c_type, suffix, nzbins, index_c_type,
+                acc_c_type, kernel_name="gpu_tiled_tomo_reduce_xipm",
+            )
+            tiled = raw_kernel is not None
+        if raw_kernel is None:
+            raw_kernel = _get_or_build_raw_kernel(
+                map_c_type,
+                complex_c_type,
+                suffix,
+                nzbins,
+                index_c_type,
+                acc_c_type,
+            )
         if raw_kernel is None:
             return False
 
         npairs = int(ind_i.shape[0])
         nbins_total = int(bin_offsets.shape[0] - 1)
-        ncomb = int(comb_i.shape[0])
         threads = 256
-        blocks = (max(1, nbins_total), max(1, 2 * ncomb), 1)
+        if tiled:
+            blocks = (max(1, nbins_total), 1, 1)
+        else:
+            blocks = (max(1, nbins_total), max(1, 2 * ncomb), 1)
         raw_kernel(
             blocks,
             (threads,),
@@ -1220,6 +1271,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         )
         return True
 
+    _cupy_tomo_vectorized_kernel.tiled = True
     return _cupy_tomo_vectorized_kernel
 
 

@@ -1769,13 +1769,42 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(ok_3)
         self.assertTrue(ok_2_cached)
         self.assertEqual(len(compiled_sources), 2)
+        # The combination-tiled kernel is the default ...
+        self.assertTrue(kernel.tiled)
         self.assertEqual(
             compiled_sources[0][1],
+            "gpu_tiled_tomo_reduce_xipm<float, cuFloatComplex, 2, long long, float>",
+        )
+        # ... the per-row kernel is selected explicitly ...
+        kernel.tiled = False
+        self.assertTrue(
+            kernel(shear_2, weights_2, ind_i, ind_j, rot_i, rot_j, bin_offsets,
+                   comb_i_2, comb_j_2, out_num_2, out_den_2)
+        )
+        self.assertEqual(
+            compiled_sources[-1][1],
             "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 2, long long, float>",
+        )
+        # ... and automatically for combination lists that are not the
+        # row-major upper triangle the tiled kernel generates at compile time.
+        kernel.tiled = True
+        n_before = len(compiled_sources)
+        odd_i = np.array([0, 1], dtype=np.int32)
+        odd_j = np.array([1, 1], dtype=np.int32)
+        self.assertTrue(
+            kernel(shear_2, weights_2, ind_i, ind_j, rot_i, rot_j, bin_offsets,
+                   odd_i, odd_j, np.zeros((2, 4, 1), dtype=np.float32),
+                   np.zeros((4, 1), dtype=np.float32))
+        )
+        self.assertEqual(len(compiled_sources), n_before)  # per-row kernel reused
+        kernel.tiled = True
+        self.assertEqual(
+            compiled_sources[0][1],
+            "gpu_tiled_tomo_reduce_xipm<float, cuFloatComplex, 2, long long, float>",
         )
         self.assertEqual(
             compiled_sources[1][1],
-            "gpu_fused_tomo_reduce_xipm<float, cuFloatComplex, 3, long long, float>",
+            "gpu_tiled_tomo_reduce_xipm<float, cuFloatComplex, 3, long long, float>",
         )
         for _source, _kernel_name, options in compiled_sources:
             self.assertEqual(options, ("--use_fast_math", "--std=c++14"))

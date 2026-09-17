@@ -34,6 +34,10 @@ _SCALAR_TYPES = {
 }
 
 
+# Names of the emulated kernels in launch order (tests clear and inspect it).
+LAUNCH_LOG = []
+
+
 def _parse_name_expression(name_expression):
     match = re.fullmatch(r"(\w+)<(.+)>", name_expression.strip())
     if match is None:
@@ -51,6 +55,7 @@ class _EmulatedRawKernel:
         self._fn = _KERNEL_EMULATORS[self.name]
 
     def __call__(self, grid, block, args):
+        LAUNCH_LOG.append(self.name)
         self._fn(self.params, grid, args)
 
 
@@ -161,6 +166,67 @@ def _emulate_xipm(params, grid, args):
             num_flat[out_p_idx] = np.sum(w_pair * (b_r * a_r + b_i * a_i), dtype=acc)
             num_flat[out_m_idx] = np.sum(w_pair * (b_r * a_r - b_i * a_i), dtype=acc)
             den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
+
+
+def _emulate_xipm_tiled(params, grid, args):
+    """tomo_vectorized_xipm.cu :: gpu_tiled_tomo_reduce_xipm<T, C, TOMO, I, ACC>.
+
+    One block per angular bin: every pair is visited once, all tomographic
+    bins of both pixels are loaded and rotated once, and every
+    (combination, orientation) row is accumulated.
+    """
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins = int(params[2])
+    acc = _SCALAR_TYPES[params[4]]
+
+    (shear, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets,
+     comb_i, comb_j, out_num, out_den, ncomb, nbins_total, _npairs) = args
+    ncomb = int(ncomb)
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1, "tiled kernel launches one block per angular bin"
+    # The kernel generates the row-major upper triangle at compile time.
+    expect = [(i, j) for i in range(tomo_bins) for j in range(i, tomo_bins)]
+    if ncomb != len(expect):
+        return
+    assert [(int(a), int(b)) for a, b in zip(comb_i, comb_j)] == expect
+    shear3 = np.asarray(shear).reshape(-1, tomo_bins, 2)
+    weights2 = np.asarray(weights).reshape(-1, tomo_bins)
+    num_flat = out_num.reshape(-1)
+    den_flat = out_den.reshape(-1)
+
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start = int(bin_offsets[bin_flat])
+        stop = int(bin_offsets[bin_flat + 1])
+        idx_a = ind_i[start:stop].astype(np.int64)
+        idx_b = ind_j[start:stop].astype(np.int64)
+        ea_r = rot_i[start:stop].real.astype(map_dtype)[:, None]
+        ea_i = rot_i[start:stop].imag.astype(map_dtype)[:, None]
+        eb_r = rot_j[start:stop].real.astype(map_dtype)[:, None]
+        eb_i = rot_j[start:stop].imag.astype(map_dtype)[:, None]
+        ga, gb = shear3[idx_a], shear3[idx_b]          # (npairs, TOMO, 2)
+        a_r = ga[..., 0] * ea_r - ga[..., 1] * ea_i
+        a_i = ga[..., 0] * ea_i + ga[..., 1] * ea_r
+        b_r = gb[..., 0] * eb_r - gb[..., 1] * eb_i
+        b_i = gb[..., 0] * eb_i + gb[..., 1] * eb_r
+        w_a, w_b = weights2[idx_a], weights2[idx_b]
+
+        for k in range(ncomb):
+            i = int(comb_i[k])
+            j = int(comb_j[k])
+            for ori, (ta, tb) in enumerate(((i, j), (j, i))):
+                if ori == 1 and i == j:
+                    continue  # auto-combination rows stay zero (never written)
+                row = 2 * k + ori
+                w_pair = w_a[:, ta] * w_b[:, tb]
+                rr = b_r[:, tb] * a_r[:, ta]
+                ii = b_i[:, tb] * a_i[:, ta]
+                out_p_idx = row * nbins_total + bin_flat
+                out_m_idx = (2 * ncomb + row) * nbins_total + bin_flat
+                num_flat[out_p_idx] = np.sum(w_pair * (rr + ii), dtype=acc)
+                num_flat[out_m_idx] = np.sum(w_pair * (rr - ii), dtype=acc)
+                den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
 
 
 def _emulate_dd(params, grid, args):
@@ -519,6 +585,7 @@ def _emulate_fused_3x2pt(params, grid, args):
 
 _KERNEL_EMULATORS = {
     "gpu_fused_tomo_reduce_xipm": _emulate_xipm,
+    "gpu_tiled_tomo_reduce_xipm": _emulate_xipm_tiled,
     "gpu_fused_tomo_reduce_dd": _emulate_dd,
     "gpu_fused_tomo_reduce_ds": _emulate_ds,
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,

@@ -514,8 +514,10 @@ class TestCorrelation(unittest.TestCase):
 
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
-        shear_maps = FakeGPUArray(np.ones((nzbins, 2, 8), dtype=np.float64), device_id=0)
-        weights = FakeGPUArray(np.ones((nzbins, 8), dtype=np.float64), device_id=0)
+        # Map inputs must be full-sky (or row-space) sized.
+        npix = 12 * self.nside**2
+        shear_maps = FakeGPUArray(np.ones((nzbins, 2, npix), dtype=np.float64), device_id=0)
+        weights = FakeGPUArray(np.ones((nzbins, npix), dtype=np.float64), device_id=0)
         sumofweights = FakeGPUArray(np.ones((2, nzbin_combs), dtype=np.float64), device_id=0)
         xip_dev = FakeGPUArray(
             np.ones((nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
@@ -680,10 +682,12 @@ class TestCorrelation(unittest.TestCase):
         corr.Q_offsets = np.array([0, 3], dtype=np.int64)
         corr.Q_patch_area_flat = np.array([1.0], dtype=np.float64)
 
-        g1 = FakeGPUArray(np.array([1.0, 1.0, 1.0], dtype=np.float64), device_id=0)
-        g2 = FakeGPUArray(np.array([0.0, 0.0, 0.0], dtype=np.float64), device_id=0)
-        w = FakeGPUArray(np.array([1.0, 1.0, 1.0], dtype=np.float64), device_id=0)
-        density = FakeGPUArray(np.array([2.0, 2.0, 2.0], dtype=np.float64), device_id=0)
+        # Map inputs must be full-sky (or row-space) sized.
+        npix = 12 * self.nside**2
+        g1 = FakeGPUArray(np.full(npix, 1.0, dtype=np.float64), device_id=0)
+        g2 = FakeGPUArray(np.full(npix, 0.0, dtype=np.float64), device_id=0)
+        w = FakeGPUArray(np.full(npix, 1.0, dtype=np.float64), device_id=0)
+        density = FakeGPUArray(np.full(npix, 2.0, dtype=np.float64), device_id=0)
 
         shear_out = corr.get_aperture_shear(g1, g2, w, aperture_filter=None)
         density_out = corr.get_aperture_density(density, w, aperture_filter=None)
