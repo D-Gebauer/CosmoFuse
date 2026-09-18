@@ -27,7 +27,7 @@ from .correlation_helpers import (
     zeta_g_plus as _zeta_g_plus_helper,
     zeta_g_t as _zeta_g_t_helper,
 )
-from .packing import decode_angles, pack_patch
+from .packing import block_edges, decode_angles, pack_patch, unpack_rows
 from .pair_finder import PairFinder
 from .treecode import (
     TreecodeGeometry,
@@ -375,6 +375,7 @@ class Correlation:
         memory_budget_gb: Optional[float] = None,
         pair_search_precision: str = "float64",
         pack_pairs: bool = False,
+        pack_host_pairs: bool = False,
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -444,6 +445,17 @@ class Correlation:
                 separations only to ``d(theta)/theta ~ 6e-8 / theta^2``
                 (0.3 % at 15', 3 % at 5'): use ``"float64"`` for
                 ``theta_min`` below ~10'.
+            pack_host_pairs: Apply the same packing already at pair-finding
+                time, so the *host* arrays and the pair file hold 8 instead
+                of 24 bytes per pair as well (``pair_inds`` /
+                ``pair_exp2phi`` become ``None``; the packed payload is in
+                ``packed_pairs``).  Default ``False``, and independent of
+                ``pack_pairs``: it saves host RAM and disk, not device
+                memory.  The price is that the geometry is then quantised
+                *everywhere* -- the pair file is no longer exact and cannot
+                be turned back into one, and both backends measure the
+                quantised estimator.  Pair files written this way carry
+                format version 4.
 
         Raises:
             ValueError: If input parameters are invalid
@@ -511,6 +523,7 @@ class Correlation:
             )
         self.pair_search_precision = pair_search_precision
         self.pack_pairs = bool(pack_pairs)
+        self.pack_host_pairs = bool(pack_host_pairs)
         self._pair_finder = self._make_pair_finder()
         if self._pair_finder.search_dtype == np.dtype(np.float32):
             jitter = 6e-8 / self.theta_min**2
@@ -569,6 +582,11 @@ class Correlation:
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
+        # Host-packed pair payload (pack_host_pairs=True); replaces
+        # pair_inds/pair_exp2phi rather than accompanying them.
+        self.packed_pairs: Optional[List[np.ndarray]] = None
+        self.packed_block_ids: Optional[List[np.ndarray]] = None
+        self.packed_block_sizes: Optional[List[np.ndarray]] = None
         self.compute_context.initialize_runtime_state()
         self._aperture_filter_active_key = "Q_T"
 
@@ -721,6 +739,11 @@ class Correlation:
             self.pair_search_precision = "rotation"  # historical behaviour
         if "pack_pairs" not in self.__dict__:
             self.pack_pairs = False
+        if "pack_host_pairs" not in self.__dict__:
+            self.pack_host_pairs = False
+            self.packed_pairs = None
+            self.packed_block_ids = None
+            self.packed_block_sizes = None
         self._pair_finder = self._make_pair_finder()
         self.compute_context = ComputeContext()
         legacy_context_fields = (
@@ -1573,13 +1596,14 @@ class Correlation:
         Args:
             release_host_pairs:
                 If ``True``, releases host-side pair arrays (``pair_inds``,
-                ``pair_exp2phi``, ``bins``) after device buffers are built
-                to reduce RAM usage for large runs.
+                ``pair_exp2phi``, ``bins``, and the ``pack_host_pairs``
+                payload) after device buffers are built to reduce RAM usage
+                for large runs.
         """
-        host_pairs_available = (
-            self.pair_inds is not None
-            and self.pair_exp2phi is not None
-            and self.bins is not None
+        host_packed = self.packed_pairs is not None
+        host_pairs_available = self.bins is not None and (
+            host_packed
+            or (self.pair_inds is not None and self.pair_exp2phi is not None)
         )
         if not host_pairs_available:
             if (
@@ -1617,8 +1641,11 @@ class Correlation:
         if keep_unpacked:
             temp_inds = np.empty((2, int(size)), dtype=self.index_dtype)
             temp_exp2phi = np.empty((2, int(size)), dtype=self.rotation_complex_dtype)
+        groups = level_groups(self.level_nside)
+        block_of_bin = np.zeros(self.nbins, dtype=np.int64)
+        for g, (_nside_g, b0, b1) in enumerate(groups):
+            block_of_bin[b0:b1] = g
         if pack:
-            groups = level_groups(self.level_nside)
             packed = np.empty((int(size), 4), dtype=np.uint16)
             packed_row_base = np.zeros(self.n_patches * self.nbins, dtype=np.int64)
             packed_blocks: List[np.ndarray] = []
@@ -1634,17 +1661,35 @@ class Correlation:
         lut = self._global_to_row_lut()
         for i in range(self.n_patches):
             lo, hi = first_patch_ind[i], first_patch_ind[i + 1]
-            rows_i = self._global_ids_to_rows(self.pair_inds[i], lut)
-            if lut is not None and rows_i.size > 0 and int(rows_i.min()) < 0:
-                raise ValueError(
-                    "Pair indices reference pixels outside the mask (map_inds); "
-                    "the pair geometry does not belong to this mask."
-                )
-            exp_i = self.pair_exp2phi[i]
+            if host_packed:
+                # The host payload is already packed; only the small per-group
+                # row blocks have to be translated from global ids to rows.
+                packed_i = self.packed_pairs[i]
+                edges = block_edges(self.packed_block_sizes[i])
+                ids_i = self.packed_block_ids[i]
+                blocks = [
+                    self._pair_ids_to_rows(ids_i[edges[g] : edges[g + 1]], lut)
+                    for g in range(len(groups))
+                ]
+                if keep_unpacked:
+                    rows_i = unpack_rows(
+                        packed_i, blocks, self.bins[i], groups, self.index_dtype
+                    )
+                    exp_i = decode_angles(
+                        packed_i[:, 2:].T, self.rotation_complex_dtype
+                    )
+            else:
+                rows_i = self._pair_ids_to_rows(self.pair_inds[i], lut)
+                exp_i = self.pair_exp2phi[i]
+                if pack:
+                    packed_i, blocks, _ = pack_patch(
+                        np.asarray(rows_i), exp_i, self.bins[i], groups
+                    )
+                    if keep_unpacked:
+                        exp_i = decode_angles(
+                            packed_i[:, 2:].T, self.rotation_complex_dtype
+                        )
             if pack:
-                packed_i, blocks, block_of_bin = pack_patch(
-                    np.asarray(rows_i), exp_i, self.bins[i], groups
-                )
                 packed[lo:hi] = packed_i
                 sizes = np.array([blk.size for blk in blocks], dtype=np.int64)
                 starts = n_packed_rows + np.concatenate(([0], np.cumsum(sizes)))[:-1]
@@ -1653,8 +1698,6 @@ class Correlation:
                 ]
                 packed_blocks.extend(blocks)
                 n_packed_rows += int(sizes.sum())
-                if keep_unpacked:
-                    exp_i = decode_angles(packed_i[:, 2:].T, self.rotation_complex_dtype)
             if keep_unpacked:
                 temp_inds[:, lo:hi] = rows_i
                 temp_exp2phi[:, lo:hi] = exp_i
@@ -1709,6 +1752,9 @@ class Correlation:
             self.pair_inds = None
             self.pair_exp2phi = None
             self.bins = None
+            self.packed_pairs = None
+            self.packed_block_ids = None
+            self.packed_block_sizes = None
 
     def _ensure_prepared(self) -> None:
         if self.inds_dev is None and self.compute_context.packed_pairs_dev is None:
@@ -2475,6 +2521,18 @@ class Correlation:
         return np.where(virtual, ids - (npix - self.n_active), rows).astype(
             self.index_dtype, copy=False
         )
+
+    def _pair_ids_to_rows(
+        self, ids: np.ndarray, lut: Optional[np.ndarray]
+    ) -> np.ndarray:
+        """:meth:`_global_ids_to_rows` with the mask-membership check."""
+        rows = self._global_ids_to_rows(ids, lut)
+        if lut is not None and rows.size > 0 and int(rows.min()) < 0:
+            raise ValueError(
+                "Pair indices reference pixels outside the mask (map_inds); "
+                "the pair geometry does not belong to this mask."
+            )
+        return rows
 
     def _gather_rows(self, array: Any) -> Any:
         """Restrict a map-like array to the row space along its last axis.

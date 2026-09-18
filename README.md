@@ -90,6 +90,7 @@ First create a Correlation object:
         memory_budget_gb=None,              # pair-memory budget of the preflight check (None = free device memory)
         pair_search_precision="float64",    # "float64" / "rotation" / "auto"
         pack_pairs=False,                   # 8-byte pairs on the device (tomographic methods only)
+        pack_host_pairs=False,              # 8-byte pairs in host RAM and in the pair file too
     )
 
 For GPU runs the recommended precision configuration is
@@ -159,6 +160,14 @@ To load pairs and immediately release host-side pair arrays after backend prepar
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
 Pair files are written in a consolidated layout (format version 2; version 3 with `resolution_factor`) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable.
+
+`pack_pairs=True` stores the pair geometry on the *device* in 8 instead of 24 bytes per pair, so about three times as many pairs fit on a GPU; host arrays and pair files stay exact. `pack_host_pairs=True` applies the same packing already at pair-finding time, which cuts host RAM and the pair file by the same factor (`pair_inds` / `pair_exp2phi` are then `None`, the payload lives in `packed_pairs`):
+
+    correlation = Correlation(..., pack_pairs=True, pack_host_pairs=True)
+    correlation.preprocess()
+    correlation.save_pairs("/path/to/pairs.h5")   # format version 4
+
+Both are off by default. Packing quantises the pair rotations to $2\pi/65536$, which moves each estimate by ~1e-5 of its statistical error without biasing it — but a `pack_host_pairs` file is no longer exact and cannot be turned back into an exact one, so keep an exact file if you may want to switch the estimator later. A packed file loads into any matching mask and slices by patch like any other.
 
 ### Aperture filters
 

@@ -26,17 +26,25 @@ class PairIOHandler:
     ids as pixel ids (out-of-bounds gathers on the GPU); with the new names
     old readers fail with a ``KeyError`` instead.  Full-resolution files are
     still written as version 2 and stay readable by old versions.
+
+    Format version 4 is written only for ``pack_host_pairs=True``: the pair
+    payload is the quantised 8 B/pair form (``packed_pairs`` plus the
+    per-(patch, level) row blocks in ``packed_block_ids``) instead of the
+    exact indices and rotation factors.  Such a file defines a slightly
+    different estimator, so it gets its own version rather than sneaking
+    past a reader that expects exact geometry.
     """
 
-    FORMAT_VERSION = 3
+    FORMAT_VERSION = 4
+    PACKED_FORMAT_VERSION = 4
+    TREECODE_FORMAT_VERSION = 3
     FULL_RESOLUTION_FORMAT_VERSION = 2
 
     @staticmethod
     def save_pairs(owner: "Correlation", filepath: str) -> None:
-        if (
-            owner.pair_inds is None
-            or owner.pair_exp2phi is None
-            or owner.bins is None
+        packed = getattr(owner, "packed_pairs", None) is not None
+        if owner.bins is None or (
+            not packed and (owner.pair_inds is None or owner.pair_exp2phi is None)
         ):
             warnings.warn(
                 "Cannot save pairs because host pair arrays were released. "
@@ -46,9 +54,15 @@ class PairIOHandler:
             return
 
         n_patches = owner.n_patches
-        pair_counts = np.array(
-            [owner.pair_inds[i].shape[1] for i in range(n_patches)], dtype=np.int64
-        )
+        if packed:
+            pair_counts = np.array(
+                [owner.packed_pairs[i].shape[0] for i in range(n_patches)],
+                dtype=np.int64,
+            )
+        else:
+            pair_counts = np.array(
+                [owner.pair_inds[i].shape[1] for i in range(n_patches)], dtype=np.int64
+            )
         pair_offsets = np.zeros(n_patches + 1, dtype=np.int64)
         pair_offsets[1:] = np.cumsum(pair_counts)
         total_pairs = int(pair_offsets[-1])
@@ -66,12 +80,16 @@ class PairIOHandler:
         pair_name = "tc_pair_inds" if virtual_rows else "pair_inds"
         q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
 
+        if packed:
+            version = PairIOHandler.PACKED_FORMAT_VERSION
+        elif virtual_rows:
+            version = PairIOHandler.TREECODE_FORMAT_VERSION
+        else:
+            version = PairIOHandler.FULL_RESOLUTION_FORMAT_VERSION
+
         with h5py.File(filepath, "w") as fp:
-            fp.attrs["format_version"] = (
-                PairIOHandler.FORMAT_VERSION
-                if virtual_rows
-                else PairIOHandler.FULL_RESOLUTION_FORMAT_VERSION
-            )
+            fp.attrs["format_version"] = version
+            fp.attrs["packed_pairs"] = bool(packed)
             # Provenance of the estimator (ignored by old readers).
             if owner.resolution_factor is not None:
                 fp.attrs["resolution_factor"] = float(owner.resolution_factor)
@@ -111,19 +129,24 @@ class PairIOHandler:
                 bins_arr[i] = owner.bins[i]
             fp.create_dataset("bins", data=bins_arr)
 
-            d_inds = fp.create_dataset(
-                pair_name, shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
-            )
-            d_exp = fp.create_dataset(
-                "pair_exp2phi",
-                shape=(2, total_pairs),
-                dtype=owner.pair_exp2phi[0].dtype,
-            )
-            for i in range(n_patches):
-                start, stop = pair_offsets[i], pair_offsets[i + 1]
-                if stop > start:
-                    d_inds[:, start:stop] = owner.pair_inds[i]
-                    d_exp[:, start:stop] = owner.pair_exp2phi[i]
+            if packed:
+                PairIOHandler._save_packed_pairs(
+                    owner, fp, pair_offsets, total_pairs
+                )
+            else:
+                d_inds = fp.create_dataset(
+                    pair_name, shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
+                )
+                d_exp = fp.create_dataset(
+                    "pair_exp2phi",
+                    shape=(2, total_pairs),
+                    dtype=owner.pair_exp2phi[0].dtype,
+                )
+                for i in range(n_patches):
+                    start, stop = pair_offsets[i], pair_offsets[i + 1]
+                    if stop > start:
+                        d_inds[:, start:stop] = owner.pair_inds[i]
+                        d_exp[:, start:stop] = owner.pair_exp2phi[i]
 
             q_inds_dtype = np.asarray(owner.Q_inds[0]).dtype if n_patches else owner.index_dtype
             q_val_dtype = np.asarray(owner.Q_val[0]).dtype if n_patches else owner.rotation_dtype
@@ -145,6 +168,47 @@ class PairIOHandler:
             )
 
     @staticmethod
+    def _save_packed_pairs(
+        owner: "Correlation",
+        fp: "h5py.File",
+        pair_offsets: np.ndarray,
+        total_pairs: int,
+    ) -> None:
+        """Write the ``pack_host_pairs`` payload (format version 4).
+
+        The row blocks hold *global* ids, exactly as in memory, so a packed
+        file stays independent of the row space and can be sliced by patch
+        like any other.
+        """
+        n_patches = owner.n_patches
+        if n_patches:
+            block_sizes = np.stack(
+                [np.asarray(s, dtype=np.int64) for s in owner.packed_block_sizes]
+            )
+        else:
+            block_sizes = np.zeros((0, 0), dtype=np.int64)
+        block_offsets = np.zeros(n_patches + 1, dtype=np.int64)
+        block_offsets[1:] = np.cumsum(block_sizes.sum(axis=1))
+
+        d_packed = fp.create_dataset(
+            "packed_pairs", shape=(total_pairs, 4), dtype=np.uint16
+        )
+        d_blocks = fp.create_dataset(
+            "packed_block_ids",
+            shape=(int(block_offsets[-1]),),
+            dtype=owner.index_dtype,
+        )
+        for i in range(n_patches):
+            start, stop = int(pair_offsets[i]), int(pair_offsets[i + 1])
+            if stop > start:
+                d_packed[start:stop] = owner.packed_pairs[i]
+            bstart, bstop = int(block_offsets[i]), int(block_offsets[i + 1])
+            if bstop > bstart:
+                d_blocks[bstart:bstop] = owner.packed_block_ids[i]
+        fp.create_dataset("packed_block_sizes", data=block_sizes)
+        fp.create_dataset("packed_block_offsets", data=block_offsets)
+
+    @staticmethod
     def load_pairs(
         owner: "Correlation",
         filepath: str,
@@ -153,6 +217,10 @@ class PairIOHandler:
         release_host_pairs: bool = False,
     ) -> None:
         owner._invalidate_prepared_state()
+        # the file decides which representation the instance holds
+        owner.packed_pairs = None
+        owner.packed_block_ids = None
+        owner.packed_block_sizes = None
 
         with h5py.File(filepath, "r") as fp:
             version = int(fp.attrs.get("format_version", 1))
@@ -249,19 +317,25 @@ class PairIOHandler:
         p0, p1 = int(pair_offsets[start_ind]), int(pair_offsets[stop_ind])
         q0, q1 = int(q_offsets[start_ind]), int(q_offsets[stop_ind])
 
-        virtual_rows = "tc_pair_inds" in fp
-        pair_name = "tc_pair_inds" if virtual_rows else "pair_inds"
+        packed = "packed_pairs" in fp
+        virtual_rows = "tc_pair_inds" in fp or (packed and "treecode" in fp)
+        pair_name = "tc_pair_inds" if "tc_pair_inds" in fp else "pair_inds"
         q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
 
         # Bulk reads straight into the final flat arrays
-        pair_inds_flat = fp[pair_name][:, p0:p1].astype(owner.index_dtype, copy=False)
-        if "treecode" in fp:
-            pair_inds_flat = PairIOHandler._load_treecode(
-                owner, fp["treecode"], pair_inds_flat, start_ind, stop_ind
+        if packed:
+            PairIOHandler._load_packed_pairs(owner, fp, start_ind, stop_ind)
+        else:
+            pair_inds_flat = fp[pair_name][:, p0:p1].astype(
+                owner.index_dtype, copy=False
             )
-        pair_exp2phi_flat = fp["pair_exp2phi"][:, p0:p1].astype(
-            owner.rotation_complex_dtype, copy=False
-        )
+            if "treecode" in fp:
+                pair_inds_flat = PairIOHandler._load_treecode(
+                    owner, fp["treecode"], pair_inds_flat, start_ind, stop_ind
+                )
+            pair_exp2phi_flat = fp["pair_exp2phi"][:, p0:p1].astype(
+                owner.rotation_complex_dtype, copy=False
+            )
         bins_arr = fp["bins"][start_ind:stop_ind].astype(owner.index_dtype, copy=False)
 
         q_inds_flat = fp[q_name][q0:q1].astype(owner.index_dtype, copy=False)
@@ -274,8 +348,12 @@ class PairIOHandler:
 
         # Per-patch host lists are zero-copy views into the flat arrays,
         # keeping the same object model as the legacy path.
-        owner.pair_inds = []
-        owner.pair_exp2phi = []
+        if packed:
+            owner.pair_inds = None
+            owner.pair_exp2phi = None
+        else:
+            owner.pair_inds = []
+            owner.pair_exp2phi = []
         owner.bins = []
         owner.Q_inds = []
         owner.Q_cos = []
@@ -285,8 +363,9 @@ class PairIOHandler:
         for i in range(start_ind, stop_ind):
             ps, pe = int(pair_offsets[i]) - p0, int(pair_offsets[i + 1]) - p0
             qs, qe = int(q_offsets[i]) - q0, int(q_offsets[i + 1]) - q0
-            owner.pair_inds.append(pair_inds_flat[:, ps:pe])
-            owner.pair_exp2phi.append(pair_exp2phi_flat[:, ps:pe])
+            if not packed:
+                owner.pair_inds.append(pair_inds_flat[:, ps:pe])
+                owner.pair_exp2phi.append(pair_exp2phi_flat[:, ps:pe])
             owner.bins.append(bins_arr[i - start_ind])
             owner.Q_inds.append(q_inds_flat[qs:qe])
             owner.Q_cos.append(q_cos_flat[qs:qe])
@@ -305,6 +384,41 @@ class PairIOHandler:
         owner.Q_offsets = local_q_offsets
         owner.Q_patch_area_flat = np.asarray(q_patch_area, dtype=owner.rotation_dtype)
         owner._invalidate_aperture_device_buffers()
+
+    @staticmethod
+    def _load_packed_pairs(
+        owner: "Correlation", fp: "h5py.File", start_ind: int, stop_ind: int
+    ) -> None:
+        """Read the packed payload of patches ``start_ind:stop_ind``.
+
+        Only the row blocks carry global ids, so the treecode renumbering of
+        a sliced load applies to them instead of to the pairs.
+        """
+        pair_offsets = fp["pair_offsets"][:]
+        block_offsets = fp["packed_block_offsets"][:]
+        p0, p1 = int(pair_offsets[start_ind]), int(pair_offsets[stop_ind])
+        b0, b1 = int(block_offsets[start_ind]), int(block_offsets[stop_ind])
+
+        packed_flat = fp["packed_pairs"][p0:p1]
+        block_ids_flat = fp["packed_block_ids"][b0:b1].astype(
+            owner.index_dtype, copy=False
+        )
+        block_sizes = fp["packed_block_sizes"][start_ind:stop_ind].astype(np.int64)
+        if "treecode" in fp:
+            block_ids_flat = PairIOHandler._load_treecode(
+                owner, fp["treecode"], block_ids_flat, start_ind, stop_ind
+            )
+
+        owner.pack_host_pairs = True
+        owner.packed_pairs = []
+        owner.packed_block_ids = []
+        owner.packed_block_sizes = []
+        for i in range(start_ind, stop_ind):
+            ps, pe = int(pair_offsets[i]) - p0, int(pair_offsets[i + 1]) - p0
+            bs, be = int(block_offsets[i]) - b0, int(block_offsets[i + 1]) - b0
+            owner.packed_pairs.append(packed_flat[ps:pe])
+            owner.packed_block_ids.append(block_ids_flat[bs:be])
+            owner.packed_block_sizes.append(block_sizes[i - start_ind])
 
     @staticmethod
     def _load_treecode(

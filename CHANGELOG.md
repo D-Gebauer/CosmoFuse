@@ -13,6 +13,18 @@
   file; `save_pairs()` is not supported on a group (write it from a
   single-device instance).
 
+- **`pack_host_pairs=`** (opt-in, default `False`): applies the payload
+  packing of `pack_pairs` already at pair-finding time, so the host arrays
+  and the pair file hold 8 instead of 24 bytes per pair as well
+  (`pair_inds` / `pair_exp2phi` become `None`; the payload is in
+  `packed_pairs`). The row blocks store global ids, so a packed file is
+  still mask-independent and still slices by patch. Independent of
+  `pack_pairs`, and bitwise identical on the device to packing inside
+  `prepare()`. The price: the geometry is quantised everywhere, so the file
+  is no longer exact and cannot be turned back into one. Such files are
+  written as **format version 4** and carry a `packed_pairs` attribute;
+  earlier CosmoFuse versions reject them instead of misreading them.
+
 ### Changed
 - `PinnedMapPipeline` is now **`MapLoader`** and `RowSpaceMapLoader` is now
   **`MapFileLoader`**. The old names still work and warn.

@@ -20,6 +20,7 @@ import numpy as np
 from tqdm import trange
 
 from .correlation_helpers import Q_crittenden
+from .packing import pack_patch
 from .treecode import (
     PatchCells,
     TreecodeGeometry,
@@ -293,7 +294,49 @@ class PairGeometry:
         owner.pair_exp2phi = pair_exp2phi
         owner.bins = bins
         owner._treecode = treecode
+        owner.packed_pairs = None
+        owner.packed_block_ids = None
+        owner.packed_block_sizes = None
+        if getattr(owner, "pack_host_pairs", False):
+            PairGeometry.pack_host_pairs(owner)
         owner._invalidate_prepared_state()
+
+    @staticmethod
+    def pack_host_pairs(owner: "Correlation") -> None:
+        """Replace the exact host pair geometry by its packed form (8 B/pair).
+
+        Packing runs on the *global ids* rather than the device rows used in
+        :meth:`Correlation.prepare`; both orderings agree (``map_inds`` is
+        ascending and virtual rows are appended in id order), so the packed
+        payload is identical and the row blocks stay mask-independent -- a
+        packed pair file can still be loaded into any matching mask.  Each
+        patch is released as soon as it is packed, so the exact and the
+        packed geometry never coexist for the whole catalogue.
+        """
+        groups = level_groups(owner.level_nside)
+        packed_pairs: List[np.ndarray] = []
+        block_ids: List[np.ndarray] = []
+        block_sizes: List[np.ndarray] = []
+        empty = np.zeros(0, dtype=owner.index_dtype)
+        for i in range(owner.n_patches):
+            packed_i, blocks, _ = pack_patch(
+                owner.pair_inds[i], owner.pair_exp2phi[i], owner.bins[i], groups
+            )
+            packed_pairs.append(packed_i)
+            block_ids.append(
+                np.concatenate(blocks).astype(owner.index_dtype, copy=False)
+                if blocks
+                else empty
+            )
+            block_sizes.append(np.array([b.size for b in blocks], dtype=np.int64))
+            # free the exact arrays of this patch before packing the next
+            owner.pair_inds[i] = None
+            owner.pair_exp2phi[i] = None
+        owner.packed_pairs = packed_pairs
+        owner.packed_block_ids = block_ids
+        owner.packed_block_sizes = block_sizes
+        owner.pair_inds = None
+        owner.pair_exp2phi = None
 
     @staticmethod
     def get_pairs_patch_M_a(
