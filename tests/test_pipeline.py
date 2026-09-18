@@ -1,4 +1,4 @@
-"""Tests for the PinnedMapPipeline double-buffered upload helper."""
+"""Tests for the MapLoader double-buffered upload helper."""
 
 import unittest
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from CosmoFuse.backend import get_backend
-from CosmoFuse.pipeline import PinnedMapPipeline
+from CosmoFuse.pipeline import MapLoader
 
 
 class TestPinnedMapPipelineCPU(unittest.TestCase):
@@ -22,7 +22,7 @@ class TestPinnedMapPipelineCPU(unittest.TestCase):
             for _ in range(3)
         ]
 
-        pipe = PinnedMapPipeline(corr, shapes)
+        pipe = MapLoader(corr, shapes)
         dev = pipe.wait(pipe.stage(maps[0]))
         np.testing.assert_array_equal(dev["shear"], maps[0]["shear"])
         np.testing.assert_array_equal(dev["w"], maps[0]["w"])
@@ -43,7 +43,7 @@ class TestPinnedMapPipelineCPU(unittest.TestCase):
 
     def test_dtype_override(self):
         corr = self._make_corr_stub()
-        pipe = PinnedMapPipeline(corr, {"w": (4,)}, dtype=np.float32)
+        pipe = MapLoader(corr, {"w": (4,)}, dtype=np.float32)
         dev = pipe.wait(pipe.stage({"w": np.arange(4, dtype=np.float64)}))
         self.assertEqual(dev["w"].dtype, np.float32)
         np.testing.assert_array_equal(dev["w"], np.arange(4, dtype=np.float32))
@@ -127,7 +127,7 @@ class TestPinnedMapPipelineStreamContract(unittest.TestCase):
 
     def test_uploads_use_stream_and_wait_on_swap(self):
         corr, upload_stream, events = self._make_fake_gpu_corr()
-        pipe = PinnedMapPipeline(corr, {"w": (3,)})
+        pipe = MapLoader(corr, {"w": (3,)})
 
         token = pipe.stage({"w": np.array([1.0, 2.0, 3.0])})
         # One .set() inside the stream context, one recorded copy event.

@@ -22,7 +22,13 @@ from .correlation_helpers import (
     zeta_g_t,
 )
 from .correlations import Correlation
-from .pipeline import PinnedMapPipeline, RowSpaceMapLoader
+from .multi_device import MultiDeviceCorrelation
+from .pipeline import (
+    MapFileLoader,
+    MapLoader,
+    PinnedMapPipeline,
+    RowSpaceMapLoader,
+)
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 
@@ -33,8 +39,11 @@ __email__ = "git@gebauer.ai"
 __all__ = [
     "Correlation",
     "DEFAULT_RESOLUTION_FACTOR",
-    "PinnedMapPipeline",
-    "RowSpaceMapLoader",
+    "MapLoader",
+    "MapFileLoader",
+    "MultiDeviceCorrelation",
+    "PinnedMapPipeline",   # deprecated alias of MapLoader
+    "RowSpaceMapLoader",   # deprecated alias of MapFileLoader
     "Q_T",
     "Q_crittenden",
     "Q_schneider",

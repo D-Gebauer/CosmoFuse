@@ -2,7 +2,31 @@
 
 ## Unreleased
 
+### Added
+- **Multi-GPU by patch range.** `Correlation(..., device=[0, 1, ...])` returns a
+  `MultiDeviceCorrelation`: one `Correlation` per device over a contiguous
+  range of patches, measurement calls run one thread per device and the
+  per-patch outputs are concatenated in patch order. Results are bitwise
+  identical to a single-device run, and device memory per GPU scales as
+  `n_patches / n_devices`. A single device stays the default and is
+  unaffected. `load_pairs()` gives each device its own slice of one pair
+  file; `save_pairs()` is not supported on a group (write it from a
+  single-device instance).
+
+### Changed
+- `PinnedMapPipeline` is now **`MapLoader`** and `RowSpaceMapLoader` is now
+  **`MapFileLoader`**. The old names still work and warn.
+
 ### Performance
+- **Pair search: no more sorting.** The search kernel counted accepted pairs
+  per row and the result was then put in angular-bin order with an `argsort`
+  plus seven fancy-indexed gathers — at nside 2048 that was 97 % of the
+  per-patch preprocessing time and ~600 MB of temporaries per patch. The
+  kernel now counts per (row, bin) and writes the pairs already grouped by
+  bin, in exactly the same order as the stable sort produced. Preprocessing
+  is **3.3× faster at nside 512** (16.4 → 5.0 ms/patch) and **6.6× faster at
+  nside 2048** (9.1 → 1.4 s/patch, i.e. ~2.3 h → ~21 min for 917 patches).
+  Pair output is unchanged bitwise.
 - **Batched normalisation of the tomographic wrappers.** `vectorized_shear_shear`,
   `vectorized_density_density`, `vectorized_density_shear` and the device path
   of `get_3x2pt_tomo` normalised one tomographic combination at a time, which

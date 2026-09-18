@@ -238,6 +238,7 @@ class TestCorrelation(unittest.TestCase):
             np.array([], dtype=np.float64),
             np.array([], dtype=np.float64),
             np.array([], dtype=np.float64),
+            np.zeros(self.nbins, dtype=np.int64),
         )
 
         with patch.object(corr, "_compute_pairs_kernel", return_value=empty_out) as kernel_mock:
@@ -268,6 +269,7 @@ class TestCorrelation(unittest.TestCase):
             exp2phi1_imag,
             exp2phi2_real,
             exp2phi2_imag,
+            _bin_counts,
         ) = kernel_fn(
             patch_inds,
             ra,
@@ -306,7 +308,7 @@ class TestCorrelation(unittest.TestCase):
                 binedges,
             )
 
-        self.assertEqual(len(outputs), 7)
+        self.assertEqual(len(outputs), 8)
 
     def test_compute_pairs_numba_pyfunc_clamps_lower(self):
         """Test py_func lower clamp branch for cos(theta) < -1."""
@@ -331,7 +333,7 @@ class TestCorrelation(unittest.TestCase):
                 binedges,
             )
 
-        self.assertEqual(len(outputs), 7)
+        self.assertEqual(len(outputs), 8)
 
     def test_compute_pairs_numba_pyfunc_r2_c1_zero_fallback(self):
         """Trigger fallback branch where R2_C1 == 0 and default exp(2i phi1) is used."""
@@ -360,6 +362,7 @@ class TestCorrelation(unittest.TestCase):
                 exp2phi1_imag,
                 _exp2phi2_real,
                 _exp2phi2_imag,
+                _bin_counts,
             ) = kernel_fn(
                 patch_inds,
                 ra,
@@ -399,6 +402,7 @@ class TestCorrelation(unittest.TestCase):
                 _exp2phi1_imag,
                 exp2phi2_real,
                 exp2phi2_imag,
+                _bin_counts,
             ) = kernel_fn(
                 patch_inds,
                 ra,

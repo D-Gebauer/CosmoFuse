@@ -94,6 +94,7 @@ def _compute_pairs_impl(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
 ]:
     # Two-pass structure so the O(npts^2) work parallelises with prange:
     # pass 1 counts accepted pairs per row i (cheap: dot product + bin
@@ -116,8 +117,14 @@ def _compute_pairs_impl(
     cos_min = cos_binedges[nedges - 1]
 
     nrows = npts - 1 if npts > 1 else 0
+    nbins = nedges - 1
 
-    counts = np.zeros(npts, dtype=np.int64)
+    # Pass 1 counts accepted pairs per (row, angular bin).  Counting per bin
+    # (instead of per row only) lets pass 2 write the pairs *already grouped
+    # by bin*: the measurement kernels want them in bin order, and an
+    # O(npairs log npairs) argsort plus seven fancy-indexed gathers over
+    # ~10^8 pairs used to dominate preprocessing at nside 2048.
+    counts = np.zeros((npts, nbins), dtype=np.int64)
     for m in prange(nrows):
         # branchless light/heavy row interleave: even m -> row m//2,
         # odd m -> row nrows-1-m//2 (balances the triangular loop)
@@ -127,7 +134,6 @@ def _compute_pairs_impl(
         x1 = x[i]
         y1 = y[i]
         z1 = z[i]
-        row_count = 0
         for j in range(i + 1, npts):
             cos_theta = x1 * x[j] + y1 * y[j] + z1 * z[j]
             if cos_theta >= cos_max or cos_theta <= cos_min:
@@ -144,14 +150,28 @@ def _compute_pairs_impl(
                 else:
                     hi = mid
             b = lo - 1
-            if b >= 0 and b < nedges - 1 and cos_theta > cos_binedges[b + 1]:
-                row_count += 1
-        counts[i] = row_count
+            if b >= 0 and b < nbins and cos_theta > cos_binedges[b + 1]:
+                counts[i, b] += 1
 
-    offsets = np.zeros(npts + 1, dtype=np.int64)
-    for i in range(npts):
-        offsets[i + 1] = offsets[i] + counts[i]
-    total = offsets[npts]
+    # Per-bin totals, then the write cursor of every (row, bin): bins in
+    # order, and inside a bin the rows in ascending order -- exactly the
+    # order a stable sort by bin index produced.
+    bin_counts = np.zeros(nbins, dtype=np.int64)
+    for b in range(nbins):
+        acc = 0
+        for i in range(npts):
+            acc += counts[i, b]
+        bin_counts[b] = acc
+
+    cursor = np.zeros((npts, nbins), dtype=np.int64)
+    running = 0
+    for b in range(nbins):
+        acc = running
+        for i in range(npts):
+            cursor[i, b] = acc
+            acc += counts[i, b]
+        running = acc
+    total = running
 
     inds_a = np.empty(total, dtype=patch_inds.dtype)
     inds_b = np.empty(total, dtype=patch_inds.dtype)
@@ -168,7 +188,6 @@ def _compute_pairs_impl(
         x1 = x[i]
         y1 = y[i]
         z1 = z[i]
-        out_idx = offsets[i]
 
         for j in range(i + 1, npts):
             x2 = x[j]
@@ -188,10 +207,12 @@ def _compute_pairs_impl(
                 else:
                     hi = mid
             bin_idx = lo - 1
-            if bin_idx < 0 or bin_idx >= nedges - 1 or not (
+            if bin_idx < 0 or bin_idx >= nbins or not (
                 cos_theta > cos_binedges[bin_idx + 1]
             ):
                 continue
+            out_idx = cursor[i, bin_idx]
+            cursor[i, bin_idx] = out_idx + 1
 
             # Compute C1 sine and cosine terms (unnormalized)
             sinC1 = x1 * y2 - x2 * y1
@@ -241,7 +262,6 @@ def _compute_pairs_impl(
             exp2phi1_imag[out_idx] = s1
             exp2phi2_real[out_idx] = c2
             exp2phi2_imag[out_idx] = s2
-            out_idx += 1
 
     return (
         inds_a,
@@ -251,6 +271,7 @@ def _compute_pairs_impl(
         exp2phi1_imag,
         exp2phi2_real,
         exp2phi2_imag,
+        bin_counts,
     )
 
 
@@ -314,6 +335,25 @@ class Correlation:
         rotation_precision: Float precision for rotation/filter values.
     """
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        """``device=[0, 1, ...]`` builds a patch-parallel multi-GPU group.
+
+        A single device (the default) is unaffected: the instance returned
+        is an ordinary :class:`Correlation`.
+        """
+        device = kwargs.get("device", args[10] if len(args) > 10 else None)
+        if isinstance(device, (list, tuple, set)):
+            from .multi_device import MultiDeviceCorrelation
+
+            devices = list(device)
+            kwargs.pop("device", None)
+            if len(args) > 10:
+                args = args[:10]
+            if len(devices) == 1:  # a one-element list is just that device
+                return super().__new__(cls)
+            return MultiDeviceCorrelation(*args, devices=devices, **kwargs)
+        return super().__new__(cls)
+
     def __init__(
         self,
         nside: int,
@@ -326,7 +366,7 @@ class Correlation:
         theta_Q: float = 90,
         mask: Optional[np.ndarray] = None,
         fastmath: bool = True,
-        device: Union[str, int] = "auto",
+        device: Union[str, int, Sequence[int]] = "auto",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
         accumulation_precision: str = "same",
@@ -518,6 +558,10 @@ class Correlation:
         self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
         self.map_mask[self.map_inds] = True
 
+        if isinstance(device, (list, tuple, set)):
+            # a single-element device list is just that device; several
+            # devices are handled by MultiDeviceCorrelation (see __new__)
+            device = list(device)[0]
         self.backend = get_backend(device)
         self.device = device
         self.compute_context = ComputeContext()

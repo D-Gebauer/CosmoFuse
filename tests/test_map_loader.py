@@ -8,7 +8,7 @@ import unittest
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation, RowSpaceMapLoader
+from CosmoFuse import Correlation, MapFileLoader
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -26,7 +26,7 @@ def make_corr():
     return corr, mask
 
 
-class TestRowSpaceMapLoader(unittest.TestCase):
+class TestMapFileLoader(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.corr, cls.mask = make_corr()
@@ -53,7 +53,7 @@ class TestRowSpaceMapLoader(unittest.TestCase):
             with lock:
                 active["now"] -= 1
 
-        loader = RowSpaceMapLoader(
+        loader = MapFileLoader(
             self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
             read_fn=read, n_slots=n_slots, n_readers=n_readers,
             row_pix_hash=self.corr.row_pix_hash,
@@ -103,7 +103,7 @@ class TestRowSpaceMapLoader(unittest.TestCase):
                     time.sleep(float(jitter.uniform(0, 0.002)))
                     out["m"][...] = archive[source]
 
-                loader = RowSpaceMapLoader(
+                loader = MapFileLoader(
                     corr, {"m": (3, 50)}, range(nmaps), read, n_slots=n_slots, n_readers=n_readers)
                 seen = []
                 for _k, dev in loader:
@@ -113,11 +113,11 @@ class TestRowSpaceMapLoader(unittest.TestCase):
                 for got, want in zip(seen, archive):
                     self.assertTrue(np.array_equal(got, want))
 
-    def test_pinned_map_pipeline_worst_case_lag(self):
-        """Same hazard in the two-slot PinnedMapPipeline."""
+    def test_map_loader_worst_case_lag(self):
+        """Same hazard in the two-slot MapLoader."""
         from types import SimpleNamespace
 
-        from CosmoFuse import PinnedMapPipeline
+        from CosmoFuse import MapLoader
 
         from . import cuda_stream_sim as sim
 
@@ -127,7 +127,7 @@ class TestRowSpaceMapLoader(unittest.TestCase):
             with self.subTest(sched_seed=sched_seed):
                 sim.seed(sched_seed)
                 corr = SimpleNamespace(backend=sim.SimBackend(), map_dtype=np.dtype(np.float64))
-                pipe = PinnedMapPipeline(corr, {"m": (3, 20)})
+                pipe = MapLoader(corr, {"m": (3, 20)})
                 seen = []
                 dev = pipe.wait(pipe.stage({"m": archive[0]}))
                 for k in range(len(archive)):
@@ -145,7 +145,7 @@ class TestRowSpaceMapLoader(unittest.TestCase):
             out["shear"][...] = self.archive[source]
 
         before = threading.active_count()
-        loader = RowSpaceMapLoader(
+        loader = MapFileLoader(
             self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
             read_fn=read, n_slots=3, n_readers=2)
         with self.assertRaisesRegex(OSError, "corrupt map file"):
@@ -155,7 +155,7 @@ class TestRowSpaceMapLoader(unittest.TestCase):
 
     def test_early_exit_stops_threads(self):
         before = threading.active_count()
-        loader = RowSpaceMapLoader(
+        loader = MapFileLoader(
             self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
             read_fn=lambda s, out: out["shear"].__setitem__(Ellipsis, self.archive[s]),
             n_slots=4, n_readers=3)
@@ -170,11 +170,34 @@ class TestRowSpaceMapLoader(unittest.TestCase):
         other = Correlation(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
         self.assertNotEqual(other.row_pix_hash, self.corr.row_pix_hash)
         with self.assertRaisesRegex(ValueError, "row_pix hash mismatch"):
-            RowSpaceMapLoader(
+            MapFileLoader(
                 self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=[0],
                 read_fn=lambda s, o: None, row_pix_hash=other.row_pix_hash)
         with self.assertRaises(ValueError):
-            RowSpaceMapLoader(self.corr, {}, sources=[], read_fn=None, n_slots=1)
+            MapFileLoader(self.corr, {}, sources=[], read_fn=None, n_slots=1)
+
+    def test_deprecated_aliases_still_work(self):
+        """The 5.0 names keep working, with a DeprecationWarning."""
+        from types import SimpleNamespace
+
+        from CosmoFuse import (
+            MapFileLoader as NewFile,
+            MapLoader as New,
+            PinnedMapPipeline,
+            RowSpaceMapLoader,
+        )
+
+        self.assertTrue(issubclass(PinnedMapPipeline, New))
+        self.assertTrue(issubclass(RowSpaceMapLoader, NewFile))
+        corr = SimpleNamespace(
+            backend=self.corr.backend, map_dtype=np.dtype(np.float64)
+        )
+        with self.assertWarnsRegex(DeprecationWarning, "PinnedMapPipeline"):
+            PinnedMapPipeline(corr, {"m": (3, 20)})
+        with self.assertWarnsRegex(DeprecationWarning, "RowSpaceMapLoader"):
+            RowSpaceMapLoader(
+                self.corr, {"m": (3, 20)}, sources=[], read_fn=lambda s, o: None
+            )
 
     def test_to_row_space(self):
         full = np.zeros((2, 2, NPIX))

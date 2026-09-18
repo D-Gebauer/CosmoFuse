@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple, Union
 import numpy as np
 
 
-class PinnedMapPipeline:
+class MapLoader:
     """Overlap map k+1 host→device transfer with map k compute.
 
     Two pinned host slots and two device slots are allocated per named
@@ -24,7 +24,7 @@ class PinnedMapPipeline:
 
     Usage::
 
-        pipe = PinnedMapPipeline(corr, {"shear": (nz, 2, npix), "w": (nz, npix)})
+        pipe = MapLoader(corr, {"shear": (nz, 2, npix), "w": (nz, npix)})
         dev = pipe.wait(pipe.stage({"shear": shear_np[0], "w": w_np[0]}))
         for k in range(nmaps):
             nxt = (
@@ -101,7 +101,7 @@ class PinnedMapPipeline:
         return self.dev[self.slot]
 
 
-class RowSpaceMapLoader:
+class MapFileLoader:
     """Ring-buffer loader: keep the GPU fed while measuring many map-sets.
 
     ``n_readers`` background threads fill a ring of ``n_slots`` *pinned* host
@@ -121,7 +121,7 @@ class RowSpaceMapLoader:
         def read(source, out):               # runs in a reader thread
             out["shear"][...] = np.load(source, mmap_mode="r")
 
-        loader = RowSpaceMapLoader(
+        loader = MapFileLoader(
             corr, {"shear": (nz, 2, corr.n_active)}, sources=files, read_fn=read)
         for k, dev in loader:
             results.append(corr.get_full_tomo_shear(dev["shear"], w, flip_g1=True))
@@ -276,3 +276,27 @@ class RowSpaceMapLoader:
                 t.join()
             if self._gpu:
                 self.backend.module.cuda.get_current_stream().synchronize()
+
+
+# Names used up to 5.0.  Kept so existing scripts keep running; they warn
+# once and will be removed in a future release.
+def _deprecated_alias(new: Any, old_name: str) -> Any:
+    import warnings
+
+    class _Alias(new):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            warnings.warn(
+                f"{old_name} was renamed to {new.__name__}; "
+                f"the old name will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            super().__init__(*args, **kwargs)
+
+    _Alias.__name__ = old_name
+    _Alias.__qualname__ = old_name
+    return _Alias
+
+
+PinnedMapPipeline = _deprecated_alias(MapLoader, "PinnedMapPipeline")
+RowSpaceMapLoader = _deprecated_alias(MapFileLoader, "RowSpaceMapLoader")

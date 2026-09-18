@@ -1,4 +1,4 @@
-"""Stage 5 gate: RowSpaceMapLoader on the A100.
+"""Stage 5 gate: MapFileLoader on the A100.
 
 (A) production nside 512: real archive files (float64 footprint cut-outs, 28
     map-sets per file) -> serial production-style loop vs loader; results must
@@ -9,7 +9,7 @@
 """
 import argparse, json, time
 import h5py, healpy as hp, numpy as np
-from CosmoFuse import Correlation, RowSpaceMapLoader
+from CosmoFuse import Correlation, MapFileLoader
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -35,7 +35,7 @@ def run(corr, shape, sources, read_fn, w, n_slots, n_readers, serial_fn):
     # serial reference loop (what a production script does today)
     t0 = time.perf_counter(); serial = [serial_fn(s) for s in sources]; sync(corr)
     t_serial = (time.perf_counter() - t0) / len(sources) * 1e3
-    loader = RowSpaceMapLoader(corr, {"shear": shape}, sources, read_fn, n_slots=n_slots,
+    loader = MapFileLoader(corr, {"shear": shape}, sources, read_fn, n_slots=n_slots,
                                n_readers=n_readers, row_pix_hash=corr.row_pix_hash)
     t0 = time.perf_counter(); got = []
     for k, dev in loader:

@@ -81,7 +81,7 @@ First create a Correlation object:
         theta_min=10, theta_max=170,        # angular range (arcminutes)
         mask=mask,                          # mask
         fastmath=False,                     # numba/cupy fastmath toggle
-        device="auto",                      # "cpu", "gpu", "auto", or GPU id
+        device="auto",                      # "cpu", "gpu", "auto", a GPU id, or a list of GPU ids
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
         accumulation_precision="float64",   # "same" / "float64"
@@ -286,20 +286,72 @@ M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
 
 **Overlapping uploads with compute (GPU)**:
 
-When measuring many maps in a loop, `PinnedMapPipeline` double-buffers the
-host→device transfers through pinned memory on a dedicated CUDA stream, so
-map k+1 uploads while map k computes (a no-op passthrough on CPU):
+On a GPU the host→device transfer of a map-set costs about as much as the
+measurement itself. Two loaders hide it behind the previous map's kernels
+(both are no-op passthroughs on CPU backends).
+
+`MapLoader` double-buffers maps that are already in host arrays:
 
 ```python
-from CosmoFuse import PinnedMapPipeline
+from CosmoFuse import MapLoader
 
-pipe = PinnedMapPipeline(correlation, {"shear": (nz, 2, npix), "w": (nz, npix)})
+pipe = MapLoader(correlation, {"shear": (nz, 2, npix), "w": (nz, npix)})
 dev = pipe.wait(pipe.stage({"shear": shear_np[0], "w": w_np[0]}))
 for k in range(nmaps):
     nxt = pipe.stage({"shear": shear_np[k + 1], "w": w_np[k + 1]}) if k + 1 < nmaps else None
     results.append(correlation.get_full_tomo_shear(dev["shear"], dev["w"]))
     dev = pipe.wait(nxt)
 ```
+
+`MapFileLoader` is for maps read from disk: `n_readers` threads fill a ring of
+`n_slots` pinned buffers straight from the source and hand the device buffers
+to you in order.
+
+```python
+from CosmoFuse import MapFileLoader
+
+def read(source, out):                    # runs in a reader thread
+    out["shear"][...] = np.load(source, mmap_mode="r")
+
+loader = MapFileLoader(
+    correlation, {"shear": (nz, 2, correlation.n_active)},
+    sources=files, read_fn=read, n_slots=8, n_readers=4,
+    row_pix_hash=correlation.row_pix_hash,   # optional archive/mask check
+)
+for k, dev in loader:
+    results.append(correlation.get_full_tomo_shear(dev["shear"], w))
+```
+
+Store the maps in row space (`correlation.to_row_space(full_sky_maps)`, done
+once when the archive is written) so no gather is needed per map. Fixed weight
+maps should be passed as a read-only array (`w.flags.writeable = False`), which
+lets CosmoFuse upload and degrade them once instead of once per map. Use enough
+readers that reading keeps up with the measurement; the device arrays handed
+out are only valid until the next iteration.
+
+Note that on GPU backends `warmup()` does nothing — the CUDA kernels are
+compiled on the first measurement call, so make one throwaway call before
+timing a loop.
+
+(Up to 5.0 these classes were called `PinnedMapPipeline` and
+`RowSpaceMapLoader`; the old names still work but warn.)
+
+**Several GPUs**:
+
+Passing a list of GPU ids splits the patches across those devices — one
+`Correlation` per GPU, measured in parallel, outputs concatenated in patch
+order. The result is identical to a single-device run, and each GPU holds only
+its share of the pair geometry, which is how a geometry too large for one card
+is measured. A single device remains the default.
+
+```python
+correlation = Correlation(nside, phi_center, theta_center, device=[0, 1], ...)
+correlation.preprocess()          # or load_pairs(path): each device takes its own slice
+M_a, xi_p, xi_m = correlation.get_full_tomo_shear(shear_maps, weights)
+```
+
+Write pair files from a single-device instance; a multi-device group only
+reads them.
 
 ## Calculating i3PCFs
 
