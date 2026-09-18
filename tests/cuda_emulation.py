@@ -528,20 +528,32 @@ def _emulate_ds(params, grid, args):
             den_flat[out_idx] = np.sum(w_ab, dtype=acc) + np.sum(w_ba, dtype=acc)
 
 
-def _check_planar_stride(arr, stride):
-    actual = arr.strides[0] // arr.itemsize
-    if arr.shape[0] > 1 and int(stride) != actual:
+def _check_planar_stride(arr, stride, elem_stride):
+    """Both element strides the aperture kernels are given must be the
+    ones the view actually has -- the kernel does its own pointer
+    arithmetic, so a wrong stride would silently read the wrong pixels."""
+    bin_actual = arr.strides[0] // arr.itemsize
+    row_actual = arr.strides[1] // arr.itemsize
+    if arr.shape[0] > 1 and int(stride) != bin_actual:
         raise AssertionError(
-            f"stride contract violated: passed {int(stride)}, view has {actual}"
+            f"bin stride contract violated: passed {int(stride)}, "
+            f"view has {bin_actual}"
+        )
+    if arr.shape[1] > 1 and int(elem_stride) != row_actual:
+        raise AssertionError(
+            f"row stride contract violated: passed {int(elem_stride)}, "
+            f"view has {row_actual}"
         )
 
 
 def _emulate_aperture_shear_tomo(params, grid, args):
     """aperture_tomo.cu :: gpu_aperture_shear_tomo<T, QT>."""
-    (g1, g2, g_stride, weights, w_stride, q_inds, q_cos, q_sin, q_val,
-     q_offsets, q_patch_area, out_num, out_den, npatches, ntomo) = args
-    _check_planar_stride(g1, g_stride)
-    _check_planar_stride(weights, w_stride)
+    (g1, g2, g_stride, g_elem, weights, w_stride, w_elem, q_inds, q_cos,
+     q_sin, q_val, q_offsets, q_patch_area, out_num, out_den, npatches,
+     ntomo) = args
+    _check_planar_stride(g1, g_stride, g_elem)
+    _check_planar_stride(g2, g_stride, g_elem)
+    _check_planar_stride(weights, w_stride, w_elem)
     npatches = int(npatches)
     ntomo = int(ntomo)
 
@@ -566,10 +578,10 @@ def _emulate_aperture_shear_tomo(params, grid, args):
 
 def _emulate_aperture_density_tomo(params, grid, args):
     """aperture_tomo.cu :: gpu_aperture_density_tomo<T, QT>."""
-    (values, v_stride, weights, w_stride, q_inds, q_val, q_offsets,
-     q_patch_area, out_num, out_den, npatches, ntomo) = args
-    _check_planar_stride(values, v_stride)
-    _check_planar_stride(weights, w_stride)
+    (values, v_stride, v_elem, weights, w_stride, w_elem, q_inds, q_val,
+     q_offsets, q_patch_area, out_num, out_den, npatches, ntomo) = args
+    _check_planar_stride(values, v_stride, v_elem)
+    _check_planar_stride(weights, w_stride, w_elem)
     npatches = int(npatches)
     ntomo = int(ntomo)
 
@@ -659,24 +671,35 @@ def _emulate_fused_aperture(params, grid, args):
 
 
 def _emulate_degrade_level(params, grid, args):
-    """degrade_rows.cu :: gpu_degrade_level<TSRC, ACC, NVAL, WEIGHTED>.
+    """degrade_rows.cu :: gpu_degrade_level<TSRC, ACC, NVAL, WEIGHTED, SEG>.
 
-    One warp per (cell, lead); the emulator does the same flat gid ->
+    SEG lanes per (cell, lead); the emulator does the same flat gid ->
     (cell, lead) split and the same per-cell gather, summing with np.sum
-    instead of the shuffle tree (roundoff-level difference only).
+    instead of the shuffle tree (roundoff-level difference only).  Every
+    buffer is addressed by the kernel's four element strides,
+
+        offset(lead, k, row) = base + lead*lead_s + k*comp_s + row*row_s
+
+    so the emulator also checks the SoA / interleaved / AoS layouts.
     """
     n_val = int(params[2])
     weighted = str(params[3]).lower() == "true"
     seg = int(params[4])
-    (indptr, indices, w_src, w_src_stride, w_src_base,
-     v_src, v_src_stride, v_src_base,
-     w_dst, w_dst_stride, w_dst_base,
-     v_dst, v_dst_stride, v_dst_base, n_cells, n_lead) = args
+    (indptr, indices,
+     w_src, w_src_base, w_src_lead, w_src_row,
+     v_src, v_src_base, v_src_lead, v_src_comp, v_src_row,
+     w_dst, w_dst_base, w_dst_lead, w_dst_row,
+     v_dst, v_dst_base, v_dst_lead, v_dst_comp, v_dst_row,
+     n_cells, n_lead) = args
     n_cells, n_lead = int(n_cells), int(n_lead)
-    w_src_stride, w_src_base = int(w_src_stride), int(w_src_base)
-    v_src_stride, v_src_base = int(v_src_stride), int(v_src_base)
-    w_dst_stride, w_dst_base = int(w_dst_stride), int(w_dst_base)
-    v_dst_stride, v_dst_base = int(v_dst_stride), int(v_dst_base)
+    w_src_base, w_src_lead, w_src_row = (
+        int(w_src_base), int(w_src_lead), int(w_src_row))
+    v_src_base, v_src_lead, v_src_comp, v_src_row = (
+        int(v_src_base), int(v_src_lead), int(v_src_comp), int(v_src_row))
+    w_dst_base, w_dst_lead, w_dst_row = (
+        int(w_dst_base), int(w_dst_lead), int(w_dst_row))
+    v_dst_base, v_dst_lead, v_dst_comp, v_dst_row = (
+        int(v_dst_base), int(v_dst_lead), int(v_dst_comp), int(v_dst_row))
 
     acc = w_dst.dtype
     wf = w_src.reshape(-1)
@@ -694,23 +717,31 @@ def _emulate_degrade_level(params, grid, args):
     for cell in range(n_cells):
         child = indices[int(indptr[cell]):int(indptr[cell + 1])].astype(np.int64)
         for lead in range(n_lead):
-            wj = wf[lead * w_src_stride + w_src_base + child].astype(acc)
-            wo[lead * w_dst_stride + w_dst_base + cell] = np.sum(wj)
+            wj = wf[w_src_base + lead * w_src_lead + child * w_src_row].astype(acc)
+            wo[w_dst_base + lead * w_dst_lead + cell * w_dst_row] = np.sum(wj)
             for k in range(n_val):
-                row = (k * n_lead + lead) * v_src_stride + v_src_base
-                vj = vf[row + child].astype(acc)
+                row = v_src_base + lead * v_src_lead + k * v_src_comp
+                vj = vf[row + child * v_src_row].astype(acc)
                 total = np.sum(wj * vj) if weighted else np.sum(vj)
-                vo[(k * n_lead + lead) * v_dst_stride + v_dst_base + cell] = total
+                vo[v_dst_base + lead * v_dst_lead + k * v_dst_comp
+                   + cell * v_dst_row] = total
 
 
 def _emulate_degrade_finalize(params, grid, args):
     """degrade_rows.cu :: gpu_degrade_finalize<T, ACC, NVAL>."""
     n_val = int(params[2])
-    (w_app, w_app_stride, v_app, v_app_stride, w_rows, v_rows,
-     n_rows, dst_base, n_lead, lo, hi) = args
-    w_app_stride, v_app_stride = int(w_app_stride), int(v_app_stride)
-    n_rows, dst_base = int(n_rows), int(dst_base)
+    (w_app, w_app_lead, v_app, v_app_lead, v_app_comp,
+     w_rows, w_rows_base, w_rows_lead, w_rows_row,
+     v_rows, v_rows_base, v_rows_lead, v_rows_comp, v_rows_row,
+     n_lead, lo, hi, row_inner) = args
+    w_app_lead = int(w_app_lead)
+    v_app_lead, v_app_comp = int(v_app_lead), int(v_app_comp)
+    w_rows_base, w_rows_lead, w_rows_row = (
+        int(w_rows_base), int(w_rows_lead), int(w_rows_row))
+    v_rows_base, v_rows_lead, v_rows_comp, v_rows_row = (
+        int(v_rows_base), int(v_rows_lead), int(v_rows_comp), int(v_rows_row))
     n_lead, lo, hi = int(n_lead), int(lo), int(hi)
+    del row_inner  # only decides which index runs fastest on the device
 
     wa = w_app.reshape(-1)
     va = v_app.reshape(-1)
@@ -720,14 +751,13 @@ def _emulate_degrade_finalize(params, grid, args):
 
     for lead in range(n_lead):
         for r in range(lo, hi):
-            w = wa[lead * w_app_stride + r]
-            wr[lead * n_rows + dst_base + r] = out_dtype.type(w)
+            w = wa[lead * w_app_lead + r]
+            wr[w_rows_base + lead * w_rows_lead + r * w_rows_row] = out_dtype.type(w)
             inv = (1.0 / w) if w != 0 else 0.0
             for k in range(n_val):
-                sv = va[(k * n_lead + lead) * v_app_stride + r]
-                vr[(k * n_lead + lead) * n_rows + dst_base + r] = out_dtype.type(
-                    sv * inv
-                )
+                sv = va[lead * v_app_lead + k * v_app_comp + r]
+                vr[v_rows_base + lead * v_rows_lead + k * v_rows_comp
+                   + r * v_rows_row] = out_dtype.type(sv * inv)
 
 
 _KERNEL_EMULATORS = {

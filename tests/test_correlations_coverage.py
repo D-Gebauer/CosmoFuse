@@ -971,9 +971,11 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            shear_signs=None,
             _weights_fingerprint_sources=None,
         ):
             captured["shear"] = np.array(shear_arg, copy=True)
+            captured["signs"] = shear_signs
             return np.zeros((4, corr.n_patches, corr.nbins), dtype=np.float64)
 
         with patch.object(
@@ -990,9 +992,13 @@ class TestCorrelationCoverage(unittest.TestCase):
                 flip_g2=True,
             )
 
+        # The flip is carried by `shear_signs` and applied inside the row
+        # expansion (free: the pixel rows are copied anyway), so the maps
+        # themselves reach the leaf untouched.
         self.assertIn("shear", captured)
-        np.testing.assert_allclose(captured["shear"][:, 0], -2.0)
-        np.testing.assert_allclose(captured["shear"][:, 1], 3.0)
+        self.assertEqual(tuple(captured["signs"]), (-1.0, -1.0))
+        np.testing.assert_allclose(captured["shear"][:, 0], 2.0)
+        np.testing.assert_allclose(captured["shear"][:, 1], -3.0)
 
     def test_vectorized_density_shear_allows_distinct_lens_and_source_tomo_bins(self):
         corr = self._make_small_cpu_corr()
@@ -1012,6 +1018,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            shear_signs=None,
             _weights_fingerprint_sources=None,
         ):
             captured["nlens"] = nlens_bins_arg
@@ -1052,6 +1059,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             nlens_bins_arg,
             nsource_bins_arg,
             ggl_bin_combinations=None,
+            shear_signs=None,
             _weights_fingerprint_sources=None,
         ):
             captured["nlens"] = nlens_bins_arg
@@ -2259,73 +2267,64 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.assertIs(inds_i, captured_inds[0][0])
             self.assertIs(inds_j, captured_inds[0][1])
 
-    def test_compute_3x2pt_tomo_fused_reuses_cached_input_staging_buffers_no_transpose(self):
+    def test_compute_3x2pt_tomo_fused_feeds_the_kernel_the_expanded_rows(self):
+        """The fused 3x2pt path hands the kernel the row expansion's own
+        AoS buffers -- there is no staging copy (and so no transpose of the
+        map-set) between the expansion and the launch."""
         corr = self._make_small_cpu_corr()
         corr.calculate_pairs_M_a()
 
-        class _NoTransposeModule:
-            int32 = np.int32
-            int64 = np.int64
-            float64 = np.float64
-
-            @staticmethod
-            def asarray(arr):
-                return np.asarray(arr)
-
-            @staticmethod
-            def ascontiguousarray(arr):
-                return np.ascontiguousarray(arr)
-
-            @staticmethod
-            def transpose(_arr, _axes=None):
-                raise AssertionError("transpose should not be called in fused 3x2pt path")
-
-        original_module = corr.backend.module
-
-        captured_density_buffers = []
-        captured_shear_buffers = []
+        captured = []
 
         def launched_kernel(*args):
-            captured_density_buffers.append(args[0])
-            captured_shear_buffers.append(args[1])
+            captured.append(args[:4])
             return True
+
+        expanded = {}
+        real_aos = corr._expand_rows_aos
+        real_shear = corr._expand_shear_rows
+
+        def spy_aos(values, weights, blocks="all", signs=None):
+            out = real_aos(values, weights, blocks, signs)
+            expanded.setdefault("density", out)
+            return out
+
+        def spy_shear(shear, weights, blocks="all", signs=None, layout="soa"):
+            out = real_shear(shear, weights, blocks, signs, layout)
+            if layout == "aos":
+                expanded.setdefault("shear", out)
+            return out
 
         restore = self._fake_gpu_3x2pt(corr, launched_kernel)
         try:
-            corr.backend.module = _NoTransposeModule
+            corr._expand_rows_aos = spy_aos
+            corr._expand_shear_rows = spy_shear
             corr.prepare()
 
-            density_maps = np.ones((1, 12), dtype=np.float64)
-            shear_maps = np.ones((1, 2, 12), dtype=np.float64)
-            density_w = np.ones((1, 12), dtype=np.float64)
-            shear_w = np.ones((1, 12), dtype=np.float64)
-
             corr._compute_3x2pt_tomo_fused(
-                shear_maps=shear_maps,
-                density_maps=density_maps,
-                shear_weights=shear_w,
-                density_weights=density_w,
-                return_device=False,
-            )
-            density_buf_first = corr.compute_context.fused_density_soa
-            shear_buf_first = corr.compute_context.fused_shear_soa
-
-            corr._compute_3x2pt_tomo_fused(
-                shear_maps=shear_maps,
-                density_maps=density_maps,
-                shear_weights=shear_w,
-                density_weights=density_w,
+                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+                density_maps=np.ones((1, 12), dtype=np.float64),
+                shear_weights=np.ones((1, 12), dtype=np.float64),
+                density_weights=np.ones((1, 12), dtype=np.float64),
                 return_device=False,
             )
         finally:
             restore()
-            corr.backend.module = original_module
+            del corr._expand_rows_aos
+            del corr._expand_shear_rows
 
-        self.assertEqual(len(captured_density_buffers), 2)
-        self.assertIs(captured_density_buffers[0], density_buf_first)
-        self.assertIs(captured_density_buffers[1], density_buf_first)
-        self.assertIs(captured_shear_buffers[0], shear_buf_first)
-        self.assertIs(captured_shear_buffers[1], shear_buf_first)
+        self.assertEqual(len(captured), 1)
+        density_soa, shear_soa, density_w_soa, shear_w_soa = captured[0]
+        (density_rows,), density_w_rows = expanded["density"]
+        shear_rows, shear_w_rows = expanded["shear"]
+        # the very same arrays, not copies of them
+        self.assertIs(density_soa, density_rows)
+        self.assertIs(density_w_soa, density_w_rows)
+        self.assertIs(shear_soa, shear_rows)
+        self.assertIs(shear_w_soa, shear_w_rows)
+        # AoS: rows first, then the tomographic bin (and the component)
+        self.assertEqual(density_soa.shape, (12, 1))
+        self.assertEqual(shear_soa.shape, (12, 1, 2))
 
     def test_compute_aperture_shear_all_patches_helper(self):
         vals = correlations_module._compute_aperture_shear_all_patches(

@@ -143,6 +143,52 @@ def main():
         print(f"  {name:26s} max |fused-sparse| / scale = {worst:.3e}")
     report["methods"] = methods
 
+    # ---- layouts and the folded sign flip ------------------------------
+    # Both are pure data movement, so the bar is bitwise equality with the
+    # transpose-and-flip-afterwards code they replace.
+    with_fused(True)
+    layouts = {}
+    soa_g, soa_w = corr._expand_shear_rows(shear, w, blocks="pairs")
+    aos_g, aos_w = corr._expand_shear_rows(shear, w, blocks="pairs",
+                                           layout="aos")
+    layouts["aos_values_bitwise"] = bool(np.array_equal(
+        cupy.asnumpy(aos_g), np.transpose(cupy.asnumpy(soa_g), (2, 0, 1))))
+    layouts["aos_weights_bitwise"] = bool(np.array_equal(
+        cupy.asnumpy(aos_w), np.transpose(cupy.asnumpy(soa_w), (1, 0))))
+    for signs in ((-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)):
+        folded, _ = corr._expand_shear_rows(
+            shear, w, blocks="pairs", signs=signs, layout="aos")
+        pre, _ = corr._expand_shear_rows(
+            shear * cupy.asarray(np.asarray(signs).reshape(1, 2, 1),
+                                 dtype=corr.map_dtype),
+            w, blocks="pairs", layout="aos")
+        layouts[f"signs_{signs[0]:+.0f}{signs[1]:+.0f}_bitwise"] = bool(
+            np.array_equal(cupy.asnumpy(folded), cupy.asnumpy(pre)))
+    # ... and end to end, where the aperture kernel's new element stride
+    # and the packed gather are also exercised.
+    for name, call in (
+        ("get_full_tomo_shear", lambda sh, f: corr.get_full_tomo_shear(
+            sh, w, flip_g1=f, return_device=False)),
+        ("get_3x2pt_tomo", lambda sh, f: corr.get_3x2pt_tomo(
+            shear_maps=sh, density_maps=dens,
+            weights={"shear": w, "density": w}, flip_g1=f,
+            return_device=False)),
+    ):
+        flagged = call(shear, True)
+        pre_flipped = call(
+            shear * cupy.asarray(np.asarray([-1.0, 1.0]).reshape(1, 2, 1),
+                                 dtype=corr.map_dtype), False)
+        flagged = flagged if isinstance(flagged, tuple) else (flagged,)
+        pre_flipped = pre_flipped if isinstance(pre_flipped, tuple) else (pre_flipped,)
+        worst = 0.0
+        for a, b in zip(flagged, pre_flipped):
+            a, b = np.asarray(a), np.asarray(b)
+            scale = float(np.max(np.abs(b))) or 1.0
+            worst = max(worst, float(np.max(np.abs(a - b))) / scale)
+        layouts[f"flip_{name}"] = worst
+    report["layouts"] = layouts
+    print("layouts and signs:", json.dumps(layouts, indent=2))
+
     # ---- speed --------------------------------------------------------
     speed = {}
     for label, flag in (("sparse", False), ("fused", True)):

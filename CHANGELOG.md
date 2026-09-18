@@ -3,6 +3,50 @@
 ## Unreleased
 
 ### Performance
+- **The row expansion writes the kernels' layout, and carries the sign
+  flip** (idea #3, the remaining two sub-items). Between the degrade and
+  the pair kernels sat three more passes over the map-set: a stack that
+  glued the two shear components back together, a SoA -> AoS transpose
+  (0.077 ms; the packed `perm` gather adds another 0.105 ms), and --
+  whenever `flip_g1`/`flip_g2` was set -- a scale-and-stack copy that
+  `get_full_tomo_shear` made *twice*, once per leaf (0.257 ms, **15 %** of
+  the call; the production script runs `flip_g1=True`). The fused degrade
+  now takes four element strides per buffer instead of one, so it writes
+  the interleaved `(nz, 2, n_rows)` or AoS `(n_rows, nz, 2)` layout each
+  call wants directly, and applies the sign while it copies the pixel rows
+  -- the cell rows inherit it, because level 0 reads the already-signed
+  rows. `get_3x2pt_tomo` no longer stages its four inputs through separate
+  cached buffers at all (`ComputeContext`'s `fused_*_soa` are gone).
+  Measured on the A100 (nside 512, 450 patches, 18.3 M pairs, k = 2.9,
+  4 tomographic bins, float32 maps + float64 accumulators):
+
+  | | before | after |
+  |---|---|---|
+  | `_expand_shear_rows` | 0.361 ms | **0.274 ms** |
+  | `vectorized_shear_shear` | 1.439 ms | **1.320 ms** |
+  | `vectorized_shear_shear`, `flip_g2` | 1.560 ms | **1.338 ms** |
+  | `get_full_tomo_shear`, `flip_g2` | 1.973 ms | **1.796 ms** |
+  | `get_3x2pt_tomo` | 4.592 ms | **4.439 ms** |
+  | cost of a flip, `get_full_tomo_shear` | 0.257 ms | **0.090 ms** |
+  | cost of a flip, `vectorized_shear_shear` | 0.121 ms | **0.018 ms** |
+
+  `get_full_tomo_shear` *without* a flip is unchanged (1.716 -> 1.707 ms,
+  within the run-to-run scatter): its aperture pass keeps the SoA layout,
+  so its 2PCF leaf still transposes. That is deliberate and measured --
+  `aperture_tomo.cu` gathers aperture discs, whose row ids are largely
+  contiguous, and AoS costs it **0.450 -> 0.600 ms**, far more than the
+  0.077 ms transpose it would save. The layout is therefore chosen by the
+  enclosing call (`_expansion_scope(layout=...)`) so that all of its
+  leaves agree and one degrade still serves the whole call; the aperture
+  kernels take a second element stride so either layout *can* be passed.
+  A public AoS *input* layout was rejected: it only helps at full
+  resolution, and it would add a second accepted layout to
+  `_coerce_map_input_array`, `MapLoader`, `ZetaWriter` and every
+  row-space gate. Both changes are pure data movement, and the tests
+  require **bitwise** equality with the code they replace: a sign is +-1
+  so scaling is exact, the degrade is linear in the values, and a
+  transpose moves floats without touching them
+  (`tests/test_row_layouts.py`).
 - **Fused static-treecode row degrade** (idea #3). Building the virtual
   rows was a chain of sparse matrix products over an
   `(n_active, K * n_lead)` temporary plus two transposes. Two new CUDA

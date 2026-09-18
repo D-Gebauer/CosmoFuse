@@ -11,7 +11,7 @@ Buffer categories:
   - PREPARED: pair indices and rotation factors on device
   - WEIGHT_CACHE: cached sums-of-weights for normalisation
   - APERTURE: flattened aperture filter geometry (host + device)
-  - FUSED: struct-of-arrays map data for the fused 3×2pt kernel
+  - FUSED: output buffers of the fused 3×2pt kernel
 """
 
 from typing import Any, Dict, Tuple
@@ -80,15 +80,6 @@ class ComputeContext:
         ("Q_offsets_dev", None),
         ("Q_patch_area_dev", None),
     )
-    # SoA (struct-of-arrays) map buffers for the fused 3×2pt kernel:
-    # density δ_g, shear (γ₁,γ₂), and their weights, pre-arranged for
-    # coalesced GPU memory access
-    _FUSED_INPUT_BUFFER_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
-        ("fused_density_soa", None),
-        ("fused_shear_soa", None),
-        ("fused_density_w_soa", None),
-        ("fused_shear_w_soa", None),
-    )
     # Pre-allocated output buffers for the fused kernel (M_ap, M_g,
     # ξ+, ξ-, ξ_g, ξ_t numerators and denominators)
     _FUSED_OUTPUT_BUFFER_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
@@ -105,7 +96,6 @@ class ComputeContext:
             + self._WEIGHT_CACHE_DEFAULTS
             + self._APERTURE_DEFAULTS
             + self._APERTURE_DEVICE_DEFAULTS
-            + self._FUSED_INPUT_BUFFER_DEFAULTS
             + self._FUSED_OUTPUT_BUFFER_DEFAULTS
         ):
             setattr(self, name, value)
@@ -117,7 +107,6 @@ class ComputeContext:
             + self._WEIGHT_CACHE_DEFAULTS
             + self._APERTURE_DEFAULTS
             + self._APERTURE_DEVICE_DEFAULTS
-            + self._FUSED_INPUT_BUFFER_DEFAULTS
             + self._FUSED_OUTPUT_BUFFER_DEFAULTS
         ):
             setattr(self, name, value)

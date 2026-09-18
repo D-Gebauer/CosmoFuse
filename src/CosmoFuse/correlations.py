@@ -52,6 +52,10 @@ _ROTATION_COMPLEX_PRECISION = {
     "float64": np.complex128,
 }
 
+# A buffer as the degrade kernels address it:
+# (array, base, lead_stride, comp_stride, row_stride), in elements.
+_Desc = Tuple[Any, int, int, int, int]
+
 def _compute_aperture_shear_all_patches(
     Q_inds: np.ndarray,
     Q_cos: np.ndarray,
@@ -1107,79 +1111,6 @@ class Correlation:
                 np.asarray(self.Q_patch_area_flat, dtype=self.rotation_dtype)
             )
         )
-
-    def _get_or_create_fused_input_buffers(
-        self,
-        npix: int,
-        n_density_bins: int,
-        n_shear_bins: int,
-        map_backend_dtype: Any,
-    ) -> Tuple[Any, Any, Any, Any]:
-        ctx = self.compute_context
-
-        if (
-            ctx.fused_density_soa is None
-            or ctx.fused_density_soa.shape != (npix, n_density_bins)
-            or getattr(ctx.fused_density_soa, "dtype", None) != map_backend_dtype
-        ):
-            ctx.fused_density_soa = self.backend.zeros(
-                (npix, n_density_bins), dtype=map_backend_dtype
-            )
-
-        if (
-            ctx.fused_shear_soa is None
-            or ctx.fused_shear_soa.shape != (npix, n_shear_bins, 2)
-            or getattr(ctx.fused_shear_soa, "dtype", None) != map_backend_dtype
-        ):
-            ctx.fused_shear_soa = self.backend.zeros(
-                (npix, n_shear_bins, 2), dtype=map_backend_dtype
-            )
-
-        if (
-            ctx.fused_density_w_soa is None
-            or ctx.fused_density_w_soa.shape != (npix, n_density_bins)
-            or getattr(ctx.fused_density_w_soa, "dtype", None) != map_backend_dtype
-        ):
-            ctx.fused_density_w_soa = self.backend.zeros(
-                (npix, n_density_bins), dtype=map_backend_dtype
-            )
-
-        if (
-            ctx.fused_shear_w_soa is None
-            or ctx.fused_shear_w_soa.shape != (npix, n_shear_bins)
-            or getattr(ctx.fused_shear_w_soa, "dtype", None) != map_backend_dtype
-        ):
-            ctx.fused_shear_w_soa = self.backend.zeros(
-                (npix, n_shear_bins), dtype=map_backend_dtype
-            )
-
-        return (
-            ctx.fused_density_soa,
-            ctx.fused_shear_soa,
-            ctx.fused_density_w_soa,
-            ctx.fused_shear_w_soa,
-        )
-
-    def _fill_fused_input_buffers(
-        self,
-        density_dev: Any,
-        shear_dev: Any,
-        density_w_dev: Any,
-        shear_w_dev: Any,
-        density_soa: Any,
-        shear_soa: Any,
-        density_w_soa: Any,
-        shear_w_soa: Any,
-    ) -> None:
-        module = self.backend.module
-        copyto = getattr(module, "copyto", np.copyto)
-        swapaxes = getattr(module, "swapaxes", np.swapaxes)
-        moveaxis = getattr(module, "moveaxis", np.moveaxis)
-
-        copyto(density_soa, swapaxes(density_dev, 0, 1))
-        copyto(density_w_soa, swapaxes(density_w_dev, 0, 1))
-        copyto(shear_soa, moveaxis(shear_dev, 2, 0))
-        copyto(shear_w_soa, swapaxes(shear_w_dev, 0, 1))
 
     def _get_or_create_fused_output_buffers(
         self,
@@ -2631,9 +2562,77 @@ class Correlation:
             weights, np.ndarray
         )
 
+    # Row-buffer layouts the fused degrade can write directly.  "soa" is
+    # the historical one (one contiguous block per value); "interleaved"
+    # is (n_lead, K, n_rows), i.e. a stacked shear map-set without the
+    # stack; "aos" is (n_rows, n_lead, K), the layout the pair kernels
+    # load, so the SoA -> AoS transpose in front of them disappears.
+    _ROW_LAYOUTS = ("soa", "interleaved", "aos")
+
+    def _row_buffers(
+        self, xp: Any, n_lead: int, n_val: int, n_rows: int, layout: str
+    ) -> Tuple[Any, _Desc, Any, _Desc]:
+        """Allocate the row buffers of ``layout`` and their kernel descriptors.
+
+        A descriptor is ``(array, base, lead_stride, comp_stride,
+        row_stride)`` in elements; see the header of ``degrade_rows.cu``.
+        """
+        dt = self.map_dtype
+        if layout == "aos":
+            w_rows = xp.empty((n_rows, n_lead), dtype=dt)
+            w_desc = (w_rows, 0, 1, 0, n_lead)
+            if not n_val:
+                return w_rows, w_desc, w_rows, w_desc
+            v_rows = xp.empty((n_rows, n_lead, n_val), dtype=dt)
+            return w_rows, w_desc, v_rows, (v_rows, 0, n_val, 1, n_lead * n_val)
+        w_rows = xp.empty((n_lead, n_rows), dtype=dt)
+        w_desc = (w_rows, 0, n_rows, 0, 1)
+        if not n_val:
+            return w_rows, w_desc, w_rows, w_desc
+        if layout == "interleaved":
+            v_rows = xp.empty((n_lead, n_val, n_rows), dtype=dt)
+            return w_rows, w_desc, v_rows, (v_rows, 0, n_val * n_rows, n_rows, 1)
+        v_rows = xp.empty((n_val * n_lead, n_rows), dtype=dt)
+        return w_rows, w_desc, v_rows, (v_rows, 0, n_rows, n_lead * n_rows, 1)
+
+    def _sign_scale_array(self, xp: Any, scales: Sequence[float], dtype: Any) -> Any:
+        """Cached device array of per-component factors.
+
+        Built once per (factors, dtype): uploading a two-element array per
+        call cost more than the multiply it feeds.
+        """
+        key = (tuple(float(s) for s in scales), np.dtype(dtype).name,
+               xp is np)
+        cache = getattr(self, "_sign_scale_cache", None)
+        if cache is None:
+            cache = self._sign_scale_cache = {}
+        arr = cache.get(key)
+        if arr is None:
+            arr = cache[key] = xp.asarray(list(key[0]), dtype=dtype)
+        return arr
+
+    @staticmethod
+    def _scaled_copy(xp: Any, src: Any, dst: Any, scale: Any) -> None:
+        """``dst[...] = scale * src`` in one pass, without a temporary.
+
+        ``scale`` is +-1 (a sign flip), so the product is exact and the
+        result is bit-identical to flipping the maps before or after the
+        degrade -- the degrade is linear in the values.
+        """
+        if scale is None:
+            dst[...] = src
+        else:
+            xp.multiply(src, scale, out=dst)
+
     def _expand_rows_fused(
-        self, values: Sequence[Any], weights: Any, blocks: str
-    ) -> Optional[Tuple[List[Any], Any]]:
+        self,
+        values: Sequence[Any],
+        weights: Any,
+        blocks: str,
+        signs: Optional[Sequence[float]] = None,
+        layout: str = "soa",
+        stacked: Optional[Any] = None,
+    ) -> Optional[Tuple[Any, Any]]:
         """One kernel per degrade level instead of the sparse chain.
 
         The pixel rows are written into the final row buffers first, so
@@ -2643,8 +2642,16 @@ class Correlation:
         finalize pass divides by the weight sum and scatters into the row
         buffers.  No ``(n_active, K * n_lead)`` temporary and no transpose.
 
-        Returns ``None`` when the kernel is unavailable, so the caller
-        falls back to the sparse path.
+        ``signs`` (one factor per value) is applied while the pixel rows
+        are written, so a ``flip_g1``/``flip_g2`` costs nothing: the cell
+        rows inherit it, because level 0 reads the already-signed pixel
+        rows.  ``stacked`` is the same values as one ``(n_lead, K,
+        n_active)`` array, which lets the "aos" layout fill its pixel rows
+        with a single transposing copy.
+
+        Returns ``(v_rows, w_rows)`` with the raw buffers of ``layout``, or
+        ``None`` when the kernel is unavailable, so the caller falls back
+        to the sparse path.
         """
         if not self._use_fused_degrade(weights):
             return None
@@ -2660,37 +2667,37 @@ class Correlation:
         n_lead = int(np.prod(lead)) if lead else 1
         acc = self.acc_dtype
 
-        w_rows = xp.empty((n_lead, n_rows), dtype=self.map_dtype)
-        w_rows[:, :n_active] = weights.reshape(n_lead, n_active)
-        if n_val:
-            v_rows = xp.empty((n_val * n_lead, n_rows), dtype=self.map_dtype)
-            for k, v in enumerate(values):
-                v_rows[k * n_lead : (k + 1) * n_lead, :n_active] = v.reshape(
-                    n_lead, n_active
-                )
-        else:
-            v_rows = w_rows                # unused, but must be a valid pointer
+        w_rows, w_desc, v_rows, v_desc = self._row_buffers(
+            xp, n_lead, n_val, n_rows, layout
+        )
+        self._fill_pixel_rows(
+            xp, w_rows, v_rows, weights, values, stacked, signs,
+            n_lead, n_val, n_active, layout,
+        )
 
         w_app = xp.zeros((n_lead, n_appended), dtype=acc)
         v_app = (
             xp.zeros((n_val * n_lead, n_appended), dtype=acc) if n_val else w_app
         )
 
+        def scratch(base: int) -> Tuple[Any, Any]:
+            return (
+                (w_app, base, n_appended, 0, 1),
+                (v_app, base, n_appended, n_lead * n_appended, 1),
+            )
+
         csr = self._degrade_csr_device()
         filled: List[Tuple[int, int]] = []
 
-        def run(indptr: Any, indices: Any, n_cells: int, src: Tuple[Any, ...],
+        def run(indptr: Any, indices: Any, n_cells: int, src: Tuple[Any, Any],
                 dst_base: int, weighted: bool) -> bool:
+            w_dst, v_dst = scratch(dst_base)
             return bool(
-                kern.level(
-                    indptr, indices, *src,
-                    w_app, n_appended, dst_base,
-                    v_app, n_appended, dst_base,
-                    n_cells, n_lead, n_val, weighted,
-                )
+                kern.level(indptr, indices, src[0], src[1], w_dst, v_dst,
+                           n_cells, n_lead, n_val, weighted)
             )
 
-        pixel_src = (w_rows, n_rows, 0, v_rows, n_rows, 0)
+        pixel_src = (w_desc, v_desc)
         if blocks in ("aperture", "all") and csr["aperture"] is not None:
             indptr, indices, n_cells = csr["aperture"]
             if not run(indptr, indices, n_cells, pixel_src, 0, True):
@@ -2704,8 +2711,7 @@ class Correlation:
                 if level == 0:
                     src, weighted = pixel_src, True
                 else:
-                    prev = csr["ranges"][level - 1][0]
-                    src = (w_app, n_appended, prev, v_app, n_appended, prev)
+                    src = scratch(csr["ranges"][level - 1][0])
                     weighted = False
                 if not run(indptr, indices, n_cells, src, start, weighted):
                     return None
@@ -2725,22 +2731,93 @@ class Correlation:
         if contiguous:
             filled = [(0, n_appended)]
         else:
-            w_rows[:, n_active:] = 0
-            if n_val:
-                v_rows[:, n_active:] = 0
+            self._zero_appended_rows(w_rows, v_rows, n_active, n_val, layout)
 
+        # Shift the destination descriptors past the pixel rows and write
+        # the appended rows; `row_inner` keeps those writes coalesced.
+        w_tail = (w_desc[0], n_active * w_desc[4], w_desc[2], 0, w_desc[4])
+        v_tail = (v_desc[0], n_active * v_desc[4], v_desc[2], v_desc[3], v_desc[4])
         for lo, hi in filled:
             if not kern.finalize(
-                w_app, n_appended, v_app, n_appended,
-                w_rows, v_rows, n_rows, n_active, n_lead, lo, hi, n_val,
+                w_app, v_app, n_appended, w_tail, v_tail,
+                n_lead, lo, hi, n_val, row_inner=(layout != "aos"),
             ):
                 return None
 
-        out = [
-            v_rows[k * n_lead : (k + 1) * n_lead].reshape(lead + (n_rows,))
-            for k in range(n_val)
-        ]
-        return out, w_rows.reshape(lead + (n_rows,))
+        return v_rows, w_rows
+
+    def _fill_pixel_rows(
+        self, xp: Any, w_rows: Any, v_rows: Any, weights: Any,
+        values: Sequence[Any], stacked: Optional[Any],
+        signs: Optional[Sequence[float]], n_lead: int, n_val: int,
+        n_active: int, layout: str,
+    ) -> None:
+        """Copy the pixel rows (and any sign flip) into the row buffers."""
+        w2 = weights.reshape(n_lead, n_active)
+        if layout == "aos":
+            w_rows[:n_active] = w2.T
+        else:
+            w_rows[:, :n_active] = w2
+        if not n_val:
+            return
+        scales = None
+        if signs is not None and any(float(s) != 1.0 for s in signs):
+            scales = [None if float(s) == 1.0 else self.map_dtype.type(s)
+                      for s in signs]
+        if stacked is not None and layout in ("aos", "interleaved"):
+            # One copy for the whole map-set instead of one per component,
+            # reading the caller's contiguous (n_lead, K, n_active) array.
+            scale = None
+            if scales is not None:
+                scale = self._sign_scale_array(
+                    xp, [1.0 if s is None else s for s in scales],
+                    self.map_dtype,
+                )
+            src = stacked.reshape(n_lead, n_val, n_active)
+            if layout == "aos":
+                # (n_lead, K, n_active) -> (n_active, n_lead, K)
+                self._scaled_copy(
+                    xp, xp.transpose(src, (2, 0, 1)), v_rows[:n_active], scale
+                )
+            else:
+                self._scaled_copy(
+                    xp, src, v_rows[:, :, :n_active],
+                    None if scale is None else scale[:, None],
+                )
+            return
+        if layout == "aos":
+            for k, v in enumerate(values):
+                self._scaled_copy(
+                    xp, v.reshape(n_lead, n_active).T, v_rows[:n_active, :, k],
+                    None if scales is None else scales[k],
+                )
+            return
+        for k, v in enumerate(values):
+            dst = (
+                v_rows[:, k, :n_active]
+                if layout == "interleaved"
+                else v_rows[k * n_lead : (k + 1) * n_lead, :n_active]
+            )
+            self._scaled_copy(
+                xp, v.reshape(n_lead, n_active), dst,
+                None if scales is None else scales[k],
+            )
+
+    @staticmethod
+    def _zero_appended_rows(
+        w_rows: Any, v_rows: Any, n_active: int, n_val: int, layout: str
+    ) -> None:
+        if layout == "aos":
+            w_rows[n_active:] = 0
+            if n_val:
+                v_rows[n_active:] = 0
+            return
+        w_rows[:, n_active:] = 0
+        if n_val:
+            if layout == "interleaved":
+                v_rows[:, :, n_active:] = 0
+            else:
+                v_rows[:, n_active:] = 0
 
     def _append_block(self, X: Any, blocks: str, use_cupy: bool) -> Any:
         """Apply the degrade operators to ``X`` ``(n_active, C)`` and return
@@ -2758,13 +2835,23 @@ class Correlation:
                 prev = cur
         return block
 
-    def _expansion_scope(self) -> Any:
+    def _expansion_scope(self, layout: str = "aos") -> Any:
         """Context manager: share virtual-row expansions between the leaf
         computations of one public call (e.g. aperture + 2PCF pass of
         ``get_full_tomo_shear``).  Inside the scope every expansion fills
         *all* blocks once and is memoised on the identity of its inputs;
         the memo is dropped on exit, so reused device buffers (e.g.
-        ``MapLoader`` slots) can never produce a stale hit."""
+        ``MapLoader`` slots) can never produce a stale hit.
+
+        ``layout`` is the row layout the pair leaves take, and exists so
+        that they agree with the other leaves of the same call and the
+        expansion really is shared.  A call whose aperture pass runs
+        ``aperture_tomo.cu`` must pass ``"soa"``: that kernel walks the
+        aperture discs, whose row ids are largely contiguous, so SoA
+        coalesces almost perfectly and AoS puts consecutive pixels
+        ``2*nz`` elements apart (measured: +0.26 ms on the A100, far more
+        than the 0.08 ms transpose AoS would save).
+        """
         owner = self
 
         class _Scope:
@@ -2772,13 +2859,20 @@ class Correlation:
                 owner._expansion_depth = getattr(owner, "_expansion_depth", 0) + 1
                 if owner._expansion_depth == 1:
                     owner._expansion_memo = {}
+                    owner._expansion_layout = layout
 
             def __exit__(self, *exc: Any) -> None:
                 owner._expansion_depth -= 1
                 if owner._expansion_depth == 0:
                     owner._expansion_memo = None
+                    owner._expansion_layout = None
 
         return _Scope()
+
+    def _pair_row_layout(self) -> str:
+        """Row layout for the pair kernels: the AoS they load, unless the
+        enclosing call needs its leaves to share an SoA expansion."""
+        return getattr(self, "_expansion_layout", None) or "aos"
 
     def _weight_rows(self, weights: Any, w2: Any, blocks: str, use_cupy: bool) -> Any:
         """Virtual-row block of the weights ``(n_appended, n_lead)``.
@@ -2804,7 +2898,11 @@ class Correlation:
         return W
 
     def _expand_rows(
-        self, values: Sequence[Any], weights: Any, blocks: str = "all"
+        self,
+        values: Sequence[Any],
+        weights: Any,
+        blocks: str = "all",
+        signs: Optional[Sequence[float]] = None,
     ) -> Tuple[List[Any], Any]:
         """Append the virtual rows to row-space maps.
 
@@ -2815,16 +2913,22 @@ class Correlation:
             blocks: which virtual rows to fill: ``"pairs"`` (treecode
                 cells), ``"aperture"`` (coarse aperture level) or ``"all"``.
                 Rows that are not filled are zero and must not be used.
+            signs: optional factor per value, applied on the way in.  The
+                degrade is linear in the values, so scaling before it is
+                bit-identical to scaling after -- and for a sign flip it is
+                free, because the pixel rows are copied anyway.
 
         Returns ``(values_rows, weights_rows)`` with last axis ``n_rows``.
         At full resolution (no virtual rows) the inputs are returned
         untouched -- the default path pays nothing.
         """
         n_appended = self.n_appended
-        if n_appended == 0:
-            return list(values), weights
-        if blocks == "aperture" and self.n_aperture_cells == 0:
-            return list(values), weights  # aperture indices address pixel rows
+        scales = self._sign_scales(signs, len(values))
+        if n_appended == 0 or (
+            blocks == "aperture" and self.n_aperture_cells == 0
+        ):
+            # aperture indices address pixel rows; nothing to append
+            return self._scaled_values(values, scales), weights
         n_active = self.n_active
         if int(weights.shape[-1]) != n_active:
             raise ValueError(
@@ -2834,24 +2938,34 @@ class Correlation:
         memo = getattr(self, "_expansion_memo", None)
         if memo is not None:
             blocks = "all"  # fill everything once, share between the leaves
-            key = (tuple(id(v) for v in values), id(weights))
+            key = (tuple(id(v) for v in values), id(weights), scales)
             hit = memo.get(key)
             if hit is not None:
                 return list(hit[0]), hit[1]
 
-        fused = self._expand_rows_fused(values, weights, blocks)
+        lead = tuple(int(n) for n in weights.shape[:-1])
+        n_lead = int(np.prod(lead)) if lead else 1
+        n_rows = n_active + n_appended
+
+        fused = self._expand_rows_fused(values, weights, blocks, signs=signs)
         if fused is not None:
-            out, w_rows = fused
+            v_rows, w_rows = fused
+            out = [
+                v_rows[k * n_lead : (k + 1) * n_lead].reshape(lead + (n_rows,))
+                for k in range(len(values))
+            ]
+            w_rows = w_rows.reshape(lead + (n_rows,))
             if memo is not None:
                 memo[key] = (out, w_rows, values, weights)
             return list(out), w_rows
         use_cupy = not isinstance(weights, np.ndarray)
         xp = self.backend.module if use_cupy else np
         acc = self.acc_dtype
-        n_rows = n_active + n_appended
 
-        lead = tuple(int(n) for n in weights.shape[:-1])
-        n_lead = int(np.prod(lead)) if lead else 1
+        # The sparse path is the fallback: scale the inputs up front (one
+        # temporary per flipped component) rather than threading the sign
+        # through the sparse products.
+        values = self._scaled_values(values, scales)
         w2 = weights.reshape(n_lead, n_active)
 
         W = self._weight_rows(weights, w2, blocks, use_cupy)  # (n_appended, n_lead)
@@ -2883,27 +2997,202 @@ class Correlation:
             memo[key] = (out, w_rows, values, weights)
         return list(out), w_rows
 
+    @staticmethod
+    def _sign_scales(
+        signs: Optional[Sequence[float]], n_val: int
+    ) -> Optional[Tuple[float, ...]]:
+        """Normalise ``signs`` to a hashable tuple, or ``None`` if trivial."""
+        if signs is None:
+            return None
+        scales = tuple(float(s) for s in signs)
+        if len(scales) != n_val:
+            raise ValueError(
+                f"signs must have one entry per value; got {len(scales)} for {n_val}"
+            )
+        return None if all(s == 1.0 for s in scales) else scales
+
+    @staticmethod
+    def _scaled_values(
+        values: Sequence[Any], scales: Optional[Tuple[float, ...]]
+    ) -> List[Any]:
+        if scales is None:
+            return list(values)
+        return [v if s == 1.0 else s * v for v, s in zip(values, scales)]
+
     def _expand_shear_rows(
-        self, shear: Any, weights: Any, blocks: str = "all"
+        self,
+        shear: Any,
+        weights: Any,
+        blocks: str = "all",
+        signs: Optional[Sequence[float]] = None,
+        layout: str = "soa",
     ) -> Tuple[Any, Any]:
-        """:meth:`_expand_rows` for planar shear ``(nz, 2, n_active)``."""
+        """:meth:`_expand_rows` for planar shear ``(nz, 2, n_active)``.
+
+        ``layout="soa"`` returns ``(nz, 2, n_rows)`` and ``(nz, n_rows)``;
+        ``layout="aos"`` returns ``(n_rows, nz, 2)`` and ``(n_rows, nz)``,
+        the layout the pair kernels load.  With the fused degrade the AoS
+        buffers are written by the kernel itself, so neither the stack that
+        used to glue g1 and g2 back together nor the SoA -> AoS transpose
+        in front of the pair kernels is needed.
+        """
+        if layout not in ("soa", "aos"):
+            raise ValueError(f"unknown row layout {layout!r}")
+        use_cupy = not isinstance(weights, np.ndarray)
+        xp = self.backend.module if use_cupy else np
+        scales = self._sign_scales(signs, 2)
         if self.n_appended == 0 or (
             blocks == "aperture" and self.n_aperture_cells == 0
         ):
-            return shear, weights
-        use_cupy = not isinstance(weights, np.ndarray)
-        xp = self.backend.module if use_cupy else np
+            # Nothing to append (aperture indices address pixel rows).  Not
+            # memoised: the result would be wrong for a leaf that does want
+            # the treecode rows.
+            return self._shear_rows_no_append(xp, shear, weights, scales, layout)
+
         memo = getattr(self, "_expansion_memo", None)
-        key = ("shear", id(shear), id(weights))
-        if memo is not None and key in memo:
-            return memo[key][0], memo[key][1]
-        (g1, g2), w_rows = self._expand_rows(
-            (shear[:, 0], shear[:, 1]), weights, blocks=blocks
+        key = ("shear", id(shear), id(weights), scales, layout)
+        if memo is not None:
+            hit = memo.get(key)
+            if hit is not None:
+                return hit[0], hit[1]
+            blocks = "all"  # fill everything once, share between the leaves
+
+        fused = self._expand_rows_fused(
+            (shear[:, 0], shear[:, 1]), weights, blocks, signs=signs,
+            layout="aos" if layout == "aos" else "interleaved",
+            stacked=shear,
         )
-        shear_rows = xp.stack((g1, g2), axis=1)
+        if fused is not None:
+            shear_rows, w_rows = fused
+        else:
+            (g1, g2), w_rows = self._expand_rows(
+                (shear[:, 0], shear[:, 1]), weights, blocks=blocks, signs=signs
+            )
+            shear_rows = xp.stack((g1, g2), axis=1)
+            if layout == "aos":
+                shear_rows = xp.ascontiguousarray(
+                    xp.transpose(shear_rows, (2, 0, 1))
+                )
+                w_rows = xp.ascontiguousarray(xp.transpose(w_rows, (1, 0)))
         if memo is not None:
             memo[key] = (shear_rows, w_rows, shear, weights)
         return shear_rows, w_rows
+
+    def _expand_rows_aos(
+        self,
+        values: Sequence[Any],
+        weights: Any,
+        blocks: str = "all",
+        signs: Optional[Sequence[float]] = None,
+    ) -> Tuple[List[Any], Any]:
+        """:meth:`_expand_rows` in the AoS layout the pair kernels load.
+
+        Returns ``(values_rows, weights_rows)`` shaped ``(n_rows, n_lead)``
+        each.  With the fused degrade the buffers are written in that
+        layout directly, so the transpose that used to sit in front of
+        every kernel launch disappears; otherwise this is the old
+        expand-then-transpose, unchanged.
+        """
+        use_cupy = not isinstance(weights, np.ndarray)
+        xp = self.backend.module if use_cupy else np
+        scales = self._sign_scales(signs, len(values))
+
+        def to_aos(vals: Sequence[Any], w: Any) -> Tuple[List[Any], Any]:
+            return (
+                [xp.ascontiguousarray(xp.transpose(v, (1, 0))) for v in vals],
+                xp.ascontiguousarray(xp.transpose(w, (1, 0))),
+            )
+
+        if self.n_appended == 0 or (
+            blocks == "aperture" and self.n_aperture_cells == 0
+        ):
+            return to_aos(self._scaled_values(values, scales), weights)
+
+        memo = getattr(self, "_expansion_memo", None)
+        key = ("aos", tuple(id(v) for v in values), id(weights), scales)
+        if memo is not None:
+            hit = memo.get(key)
+            if hit is not None:
+                return list(hit[0]), hit[1]
+            blocks = "all"  # fill everything once, share between the leaves
+
+        fused = None
+        if len(values) <= 1:
+            # With more than one value the per-component views would be
+            # strided; the callers all pass a single field.
+            fused = self._expand_rows_fused(
+                values, weights, blocks, signs=signs, layout="aos"
+            )
+        if fused is not None:
+            v_rows, w_rows = fused
+            out = [v_rows.reshape(v_rows.shape[0], v_rows.shape[1])] if values else []
+        else:
+            vals, w_rows = self._expand_rows(
+                values, weights, blocks=blocks, signs=signs
+            )
+            out, w_rows = to_aos(vals, w_rows)
+        if memo is not None:
+            memo[key] = (out, w_rows, values, weights)
+        return list(out), w_rows
+
+    # The pair kernels always load AoS; these two pick the cheaper route to
+    # it.  Outside a scope (or in one whose other leaves are AoS too) the
+    # degrade writes it directly; in an SoA scope the leaves share one SoA
+    # expansion and this transposes, which is what the aperture kernels'
+    # coalescing is worth.
+
+    def _pair_shear_rows(
+        self, shear: Any, weights: Any, blocks: str = "pairs",
+        signs: Optional[Sequence[float]] = None,
+    ) -> Tuple[Any, Any]:
+        if self._pair_row_layout() == "aos":
+            return self._expand_shear_rows(
+                shear, weights, blocks, signs=signs, layout="aos"
+            )
+        rows, w_rows = self._expand_shear_rows(
+            shear, weights, blocks, signs=signs
+        )
+        return self._transpose_tomo_inputs_aos(rows, w_rows)
+
+    def _pair_value_rows(
+        self, values: Sequence[Any], weights: Any, blocks: str = "pairs",
+        signs: Optional[Sequence[float]] = None,
+    ) -> Tuple[List[Any], Any]:
+        if self._pair_row_layout() == "aos":
+            return self._expand_rows_aos(values, weights, blocks, signs=signs)
+        xp = self.backend.module if not isinstance(weights, np.ndarray) else np
+        vals, w_rows = self._expand_rows(values, weights, blocks, signs=signs)
+        return (
+            [xp.ascontiguousarray(xp.transpose(v, (1, 0))) for v in vals],
+            xp.ascontiguousarray(xp.transpose(w_rows, (1, 0))),
+        )
+
+    def _shear_rows_no_append(
+        self, xp: Any, shear: Any, weights: Any,
+        scales: Optional[Tuple[float, ...]], layout: str,
+    ) -> Tuple[Any, Any]:
+        """Full-resolution shear rows: no virtual rows to append.
+
+        Any sign flip and the AoS transpose collapse into the single copy
+        the layout needs (and into nothing at all for plain SoA input).
+        """
+        if layout == "soa":
+            if scales is None:
+                return shear, weights
+            out = xp.empty_like(shear)
+            for k, s in enumerate(scales):
+                self._scaled_copy(
+                    xp, shear[:, k], out[:, k],
+                    None if s == 1.0 else self.map_dtype.type(s),
+                )
+            return out, weights
+        nz = int(shear.shape[0])
+        out = xp.empty((int(shear.shape[2]), nz, 2), dtype=shear.dtype)
+        scale = None
+        if scales is not None:
+            scale = self._sign_scale_array(xp, scales, shear.dtype)
+        self._scaled_copy(xp, xp.transpose(shear, (2, 0, 1)), out, scale)
+        return out, xp.ascontiguousarray(xp.transpose(weights, (1, 0)))
 
     @property
     def _index_device_dtype(self) -> Any:
@@ -3252,34 +3541,27 @@ class Correlation:
         if tomo_kernel is None:
             return None
 
-        shear_maps_dev, w_dev = self._expand_shear_rows(
-            shear_maps_dev, w_dev, blocks="pairs"
-        )
-
         if self.backend.name == "numpy":
+            shear_maps_dev, w_dev = self._expand_shear_rows(
+                shear_maps_dev, w_dev, blocks="pairs", signs=(g1_fac, g2_fac)
+            )
             return self._xipm_tomo_vectorized_cpu(
                 shear_maps_dev,
                 w_dev,
                 sumofweights_dev,
                 nzbins,
                 nzbin_combs,
-                g1_fac,
-                g2_fac,
             )
 
         if self.backend.name != "cupy":
             return None
 
         module = self.backend.module
-        if g1_fac == 1 and g2_fac == 1:
-            # No sign flip requested: skip the full-map scale-and-stack copy.
-            shear_scaled = shear_maps_dev
-        else:
-            shear_scaled = module.stack(
-                (g1_fac * shear_maps_dev[:, 0], g2_fac * shear_maps_dev[:, 1]),
-                axis=1,
-            )
-        shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_scaled, w_dev)
+        # The expansion writes the kernel's AoS layout itself and folds any
+        # sign flip into the copy it makes anyway: no stack, no transpose.
+        shear_aos, weights_aos = self._pair_shear_rows(
+            shear_maps_dev, w_dev, "pairs", signs=(g1_fac, g2_fac)
+        )
 
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
@@ -3341,18 +3623,11 @@ class Correlation:
         sumofweights_dev: Any,
         nzbins: int,
         nzbin_combs: int,
-        g1_fac: int,
-        g2_fac: int,
     ) -> Tuple[Any, Any]:
-        if g1_fac == 1 and g2_fac == 1:
-            # No sign flip requested: skip the full-map scale-and-stack copy.
-            shear_scaled = shear_maps_dev
-        else:
-            shear_scaled = np.stack(
-                (g1_fac * shear_maps_dev[:, 0], g2_fac * shear_maps_dev[:, 1]),
-                axis=1,
-            )
-        shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_scaled, w_dev)
+        # Any sign flip has already been folded into the expansion.
+        shear_aos, weights_aos = self._transpose_tomo_inputs_aos(
+            shear_maps_dev, w_dev
+        )
 
         nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
         # The numba kernel inherits its accumulator dtype from these arrays.
@@ -3481,14 +3756,12 @@ class Correlation:
             ctx = self.compute_context
             shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
             w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-            shear_dev, w_dev = self._expand_shear_rows(
-                shear_dev, w_dev, blocks="aperture"
+            # SoA: this kernel gathers aperture discs, whose row ids are
+            # largely contiguous.  The sign flip still rides along in the
+            # copy the expansion makes anyway.
+            shear_rows, w_rows = self._expand_shear_rows(
+                shear_dev, w_dev, blocks="aperture", signs=(g1_fac, g2_fac)
             )
-            if g1_fac != 1 or g2_fac != 1:
-                # Apply the sign flip before slicing the component views.
-                shear_dev = module.stack(
-                    (g1_fac * shear_dev[:, 0], g2_fac * shear_dev[:, 1]), axis=1
-                )
             out_num = self.backend.zeros(
                 (nzbins, self.n_patches), dtype=map_backend_dtype
             )
@@ -3496,9 +3769,9 @@ class Correlation:
                 (nzbins, self.n_patches), dtype=map_backend_dtype
             )
             launched = kernel(
-                shear_dev[:, 0],  # views; strides passed explicitly
-                shear_dev[:, 1],
-                w_dev,
+                shear_rows[:, 0],  # views; both strides passed explicitly
+                shear_rows[:, 1],
+                w_rows,
                 ctx.Q_inds_dev,
                 ctx.Q_cos_dev,
                 ctx.Q_sin_dev,
@@ -3525,18 +3798,12 @@ class Correlation:
         # Append the virtual rows once for all bins (shared with the 2PCF
         # pass inside an expansion scope), then run the per-bin leaf.
         shear_rows, w_rows = self._expand_shear_rows(
-            shear_maps_arr, w_arr, blocks="aperture"
+            shear_maps_arr, w_arr, blocks="aperture", signs=(g1_fac, g2_fac)
         )
         for i in range(nzbins):
-            if g1_fac == 1 and g2_fac == 1:
-                # No sign flip: pass views instead of full-map copies.
-                g1_i = shear_rows[i, 0]
-                g2_i = shear_rows[i, 1]
-            else:
-                g1_i = g1_fac * shear_rows[i, 0]
-                g2_i = g2_fac * shear_rows[i, 1]
             M_a[i] = self._aperture_shear_rows(
-                g1_i, g2_i, w_rows[i], return_device=keep_on_device
+                shear_rows[i, 0], shear_rows[i, 1], w_rows[i],
+                return_device=keep_on_device,
             )
         return M_a
 
@@ -3562,7 +3829,7 @@ class Correlation:
             nzbins = int(density_arr.shape[0])
             density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
             w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-            (density_dev,), w_dev = self._expand_rows(
+            (density_rows,), w_rows = self._expand_rows(
                 (density_dev,), w_dev, blocks="aperture"
             )
             out_num = self.backend.zeros(
@@ -3572,8 +3839,8 @@ class Correlation:
                 (nzbins, self.n_patches), dtype=map_backend_dtype
             )
             launched = kernel(
-                density_dev,
-                w_dev,
+                density_rows,
+                w_rows,
                 ctx.Q_inds_dev,
                 ctx.Q_val_dev,
                 ctx.Q_offsets_dev,
@@ -3621,7 +3888,7 @@ class Correlation:
         # and the 2PCF pass (each used to re-upload the same host arrays).
         shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-        with self._expansion_scope():  # degrade once for both passes
+        with self._expansion_scope(layout="soa"):  # one degrade, both passes
             M_a = self._compute_tomo_aperture_shear(
                 shear_dev,
                 w_dev,
@@ -3655,7 +3922,7 @@ class Correlation:
         # Upload once and share the device arrays between both passes.
         density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
-        with self._expansion_scope():  # degrade once for both passes
+        with self._expansion_scope(layout="soa"):  # one degrade, both passes
             M_g = self._compute_tomo_aperture_density(
                 density_dev,
                 w_dev,
@@ -3774,9 +4041,10 @@ class Correlation:
 
         density_dev = self._map_to_device(density_maps)
         w_dev = self._map_to_device(weights)
-        (density_dev,), w_dev = self._expand_rows((density_dev,), w_dev, "pairs")
-        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
-        w_soa = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
+        # Expanded straight into the kernels' AoS layout (no transpose).
+        (density_soa,), w_soa = self._pair_value_rows(
+            (density_dev,), w_dev, "pairs"
+        )
 
         comb_i, comb_j, auto_comb, nzbin_combs = (
             self._get_selected_tomo_density_combination_indices(
@@ -3874,6 +4142,7 @@ class Correlation:
         nlens_bins: int,
         nsource_bins: int,
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        shear_signs: Optional[Sequence[float]] = None,
     ) -> Any:
         self._ensure_prepared()
 
@@ -3892,17 +4161,14 @@ class Correlation:
         shear_dev = self._map_to_device(shear_maps)
         density_w_dev = self._map_to_device(density_w)
         shear_w_dev = self._map_to_device(shear_w)
-        (density_dev,), density_w_dev = self._expand_rows(
+        # Expanded straight into the kernels' AoS layout (no transpose),
+        # with any sign flip folded into the copy the expansion makes.
+        (density_soa,), density_w_soa = self._pair_value_rows(
             (density_dev,), density_w_dev, "pairs"
         )
-        shear_dev, shear_w_dev = self._expand_shear_rows(
-            shear_dev, shear_w_dev, blocks="pairs"
+        shear_soa, shear_w_soa = self._pair_shear_rows(
+            shear_dev, shear_w_dev, "pairs", signs=shear_signs
         )
-
-        density_soa = module.ascontiguousarray(module.transpose(density_dev, (1, 0)))
-        shear_soa = module.ascontiguousarray(module.transpose(shear_dev, (2, 0, 1)))
-        density_w_soa = module.ascontiguousarray(module.transpose(density_w_dev, (1, 0)))
-        shear_w_soa = module.ascontiguousarray(module.transpose(shear_w_dev, (1, 0)))
 
         comb_i_base, comb_j_base, nzbin_combs = (
             self._get_selected_tomo_cross_combination_indices(
@@ -4113,12 +4379,9 @@ class Correlation:
                 f"got {density_arr.shape[1]} and {shear_arr.shape[2]}"
             )
 
-        if flip_g1 or flip_g2:
-            shear_arr = shear_arr.copy()
-            if flip_g1:
-                shear_arr[:, 0] *= -1
-            if flip_g2:
-                shear_arr[:, 1] *= -1
+        # The sign flip rides along in the copy the row expansion makes
+        # anyway, instead of a separate full-map copy here.
+        shear_signs = (-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0)
 
         nlens_bins = density_arr.shape[0]
         nsource_bins = shear_arr.shape[0]
@@ -4131,6 +4394,7 @@ class Correlation:
             nlens_bins,
             nsource_bins,
             ggl_bin_combinations=ggl_bin_combinations,
+            shear_signs=shear_signs,
         )
         if return_device and self.backend.name == "cupy":
             return self.backend.module.real(gammat)
@@ -4236,12 +4500,8 @@ class Correlation:
                 f"got {density_np.shape[1]} and {shear_np.shape[2]}"
             )
 
-        if flip_g1 or flip_g2:
-            shear_np = shear_np.copy()
-            if flip_g1:
-                shear_np[:, 0] *= -1
-            if flip_g2:
-                shear_np[:, 1] *= -1
+        # Folded into the copy the row expansion makes anyway.
+        shear_signs = (-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0)
 
         self._ensure_prepared()
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
@@ -4262,37 +4522,19 @@ class Correlation:
         shear_dev = self._to_backend_array(shear_np, dtype=self.map_dtype)
         density_w_dev = self._to_backend_array(density_w_np, dtype=self.map_dtype)
         shear_w_dev = self._to_backend_array(shear_w_np, dtype=self.map_dtype)
-        (density_dev,), density_w_dev = self._expand_rows(
+        # The row expansion writes the kernels' AoS layout directly, so the
+        # four transposing copies into separate fused input buffers are
+        # gone -- as is the sign flip, which rides along in the same copy.
+        (density_soa,), density_w_soa = self._pair_value_rows(
             (density_dev,), density_w_dev, "all"
         )
-        shear_dev, shear_w_dev = self._expand_shear_rows(
-            shear_dev, shear_w_dev, blocks="all"
+        shear_soa, shear_w_soa = self._pair_shear_rows(
+            shear_dev, shear_w_dev, "all", signs=shear_signs
         )
 
         n_shear_bins = int(shear_np.shape[0])
         n_density_bins = int(density_np.shape[0])
-        npix = int(density_dev.shape[1])  # rows of the device buffers
-        (
-            density_soa,
-            shear_soa,
-            density_w_soa,
-            shear_w_soa,
-        ) = self._get_or_create_fused_input_buffers(
-            npix,
-            n_density_bins,
-            n_shear_bins,
-            map_backend_dtype,
-        )
-        self._fill_fused_input_buffers(
-            density_dev,
-            shear_dev,
-            density_w_dev,
-            shear_w_dev,
-            density_soa,
-            shear_soa,
-            density_w_soa,
-            shear_w_soa,
-        )
+        npix = int(density_soa.shape[0])  # rows of the device buffers
 
         n_patches = int(self.n_patches)
         nbins_total = int(self.n_patches * self.nbins)

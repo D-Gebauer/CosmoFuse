@@ -5,10 +5,12 @@
  * Replaces the per-pixel ElementwiseKernel + add.reduceat path
  * (two npixels_in_apertures-sized temporaries per call).
  *
- * Stride contract: g1/g2/values/weights are base pointers of 2D views
- * whose innermost dimension is contiguous; the caller passes the row
- * stride (in elements) explicitly so strided views such as
- * shear[:, 0] of a (nz, 2, npix) array can be used without a copy.
+ * Stride contract: g1/g2/values/weights are base pointers of 2D
+ * (tomo bin, row) views; the caller passes BOTH element strides
+ * explicitly, so any view can be used without a copy -- strided rows
+ * such as shear[:, 0] of an (nz, 2, npix) array, and equally the AoS
+ * buffers (npix, nz, 2) / (npix, nz) that the pair kernels load and the
+ * fused degrade writes directly.
  *
  * T  -- scalar type of the maps/weights (float / double)
  * QT -- scalar type of the aperture filter geometry (may be narrower
@@ -19,12 +21,16 @@ __COMMON_CUDA_SOURCE__
 
 template<typename T, typename QT>
 __global__ void gpu_aperture_shear_tomo(
-    const T* g1,                 /* base ptr, row b at g1 + b*g_stride  */
+    const T* g1,                 /* base ptr, bin b at g1 + b*g_stride  */
     const T* g2,
-    const long long g_stride,    /* elements between tomo rows (2*npix for
-                                    (nz,2,npix) views, npix for planar)  */
-    const T* weights,            /* base ptr, row b at weights + b*w_stride */
+    const long long g_stride,    /* elements between tomo bins (2*npix for
+                                    (nz,2,npix) views, npix for planar,
+                                    2 for an (npix,nz,2) AoS buffer)     */
+    const long long g_elem,      /* elements between rows (1 when the row
+                                    axis is contiguous, nz*2 for AoS)    */
+    const T* weights,            /* base ptr, bin b at weights + b*w_stride */
     const long long w_stride,
+    const long long w_elem,
     const unsigned int* q_inds,
     const QT* q_cos,
     const QT* q_sin,
@@ -50,10 +56,11 @@ __global__ void gpu_aperture_shear_tomo(
     T sum_num = (T)0.0;
     T sum_den = (T)0.0;
     for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
-        const unsigned int pix = q_inds[idx];
-        const T wv = wb[pix];
+        const long long pix = (long long)q_inds[idx];
+        const T wv = wb[pix * w_elem];
         /* Tangential shear w.r.t. the patch centre */
-        const T gt = -g1b[pix] * (T)q_cos[idx] - g2b[pix] * (T)q_sin[idx];
+        const T gt = -g1b[pix * g_elem] * (T)q_cos[idx]
+                   - g2b[pix * g_elem] * (T)q_sin[idx];
         sum_num += wv * gt * (T)q_val[idx];
         sum_den += wv;
     }
@@ -69,8 +76,10 @@ template<typename T, typename QT>
 __global__ void gpu_aperture_density_tomo(
     const T* values,
     const long long v_stride,
+    const long long v_elem,
     const T* weights,
     const long long w_stride,
+    const long long w_elem,
     const unsigned int* q_inds,
     const QT* q_val,
     const long long* q_offsets,
@@ -93,9 +102,9 @@ __global__ void gpu_aperture_density_tomo(
     T sum_num = (T)0.0;
     T sum_den = (T)0.0;
     for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
-        const unsigned int pix = q_inds[idx];
-        const T wv = wb[pix];
-        sum_num += wv * vb[pix] * (T)q_val[idx];
+        const long long pix = (long long)q_inds[idx];
+        const T wv = wb[pix * w_elem];
+        sum_num += wv * vb[pix * v_elem] * (T)q_val[idx];
         sum_den += wv;
     }
     block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);

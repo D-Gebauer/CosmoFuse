@@ -219,16 +219,20 @@ def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
 # False) when no raw compiler is available so callers can use the legacy
 # ElementwiseKernel path.
 
-def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int]:
-    """Return (array, row stride in elements) for a 2D device view.
+def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int, int]:
+    """Return (array, bin stride, row stride) in elements for a 2D view.
 
-    The kernel requires a contiguous innermost dimension; strided views
-    such as ``shear[:, 0]`` of a ``(nz, 2, npix)`` array satisfy this and
-    are passed without a copy — only their row stride differs.
+    The kernel takes both strides, so nothing is ever copied: planar
+    ``(nz, npix)`` arrays, strided views such as ``shear[:, 0]`` of an
+    ``(nz, 2, npix)`` array, and the transposed AoS buffers
+    ``shear_aos[:, :, 0].T`` of an ``(npix, nz, 2)`` array all work.
     """
-    if arr.strides[-1] != arr.itemsize:
-        arr = module.ascontiguousarray(arr)
-    return arr, int(arr.strides[0] // arr.itemsize)
+    del module  # no copy is needed for any layout
+    return (
+        arr,
+        int(arr.strides[0] // arr.itemsize),
+        int(arr.strides[1] // arr.itemsize),
+    )
 
 
 def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
@@ -239,11 +243,25 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
     and scatters a range of appended rows into the map-dtype row buffers.
     Both return ``False`` when no raw compiler is available, so the caller
     can fall back to the sparse path.
+
+    Every buffer is passed as a descriptor
+    ``(array, base, lead_stride, comp_stride, row_stride)`` of element
+    offsets, so the kernels write the SoA, interleaved or AoS layout
+    directly -- see the header of ``degrade_rows.cu``.  ``comp_stride`` is
+    unused for the weights.
     """
     build = _make_raw_kernel_builder(module, "degrade_rows.cu", "Treecode degrade")
 
     def _c_type(dtype: Any) -> str:
         return "float" if dtype == module.float32 else "double"
+
+    def _w_args(desc: Tuple[Any, int, int, int, int]) -> Tuple[Any, ...]:
+        arr, base, lead, _comp, row = desc
+        return (arr, np.int64(base), np.int64(lead), np.int64(row))
+
+    def _v_args(desc: Tuple[Any, int, int, int, int]) -> Tuple[Any, ...]:
+        arr, base, lead, comp, row = desc
+        return (arr, np.int64(base), np.int64(lead), np.int64(comp), np.int64(row))
 
     class _DegradeKernels:
         available = True
@@ -252,18 +270,10 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
         def level(
             indptr: Any,
             indices: Any,
-            w_src: Any,
-            w_src_stride: int,
-            w_src_base: int,
-            v_src: Any,
-            v_src_stride: int,
-            v_src_base: int,
-            w_dst: Any,
-            w_dst_stride: int,
-            w_dst_base: int,
-            v_dst: Any,
-            v_dst_stride: int,
-            v_dst_base: int,
+            w_src: Tuple[Any, int, int, int, int],
+            v_src: Tuple[Any, int, int, int, int],
+            w_dst: Tuple[Any, int, int, int, int],
+            v_dst: Tuple[Any, int, int, int, int],
             n_cells: int,
             n_lead: int,
             n_val: int,
@@ -271,8 +281,8 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
         ) -> bool:
             if not _has_raw_cuda_compiler(module) or n_cells <= 0:
                 return n_cells <= 0
-            src_t = _c_type(w_src.dtype)
-            acc_t = _c_type(w_dst.dtype)
+            src_t = _c_type(w_src[0].dtype)
+            acc_t = _c_type(w_dst[0].dtype)
             # Lanes per cell: the next power of two at or above the mean
             # number of children, capped at a warp.  A treecode level has
             # 4 children per cell, so a full warp would idle 87 % of its
@@ -300,18 +310,10 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
                 (
                     indptr,
                     indices,
-                    w_src,
-                    np.int64(w_src_stride),
-                    np.int64(w_src_base),
-                    v_src,
-                    np.int64(v_src_stride),
-                    np.int64(v_src_base),
-                    w_dst,
-                    np.int64(w_dst_stride),
-                    np.int64(w_dst_base),
-                    v_dst,
-                    np.int64(v_dst_stride),
-                    np.int64(v_dst_base),
+                    *_w_args(w_src),
+                    *_v_args(v_src),
+                    *_w_args(w_dst),
+                    *_v_args(v_dst),
                     np.int32(n_cells),
                     np.int32(n_lead),
                 ),
@@ -321,17 +323,15 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
         @staticmethod
         def finalize(
             w_app: Any,
-            w_app_stride: int,
             v_app: Any,
-            v_app_stride: int,
-            w_rows: Any,
-            v_rows: Any,
-            n_rows: int,
-            dst_base: int,
+            n_appended: int,
+            w_rows: Tuple[Any, int, int, int, int],
+            v_rows: Tuple[Any, int, int, int, int],
             n_lead: int,
             lo: int,
             hi: int,
             n_val: int,
+            row_inner: bool = True,
         ) -> bool:
             if not _has_raw_cuda_compiler(module):
                 return False
@@ -339,28 +339,29 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
                 return True
             kernel = build(
                 "gpu_degrade_finalize",
-                (_c_type(w_rows.dtype), _c_type(w_app.dtype), int(n_val)),
+                (_c_type(w_rows[0].dtype), _c_type(w_app.dtype), int(n_val)),
             )
             if kernel is None:
                 return False
             threads = 256
             total = int(hi - lo) * int(n_lead)
             blocks = min(65535, (total + threads - 1) // threads)
+            # The scratch is always SoA with a unit row stride.
             kernel(
                 (max(1, blocks),),
                 (threads,),
                 (
                     w_app,
-                    np.int64(w_app_stride),
+                    np.int64(n_appended),
                     v_app,
-                    np.int64(v_app_stride),
-                    w_rows,
-                    v_rows,
-                    np.int64(n_rows),
-                    np.int64(dst_base),
+                    np.int64(n_appended),
+                    np.int64(int(n_lead) * int(n_appended)),
+                    *_w_args(w_rows),
+                    *_v_args(v_rows),
                     np.int32(n_lead),
                     np.int64(lo),
                     np.int64(hi),
+                    np.int32(1 if row_inner else 0),
                 ),
             )
             return True
@@ -420,13 +421,14 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
         if raw_kernel is None:
             return False
 
-        g1, g1_stride = _aperture_tomo_prepare_planar(module, g1)
-        g2, g2_stride = _aperture_tomo_prepare_planar(module, g2)
-        if g1_stride != g2_stride:
+        g1, g1_stride, g1_elem = _aperture_tomo_prepare_planar(module, g1)
+        g2, g2_stride, g2_elem = _aperture_tomo_prepare_planar(module, g2)
+        if (g1_stride, g1_elem) != (g2_stride, g2_elem):
             g1 = module.ascontiguousarray(g1)
             g2 = module.ascontiguousarray(g2)
             g1_stride = g2_stride = int(g1.shape[1])
-        weights, w_stride = _aperture_tomo_prepare_planar(module, weights)
+            g1_elem = g2_elem = 1
+        weights, w_stride, w_elem = _aperture_tomo_prepare_planar(module, weights)
 
         npatches = int(q_offsets.shape[0] - 1)
         ntomo = int(g1.shape[0])
@@ -439,8 +441,10 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
                 g1,
                 g2,
                 np.int64(g1_stride),
+                np.int64(g1_elem),
                 weights,
                 np.int64(w_stride),
+                np.int64(w_elem),
                 q_inds,
                 q_cos,
                 q_sin,
@@ -507,8 +511,8 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
         if raw_kernel is None:
             return False
 
-        values, v_stride = _aperture_tomo_prepare_planar(module, values)
-        weights, w_stride = _aperture_tomo_prepare_planar(module, weights)
+        values, v_stride, v_elem = _aperture_tomo_prepare_planar(module, values)
+        weights, w_stride, w_elem = _aperture_tomo_prepare_planar(module, weights)
 
         npatches = int(q_offsets.shape[0] - 1)
         ntomo = int(values.shape[0])
@@ -520,8 +524,10 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
             (
                 values,
                 np.int64(v_stride),
+                np.int64(v_elem),
                 weights,
                 np.int64(w_stride),
+                np.int64(w_elem),
                 q_inds,
                 q_val,
                 q_offsets,
