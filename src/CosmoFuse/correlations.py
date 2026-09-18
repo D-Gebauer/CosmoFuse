@@ -4324,21 +4324,47 @@ class Correlation:
         module = self.backend.module
         ctx = self.compute_context
         backend = self.backend
-        if ctx.packed_pairs_dev is not None:
+        packed = ctx.packed_pairs_dev is not None
+        if packed:
             perm = ctx.packed_perm_dev
             g = lambda arr: module.ascontiguousarray(arr[perm])
-            density_p, shear_p = g(density_aos), g(shear_aos)
-            density_w_p, shear_w_p = g(density_w_aos), g(shear_w_aos)
-            pairs, row_base = ctx.packed_pairs_dev, ctx.packed_row_base_dev
-            ok_ss = backend.xipm_tomo_packed_kernel is not None and backend.xipm_tomo_packed_kernel(
+            density_aos, shear_aos = g(density_aos), g(shear_aos)
+            density_w_aos, shear_w_aos = g(density_w_aos), g(shear_w_aos)
+            geometry: Tuple[Any, ...] = (ctx.packed_pairs_dev, ctx.packed_row_base_dev)
+        else:
+            inds_i, inds_j = self._pair_index_arrays()
+            geometry = (
+                inds_i,
+                inds_j,
+                module.ascontiguousarray(self.exp2phi_dev[0]),
+                module.ascontiguousarray(self.exp2phi_dev[1]),
+            )
+
+        # One walk over the pairs for as many statistics as fit the register
+        # budget of the multi-statistic tile; the standalone tiles do the rest.
+        done = (False, False, False)
+        multi = getattr(backend, "kernel_3x2pt_tomo_pairs", None)
+        if multi is not None:
+            done = multi(
+                density_aos, shear_aos, density_w_aos, shear_w_aos, geometry, pair_offsets,
+                (ss_comb_i, ss_comb_j), (dd_comb_i, dd_comb_j), (ds_comb_i, ds_comb_j),
+                out_xipm_num, out_xipm_den, out_xig_num, out_xig_den, out_xit_num, out_xit_den,
+            )
+        do_ss, do_dd, do_ds = (not flag for flag in done)
+
+        if packed:
+            density_p, shear_p = density_aos, shear_aos
+            density_w_p, shear_w_p = density_w_aos, shear_w_aos
+            pairs, row_base = geometry
+            ok_ss = not do_ss or backend.xipm_tomo_packed_kernel is not None and backend.xipm_tomo_packed_kernel(
                 shear_p, shear_w_p, pairs, pair_offsets, row_base,
                 ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
             )
-            ok_dd = backend.kernel_density_density_tomo_packed is not None and backend.kernel_density_density_tomo_packed(
+            ok_dd = not do_dd or backend.kernel_density_density_tomo_packed is not None and backend.kernel_density_density_tomo_packed(
                 density_p, density_w_p, pairs, pair_offsets, row_base,
                 dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
             )
-            ok_ds = backend.kernel_density_shear_tomo_packed is not None and backend.kernel_density_shear_tomo_packed(
+            ok_ds = not do_ds or backend.kernel_density_shear_tomo_packed is not None and backend.kernel_density_shear_tomo_packed(
                 density_p, shear_p, density_w_p, shear_w_p, pairs, pair_offsets, row_base,
                 ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,
             )
@@ -4349,18 +4375,16 @@ class Correlation:
                 )
             return
 
-        inds_i, inds_j = self._pair_index_arrays()
-        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
-        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
-        ok_ss = backend.xipm_tomo_vectorized_kernel(
+        inds_i, inds_j, rot_i, rot_j = geometry
+        ok_ss = not do_ss or backend.xipm_tomo_vectorized_kernel(
             shear_aos, shear_w_aos, inds_i, inds_j, rot_i, rot_j, pair_offsets,
             ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
         )
-        ok_dd = backend.kernel_density_density_tomo_vectorized(
+        ok_dd = not do_dd or backend.kernel_density_density_tomo_vectorized(
             density_aos, density_w_aos, inds_i, inds_j, pair_offsets,
             dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
         )
-        ok_ds = backend.kernel_density_shear_tomo_vectorized(
+        ok_ds = not do_ds or backend.kernel_density_shear_tomo_vectorized(
             density_aos, shear_aos, density_w_aos, shear_w_aos,
             inds_i, inds_j, rot_i, rot_j, pair_offsets,
             ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,

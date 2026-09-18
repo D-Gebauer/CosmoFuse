@@ -52,6 +52,10 @@ _PAIR_TILES_CUDA_SOURCE = _load_cuda_source_file("pair_tiles.cuh")
 # weight sums over all combinations) stays within this budget.  Beyond it
 # the per-(bin, row) kernels are launched instead (unpacked geometry only).
 _MAX_TILED_ACCUMULATORS = 64
+# Budget of the single-pass 3x2pt tile (xi+- + xi_g + xi_t accumulators).
+# Measured on an A100 up to 120 (4 source x 6 lens bins, all combinations),
+# where it is still ahead of three separate tiles; untested beyond.
+_MAX_TILED_3X2PT_ACCUMULATORS = 120
 
 
 def _prepare_cuda_source(filename: str) -> str:
@@ -1773,6 +1777,108 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
     return _cupy_3x2pt_tomo_aperture_kernel
 
 
+def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
+    """Builder for the multi-statistic pair tile of the fused 3x2pt path
+    (``tomo_tiled_3x2pt.cu``): xi+-, xi_g and xi_t in one walk over the pairs.
+
+    The wrapper returns the statistics it computed as ``(ss, dd, ds)`` flags;
+    the orchestrator launches the standalone tiles for the rest.  The single
+    pass is used while all accumulators fit the register budget
+    (``max_accumulators``); ``mode = "off"`` disables it, ``"single"``
+    forces it (benchmarks).  A two-pass split (xi+- with xi_t, xi_g apart)
+    was measured too and dropped: slower than three tiles on packed pairs.
+    """
+    build = _make_raw_kernel_builder(module, "tomo_tiled_3x2pt.cu", "Tiled 3x2pt")
+    none = (False, False, False)
+
+    def _cupy_3x2pt_tomo_pairs_kernel(
+        density_map: Any,
+        shear_map: Any,
+        density_weights: Any,
+        shear_weights: Any,
+        geometry: Tuple[Any, ...],
+        bin_offsets: Any,
+        ss_comb: Tuple[Any, Any],
+        dd_comb: Tuple[Any, Any],
+        ds_comb: Tuple[Any, Any],
+        out_xipm_num: Any,
+        out_xipm_den: Any,
+        out_xig_num: Any,
+        out_xig_den: Any,
+        out_xit_num: Any,
+        out_xit_den: Any,
+    ) -> Tuple[bool, bool, bool]:
+        """``geometry`` is ``(ind_i, ind_j, rot_i, rot_j)`` or, packed,
+        ``(pairs, row_base)``."""
+        mode = _cupy_3x2pt_tomo_pairs_kernel.mode
+        if mode == "off" or not _has_raw_cuda_compiler(module):
+            return none
+        n_density = int(density_map.shape[1])
+        n_shear = int(shear_map.shape[1])
+        ss = _combination_layout(ss_comb[0], ss_comb[1], "triangle", n_shear)
+        dd = _combination_layout(dd_comb[0], dd_comb[1], "triangle", n_density)
+        ds = _combination_layout(ds_comb[0], ds_comb[1], "cartesian", n_density, n_shear)
+        if ss is None or dd is None or ds is None or ss.mode != "triangle" or ss.rows is not None:
+            return none
+        n_ss, n_dd, n_ds = 3 * ss.canonical_ncomb, 2 * dd.canonical_ncomb, 2 * ds.canonical_ncomb
+        budget = _cupy_3x2pt_tomo_pairs_kernel.max_accumulators
+        if mode != "single" and n_ss + n_dd + n_ds > budget:
+            return none
+        do = (1, 1, 1)
+
+        packed = len(geometry) == 2
+        map_c_type = "float" if density_map.dtype == module.float32 else "double"
+        acc_c_type = "float" if out_xipm_num.dtype == module.float32 else "double"
+        auto_only = 1 if dd.mode == "auto" else 0
+        if packed:
+            raw_kernel = build(
+                "gpu_tiled_packed_reduce_3x2pt",
+                (map_c_type, n_density, n_shear, auto_only, *do, acc_c_type),
+            )
+        else:
+            rot = geometry[2]
+            complex_c_type = "cuFloatComplex" if rot.dtype == module.complex64 else "cuDoubleComplex"
+            index_c_type = "int" if geometry[0].dtype == module.int32 else "long long"
+            raw_kernel = build(
+                "gpu_tiled_tomo_reduce_3x2pt",
+                (map_c_type, complex_c_type, n_density, n_shear, auto_only, *do,
+                 index_c_type, acc_c_type),
+            )
+        if raw_kernel is None:
+            return none
+
+        nbins_total = int(bin_offsets.shape[0] - 1)
+
+        def target(layout: _CombinationLayout, out: Any) -> Any:
+            if layout.rows is None:
+                return out
+            return module.zeros((layout.canonical_ncomb, nbins_total), dtype=out.dtype)
+
+        xig_num, xig_den = target(dd, out_xig_num), target(dd, out_xig_den)
+        xit_num, xit_den = target(ds, out_xit_num), target(ds, out_xit_den)
+        geom_args = (
+            (geometry[0], bin_offsets, geometry[1]) if packed else (*geometry, bin_offsets)
+        )
+        raw_kernel(
+            (max(1, nbins_total), 1, 1),
+            (256,),
+            (density_map, shear_map, density_weights, shear_weights, *geom_args,
+             out_xipm_num, out_xipm_den, xig_num, xig_den, xit_num, xit_den,
+             np.int64(nbins_total)),
+        )
+        if dd.rows is not None:
+            _scatter_canonical_rows(module, dd, xig_num, out_xig_num)
+            _scatter_canonical_rows(module, dd, xig_den, out_xig_den)
+        if ds.rows is not None:
+            _scatter_canonical_rows(module, ds, xit_num, out_xit_num)
+            _scatter_canonical_rows(module, ds, xit_den, out_xit_den)
+        return (True, True, True)
+
+    _cupy_3x2pt_tomo_pairs_kernel.mode = "auto"
+    _cupy_3x2pt_tomo_pairs_kernel.max_accumulators = _MAX_TILED_3X2PT_ACCUMULATORS
+    return _cupy_3x2pt_tomo_pairs_kernel
+
+
 def _build_cupy_xipm_cross_corr_kernel(module: Any) -> Any:
     """GPU kernel: per-pair ξ+/ξ- for cross-correlation of two shear catalogues.
 
@@ -1882,6 +1988,7 @@ class Backend:
         kernel_density_shear_tomo_packed: Optional[Any] = None,
         kernel_3x2pt_tomo_fused: Optional[Any] = None,
         kernel_3x2pt_tomo_aperture: Optional[Any] = None,
+        kernel_3x2pt_tomo_pairs: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
@@ -1908,6 +2015,7 @@ class Backend:
         # aperture sections; the pair statistics use the tiled pair kernels.
         self.kernel_3x2pt_tomo_fused = kernel_3x2pt_tomo_fused
         self.kernel_3x2pt_tomo_aperture = kernel_3x2pt_tomo_aperture
+        self.kernel_3x2pt_tomo_pairs = kernel_3x2pt_tomo_pairs
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -2155,6 +2263,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 kernel_density_density_tomo_packed=_build_cupy_density_density_tomo_packed_kernel(cupy),
                 kernel_density_shear_tomo_packed=_build_cupy_density_shear_tomo_packed_kernel(cupy),
                 kernel_3x2pt_tomo_aperture=_build_cupy_3x2pt_tomo_aperture_kernel(cupy),
+                kernel_3x2pt_tomo_pairs=_build_cupy_3x2pt_tomo_pairs_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':

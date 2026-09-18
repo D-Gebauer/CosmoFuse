@@ -13,6 +13,7 @@ from CosmoFuse.backend import (
     _MAX_VECTOR_TOMO_BINS,
     _compile_raw_cuda_kernel,
     _build_cupy_3x2pt_tomo_aperture_kernel,
+    _build_cupy_3x2pt_tomo_pairs_kernel,
     _cpu_aperture_density_kernel,
     _cpu_aperture_shear_kernel,
     _cpu_3x2pt_tomo_fused_kernel,
@@ -1090,6 +1091,63 @@ class TestBackend(unittest.TestCase):
         kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
         self.assertTrue(kernel(*self._aperture_args(np.float64, np.float32)))
         self.assertEqual(names, ["gpu_3x2pt_tomo_aperture<double, float, 1, 1, double>"])
+
+    def test_cupy_3x2pt_tomo_pairs_kernel_modes_and_budget(self):
+        names, launches = [], []
+
+        class FakeKernel:
+            def __call__(self, grid, block, args):
+                launches.append((grid, block, args))
+
+        class FakeModule:
+            float32 = np.float32
+            int32 = np.int32
+            complex64 = np.complex64
+            zeros = staticmethod(np.zeros)
+            asarray = staticmethod(np.asarray)
+
+            @staticmethod
+            def RawKernel(_source, name, options=None):
+                names.append(name)
+                return FakeKernel()
+
+        kernel = _build_cupy_3x2pt_tomo_pairs_kernel(FakeModule)
+        tri = (np.array([0, 0, 1], dtype=np.int32), np.array([0, 1, 1], dtype=np.int32))
+        cart = (np.array([0, 0, 1, 1], dtype=np.int32), np.array([0, 1, 0, 1], dtype=np.int32))
+        fields = (np.zeros((1, 2), np.float32), np.zeros((1, 2, 2), np.float32),
+                  np.zeros((1, 2), np.float32), np.zeros((1, 2), np.float32))
+        unpacked = (np.zeros(1, np.int32), np.zeros(1, np.int32),
+                    np.zeros(1, np.complex64), np.zeros(1, np.complex64))
+        packed = (np.zeros((1, 4), np.uint16), np.zeros(1, np.int64))
+        offsets = np.array([0, 1], dtype=np.int64)
+
+        def outs(n_dd=3, n_ds=4):
+            return (np.zeros((2, 3, 1)), np.zeros((3, 1)), np.zeros((n_dd, 1)),
+                    np.zeros((n_dd, 1)), np.zeros((n_ds, 1)), np.zeros((n_ds, 1)))
+
+        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (True, True, True))
+        self.assertEqual(
+            names[-1],
+            "gpu_tiled_tomo_reduce_3x2pt<float, cuFloatComplex, 2, 2, 0, 1, 1, 1, int, double>")
+        self.assertEqual(launches[-1][0], (1, 1, 1))
+        self.assertEqual(kernel(*fields, packed, offsets, tri, tri, cart, *outs()), (True, True, True))
+        self.assertEqual(names[-1], "gpu_tiled_packed_reduce_3x2pt<float, 2, 2, 0, 1, 1, 1, double>")
+        # a subset of the lens x source product is gathered from the canonical tile
+        sub = (np.array([1], dtype=np.int32), np.array([0], dtype=np.int32))
+        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, sub, *outs(n_ds=1)), (True, True, True))
+        # register budget: 9 + 6 + 8 accumulators
+        kernel.max_accumulators = 22
+        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
+        kernel.mode = "single"
+        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (True, True, True))
+        kernel.max_accumulators = 120
+        kernel.mode = "off"
+        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
+        kernel.mode = "auto"
+        # xi+- combinations other than the upper triangle: leave it to the fallbacks
+        self.assertEqual(kernel(*fields, unpacked, offsets, sub, tri, cart, *outs()), (False, False, False))
+        no_compiler = _build_cupy_3x2pt_tomo_pairs_kernel(type("M", (), {"float32": np.float32}))
+        self.assertEqual(no_compiler(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
 
     def test_cupy_density_density_tomo_vectorized_kernel_failure_modes_return_false(self):
         cases = [

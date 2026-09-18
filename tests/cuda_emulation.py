@@ -383,6 +383,46 @@ def _emulate_ds_packed(params, grid, args):
                  out_num, out_den, nbins_total, bin_flat)
 
 
+def _emulate_3x2pt_pairs(packed):
+    """tomo_tiled_3x2pt.cu :: gpu_tiled_{tomo,packed}_reduce_3x2pt (tile_multi):
+    the statistics selected by DO_SS / DO_DD / DO_DS in one walk; per
+    statistic identical to the standalone tiles."""
+
+    def _emulate(params, grid, args):
+        map_dtype = _SCALAR_TYPES[params[0]]
+        off = 1 if packed else 2
+        n_density, n_shear, auto_only = (int(p) for p in params[off:off + 3])
+        do_ss, do_dd, do_ds = (int(p) for p in params[off + 3:off + 6])
+        acc = _SCALAR_TYPES[params[-1]]
+        if packed:
+            (density, shear, density_w, shear_w, pairs, bin_offsets, row_base,
+             xipm_num, xipm_den, xig_num, xig_den, xit_num, xit_den, nbins_total) = args
+        else:
+            (density, shear, density_w, shear_w, ind_i, ind_j, rot_i, rot_j, bin_offsets,
+             xipm_num, xipm_den, xig_num, xig_den, xit_num, xit_den, nbins_total) = args
+        nbins_total = int(nbins_total)
+        assert int(grid[1]) == 1
+        for bin_flat in range(int(grid[0])):
+            if bin_flat >= nbins_total:
+                continue
+            start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+            if packed:
+                geom = _packed_geometry(map_dtype, pairs, int(row_base[bin_flat]), start, stop)
+            else:
+                geom = _unpacked_geometry(map_dtype, ind_i, ind_j, rot_i, rot_j, start, stop)
+            if do_ss:
+                _tile_xipm(shear, shear_w, n_shear, acc, geom, xipm_num, xipm_den,
+                           nbins_total, bin_flat)
+            if do_dd:
+                _tile_dd(density, density_w, n_density, bool(auto_only), acc, geom,
+                         xig_num, xig_den, nbins_total, bin_flat)
+            if do_ds:
+                _tile_ds(density, shear, density_w, shear_w, n_density, n_shear, acc, geom,
+                         xit_num, xit_den, nbins_total, bin_flat)
+
+    return _emulate
+
+
 def _emulate_dd(params, grid, args):
     """density_density_tomo_vectorized.cu :: gpu_fused_tomo_reduce_dd<T, TOMO, I, ACC>."""
     tomo_bins = int(params[1])
@@ -627,6 +667,8 @@ _KERNEL_EMULATORS = {
     "gpu_fused_tomo_reduce_ds": _emulate_ds,
     "gpu_tiled_tomo_reduce_ds": _emulate_ds_tiled,
     "gpu_tiled_packed_reduce_ds": _emulate_ds_packed,
+    "gpu_tiled_tomo_reduce_3x2pt": _emulate_3x2pt_pairs(packed=False),
+    "gpu_tiled_packed_reduce_3x2pt": _emulate_3x2pt_pairs(packed=True),
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,
     "gpu_aperture_density_tomo": _emulate_aperture_density_tomo,
     "gpu_3x2pt_tomo_aperture": _emulate_fused_aperture,

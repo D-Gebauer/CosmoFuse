@@ -344,3 +344,164 @@ __device__ __forceinline__ void tile_ds(
         }
     }
 }
+
+
+/*
+ * Several pair statistics in ONE walk over the pairs (fused 3x2pt path).
+ *
+ * The three tiles above move 120 (xi+-) + 72 (xi_g) + 184 (xi_t) bytes per
+ * pair for 4 + 4 tomographic bins when launched one after the other: the
+ * geometry is streamed three times and every field gathered twice.  This
+ * tile loads the geometry and both fields once (184 B) and accumulates the
+ * statistics selected at compile time (DO_SS / DO_DD / DO_DS).  Per
+ * statistic the arithmetic, the accumulation order and the output layout
+ * are those of tile_xipm / tile_dd / tile_ds: xi+- and xi_g come out
+ * bit-identical.  The source tangential shear is taken as gamma_t =
+ * -Re(gamma') from the rotated shear (the compiler merges the two
+ * expressions under fast-math anyway), so xi_t agrees with tile_ds to one
+ * rounding of the map precision (1e-7 relative for float32 maps).
+ *
+ * Every accumulator has to stay in a register, so the wrapper only selects
+ * this tile while the total accumulator count fits its budget.
+ */
+template<typename T, int ND, int NS, int DD_AUTO_ONLY,
+         int DO_SS, int DO_DD, int DO_DS, typename ACC, typename P>
+__device__ __forceinline__ void tile_multi(
+    const P& pairs,
+    const T* density, const T* shear, const T* density_w, const T* shear_w,
+    const long long start, const long long stop,
+    ACC* out_xipm_num, ACC* out_xipm_den,
+    ACC* out_xig_num, ACC* out_xig_den,
+    ACC* out_xit_num, ACC* out_xit_den,
+    const long long nbins_total, const long long bin_flat)
+{
+    enum {
+        NSS = (NS * (NS + 1)) / 2,
+        NDD = DD_AUTO_ONLY ? ND : (ND * (ND + 1)) / 2,
+        NDS = ND * NS
+    };
+    const int lane = (int)threadIdx.x;
+
+    ACC ss_p[NSS], ss_m[NSS], ss_w[NSS];
+    ACC dd_n[NDD], dd_w[NDD];
+    ACC ds_n[NDS], ds_w[NDS];
+    for (int k = 0; k < NSS; ++k) { ss_p[k] = (ACC)0.0; ss_m[k] = (ACC)0.0; ss_w[k] = (ACC)0.0; }
+    for (int k = 0; k < NDD; ++k) { dd_n[k] = (ACC)0.0; dd_w[k] = (ACC)0.0; }
+    for (int k = 0; k < NDS; ++k) { ds_n[k] = (ACC)0.0; ds_w[k] = (ACC)0.0; }
+
+    for (long long tid = start + lane; tid < stop; tid += BLOCK_SIZE) {
+        long long row_a, row_b;
+        T ea_R, ea_I, eb_R, eb_I;
+        pairs.load(tid, row_a, row_b, ea_R, ea_I, eb_R, eb_I);
+        const long long sa = row_a * (long long)NS;
+        const long long sb = row_b * (long long)NS;
+        const long long da = row_a * (long long)ND;
+        const long long db = row_b * (long long)ND;
+
+        T a_R[NS], a_I[NS], w_a[NS];
+        T b_R[NS], b_I[NS], w_b[NS];
+        for (int t = 0; t < NS; ++t) {
+            const T ga1 = shear[(sa + t) * 2];
+            const T ga2 = shear[(sa + t) * 2 + 1];
+            const T gb1 = shear[(sb + t) * 2];
+            const T gb2 = shear[(sb + t) * 2 + 1];
+            a_R[t] = ga1 * ea_R - ga2 * ea_I;
+            a_I[t] = ga1 * ea_I + ga2 * ea_R;
+            b_R[t] = gb1 * eb_R - gb2 * eb_I;
+            b_I[t] = gb1 * eb_I + gb2 * eb_R;
+            w_a[t] = shear_w[sa + t];
+            w_b[t] = shear_w[sb + t];
+        }
+        T d_a[ND], d_b[ND], dw_a[ND], dw_b[ND];
+        if (DO_DD || DO_DS) {
+            for (int l = 0; l < ND; ++l) {
+                d_a[l] = density[da + l];
+                d_b[l] = density[db + l];
+                dw_a[l] = density_w[da + l];
+                dw_b[l] = density_w[db + l];
+            }
+        }
+
+        if (DO_SS) {
+            int k = 0;
+            for (int i = 0; i < NS; ++i) {
+                for (int j = i; j < NS; ++j, ++k) {
+                    const T w_ab = w_a[i] * w_b[j];
+                    ss_w[k] += (ACC)w_ab;
+                    ss_p[k] += (ACC)(w_ab * (b_R[j] * a_R[i] + b_I[j] * a_I[i]));
+                    ss_m[k] += (ACC)(w_ab * (b_R[j] * a_R[i] - b_I[j] * a_I[i]));
+                    if (i != j) {
+                        const T w_ba = w_a[j] * w_b[i];
+                        ss_w[k] += (ACC)w_ba;
+                        ss_p[k] += (ACC)(w_ba * (b_R[i] * a_R[j] + b_I[i] * a_I[j]));
+                        ss_m[k] += (ACC)(w_ba * (b_R[i] * a_R[j] - b_I[i] * a_I[j]));
+                    }
+                }
+            }
+        }
+        if (DO_DD) {
+            int k = 0;
+            for (int i = 0; i < ND; ++i) {
+                const int j_stop = DD_AUTO_ONLY ? (i + 1) : ND;
+                for (int j = i; j < j_stop; ++j, ++k) {
+                    const T w_ab = dw_a[i] * dw_b[j];
+                    dd_w[k] += (ACC)w_ab;
+                    dd_n[k] += (ACC)(w_ab * d_a[i] * d_b[j]);
+                    if (i != j) {
+                        const T w_ba = dw_a[j] * dw_b[i];
+                        dd_w[k] += (ACC)w_ba;
+                        dd_n[k] += (ACC)(w_ba * d_a[j] * d_b[i]);
+                    }
+                }
+            }
+        }
+        if (DO_DS) {
+            for (int l = 0; l < ND; ++l) {
+                for (int s = 0; s < NS; ++s) {
+                    const int k = l * NS + s;
+                    const T w_ab = dw_a[l] * w_b[s];
+                    ds_w[k] += (ACC)w_ab;
+                    ds_n[k] += (ACC)(w_ab * d_a[l] * (-b_R[s]));
+                    const T w_ba = dw_b[l] * w_a[s];
+                    ds_w[k] += (ACC)w_ba;
+                    ds_n[k] += (ACC)(w_ba * d_b[l] * (-a_R[s]));
+                }
+            }
+        }
+    }
+
+    if (DO_SS) {
+        for (int k = 0; k < NSS; ++k) {
+            ACC sp = ss_p[k], sm = ss_m[k], sw = ss_w[k];
+            block_reduce_sum_triple<ACC>(sp, sm, sw, &sp, &sm, &sw);
+            if (lane == 0) {
+                const long long o = ((long long)k) * nbins_total + bin_flat;
+                out_xipm_num[o] = sp;
+                out_xipm_num[((long long)(NSS + k)) * nbins_total + bin_flat] = sm;
+                out_xipm_den[o] = sw;
+            }
+        }
+    }
+    if (DO_DD) {
+        for (int k = 0; k < NDD; ++k) {
+            ACC sn = dd_n[k], sw = dd_w[k];
+            block_reduce_sum_pair<ACC>(sn, sw, &sn, &sw);
+            if (lane == 0) {
+                const long long o = ((long long)k) * nbins_total + bin_flat;
+                out_xig_num[o] = sn;
+                out_xig_den[o] = sw;
+            }
+        }
+    }
+    if (DO_DS) {
+        for (int k = 0; k < NDS; ++k) {
+            ACC sn = ds_n[k], sw = ds_w[k];
+            block_reduce_sum_pair<ACC>(sn, sw, &sn, &sw);
+            if (lane == 0) {
+                const long long o = ((long long)k) * nbins_total + bin_flat;
+                out_xit_num[o] = sn;
+                out_xit_den[o] = sw;
+            }
+        }
+    }
+}

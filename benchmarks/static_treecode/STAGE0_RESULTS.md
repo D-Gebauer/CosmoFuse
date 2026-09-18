@@ -147,3 +147,41 @@ Gates (24–48 patches, `bitwise_check.py` + part A of the script):
   M_ap, the auto combinations of ξ±, ξ_g, all of ξ_t and every output of
   `get_3x2pt_tomo` (cross terms included on this data).
 * packed vs unpacked: ≤ 1.1e-14 relative (float64 maps).
+
+---
+
+# Stage 8 results (2026-09-18): single-pass 3x2pt tile — kept
+
+`stage8_gpu_3x2pt_single_pass.py`, same setup as stage 7, `get_3x2pt_tomo`
+from host arrays, median of 8, third of three consistent runs. "three tiles"
+= stage 7 (xi+-, xi_g, xi_t one after the other); "single pass" =
+`tile_multi`, one walk over the pairs for all three.
+
+| case | three tiles | single pass | gain |
+|---|---|---|---|
+| nside 512, 4 source + 4 lens, unpacked | 47.7 ms | 38.7 ms | 19 % |
+| same, `gc_auto_correlations_only` | 44.8 | 35.9 | 20 % |
+| 4 source + 6 lens, unpacked | 66.6 | 64.2 | 4 % |
+| same, gc auto only | 52.5 | 44.4 | 15 % |
+| 4 + 4, packed | 46.1 | 39.0 | 15 % |
+| 4 + 4, packed, gc auto only | 42.6 | 34.9 | 18 % |
+| 4 + 6, packed | 62.4 | 61.6 | 1 % |
+| 4 + 6, packed, gc auto only | 50.9 | 44.1 | 13 % |
+| nside 2048, k = 2.9, 4 + 4, packed | 289 | 266 | 8 % |
+
+Faster in every case, but far below the ~2x the byte count suggested: only
+part of the call is the pair walk (upload, degrade, AoS fill, permuted
+gathers), and with 82–120 accumulators per thread the kernel is no longer
+purely bandwidth-bound (the gain shrinks as the accumulator count grows:
+4 % / 1 % at 120). Used up to 120 accumulators (`_MAX_TILED_3X2PT_ACCUMULATORS`,
+the largest measured); beyond that the three tiles run.
+
+A two-pass split (xi+- with xi_t, xi_g separately) was measured in the same
+runs: 41.7 / 62.5 ms unpacked, but 48.0 ms (4 + 4 packed) and 298 ms (nside
+2048) — *slower* than three tiles on packed pairs. Dropped.
+
+Gates: GPU float64 vs CPU float64 <= 1.4e-14 (packed and unpacked); single
+pass vs three tiles: M_ap, M_g, xi+-, xi_g bitwise, xi_t to one rounding of
+the map precision (2.5e-16 float64, 1e-7 float32 maps: the tangential shear is
+-Re(gamma') of the rotated shear; nvcc merges the two expressions under
+fast-math even when written separately — tried).

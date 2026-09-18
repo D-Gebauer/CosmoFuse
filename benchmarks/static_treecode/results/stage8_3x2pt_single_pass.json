@@ -1,0 +1,389 @@
+{
+ "512_unpacked_4lens_full": {
+  "off": {
+   "ms": 47.74390300735831
+  },
+  "split": {
+   "ms": 41.682067327201366,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    6.01758470638068e-08
+   ]
+  },
+  "single": {
+   "ms": 38.73124159872532,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    6.01758470638068e-08
+   ]
+  }
+ },
+ "512_unpacked_4lens_gc_auto": {
+  "off": {
+   "ms": 44.82343653216958
+  },
+  "split": {
+   "ms": 38.84481079876423,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    6.01758470638068e-08
+   ]
+  },
+  "single": {
+   "ms": 35.939598456025124,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    6.01758470638068e-08
+   ]
+  }
+ },
+ "512_unpacked_6lens_full": {
+  "off": {
+   "ms": 66.60166475921869
+  },
+  "split": {
+   "ms": 62.48112954199314,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    9.93346170014773e-08
+   ]
+  },
+  "single": {
+   "ms": 64.20397199690342,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    9.93346170014773e-08
+   ]
+  }
+ },
+ "512_unpacked_6lens_gc_auto": {
+  "off": {
+   "ms": 52.51224897801876
+  },
+  "split": {
+   "ms": 48.41425223276019,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    9.93346170014773e-08
+   ]
+  },
+  "single": {
+   "ms": 44.43036392331123,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    9.93346170014773e-08
+   ]
+  }
+ },
+ "512_packed_4lens_full": {
+  "off": {
+   "ms": 46.0854172706604
+  },
+  "split": {
+   "ms": 48.00083115696907,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1348988430614215e-07
+   ]
+  },
+  "single": {
+   "ms": 39.017331786453724,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1348988430614215e-07
+   ]
+  }
+ },
+ "512_packed_4lens_gc_auto": {
+  "off": {
+   "ms": 42.553944513201714
+  },
+  "split": {
+   "ms": 44.74172694608569,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1348988430614215e-07
+   ]
+  },
+  "single": {
+   "ms": 34.89984991028905,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1348988430614215e-07
+   ]
+  }
+ },
+ "512_packed_6lens_full": {
+  "off": {
+   "ms": 62.37119669094682
+  },
+  "split": {
+   "ms": 57.23909055814147,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1533054310306052e-07
+   ]
+  },
+  "single": {
+   "ms": 61.62059446796775,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1533054310306052e-07
+   ]
+  }
+ },
+ "512_packed_6lens_gc_auto": {
+  "off": {
+   "ms": 50.87572569027543
+  },
+  "split": {
+   "ms": 45.69739196449518,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1533054310306052e-07
+   ]
+  },
+  "single": {
+   "ms": 44.07699732109904,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1533054310306052e-07
+   ]
+  }
+ },
+ "2048_packed_4lens_full": {
+  "off": {
+   "ms": 289.26547802984715
+  },
+  "split": {
+   "ms": 297.9892957955599,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.3554946772773886e-07
+   ]
+  },
+  "single": {
+   "ms": 265.7228009775281,
+   "bitwise": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    false
+   ],
+   "max_rel": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.3554946772773886e-07
+   ]
+  }
+ }
+}

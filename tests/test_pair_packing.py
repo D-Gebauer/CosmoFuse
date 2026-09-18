@@ -151,14 +151,16 @@ class TestPackedMeasurement(unittest.TestCase):
             del LAUNCH_LOG[:]
             gpu = {k: f() for k, f in calls_ref.items()}
         corr.compute_context.Q_inds_dev = None
-        self.assertEqual(calls["kernel_density_density_tomo_packed"], 3)
-        self.assertEqual(calls["kernel_density_shear_tomo_packed"], 3)
-        self.assertEqual(calls["xipm_tomo_packed_kernel"], 1)
+        # get_3x2pt_tomo: all three statistics in the single-pass packed tile
+        self.assertEqual(calls["kernel_3x2pt_tomo_pairs"], 1)
+        self.assertEqual(calls["kernel_density_density_tomo_packed"], 2)
+        self.assertEqual(calls["kernel_density_shear_tomo_packed"], 2)
+        self.assertEqual(calls["xipm_tomo_packed_kernel"], 0)
         self.assertEqual(calls["kernel_density_density_tomo_vectorized"], 0)
         self.assertEqual(calls["kernel_density_shear_tomo_vectorized"], 0)
         self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 0)
         for name in ("gpu_tiled_packed_reduce_dd", "gpu_tiled_packed_reduce_ds",
-                     "gpu_tiled_packed_reduce_xipm", "gpu_3x2pt_tomo_aperture"):
+                     "gpu_tiled_packed_reduce_3x2pt", "gpu_3x2pt_tomo_aperture"):
             self.assertIn(name, LAUNCH_LOG)
         for key in cpu:
             for x, y in zip(cpu[key], gpu[key]):

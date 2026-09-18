@@ -37,7 +37,10 @@ see *Changed*) and the pair search precision (float64).
   `cuda/pair_tiles.cuh`. The fused 3x2pt path (`get_3x2pt_tomo`) runs its
   pair statistics in the same tiled kernels (its own kernel keeps only the
   aperture sections). Auto-only (`gc_auto_correlations_only`) and subset
-  (`ggl_bin_combinations`) requests are served by the tiles too. xi+-:
+  (`ggl_bin_combinations`) requests are served by the tiles too.
+  `get_3x2pt_tomo` walks the pairs **once** for all three statistics
+  (`cuda/tomo_tiled_3x2pt.cu`, up to 120 accumulators per thread; 8–20 %
+  faster than three passes for 4 + 4 bins on an A100). xi+-:
   bit-identical auto combinations, 4.2–4.5x faster on an A100.
 - **Payload packing** (`pack_pairs=True`, opt-in): 8 instead of 24 bytes per
   pair on the device (uint16 rotation angles + uint16 patch-local row indices,
