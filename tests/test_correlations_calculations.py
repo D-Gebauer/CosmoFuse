@@ -454,7 +454,13 @@ class TestCorrelationCalculations(unittest.TestCase):
 
     def test_calculate_pairs_2PCF(self):
         """Test calculate_pairs_2PCF sequential aggregation."""
+        # The patch centres have to grow with n_patches: the pre-flight
+        # memory projection walks one disc per patch, and on a machine with
+        # a GPU it really runs (with no memory_budget_gb the budget is the
+        # free device memory, so the early return does not apply).
         self.corr.n_patches = 2
+        self.corr.theta_center = np.array([np.pi / 4, np.pi / 3])
+        self.corr.phi_center = np.array([0.0, 0.5])
         with patch.object(
             self.corr,
             "__get_pairs_helper__",
