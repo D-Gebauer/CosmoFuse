@@ -12,7 +12,7 @@ from CosmoFuse.backend import (
     Backend,
     _MAX_VECTOR_TOMO_BINS,
     _compile_raw_cuda_kernel,
-    _build_cupy_3x2pt_tomo_fused_kernel,
+    _build_cupy_3x2pt_tomo_aperture_kernel,
     _cpu_aperture_density_kernel,
     _cpu_aperture_shear_kernel,
     _cpu_3x2pt_tomo_fused_kernel,
@@ -450,9 +450,9 @@ class TestBackend(unittest.TestCase):
         rot_j = np.array([1.0 + 0.0j], dtype=np.complex128)
         comb_i = np.array([0, 0, 1], dtype=np.int64)
         comb_j = np.array([0, 1, 1], dtype=np.int64)
-        out_p = np.zeros((6, 1), dtype=np.float64)
-        out_m = np.zeros((6, 1), dtype=np.float64)
-        out_w = np.zeros((6, 1), dtype=np.float64)
+        out_p = np.zeros((3, 1), dtype=np.float64)
+        out_m = np.zeros((3, 1), dtype=np.float64)
+        out_w = np.zeros((3, 1), dtype=np.float64)
 
         launched = backend.xipm_tomo_vectorized_kernel(
             shear,
@@ -469,8 +469,9 @@ class TestBackend(unittest.TestCase):
             out_w,
         )
         self.assertIsNone(launched)
-        self.assertEqual(out_p.shape, (6, 1))
-        self.assertEqual(out_m.shape, (6, 1))
+        # one row per combination; the cross row (0,1) holds both orientations
+        np.testing.assert_allclose(out_w[:, 0], [1.0, 2.0, 1.0])
+        np.testing.assert_allclose(out_p[:, 0], [3.0, 4.0 + 6.0, 8.0])
 
     def test_cpu_density_density_corr_kernel(self):
         density_a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
@@ -611,8 +612,8 @@ class TestBackend(unittest.TestCase):
                 else:
                     w_ba = weights[pi, j] * weights[pj, i]
                     ba = w_ba * density[pi, j] * density[pj, i]
-                    expected_num[k, 0] += 0.5 * (ab + ba)
-                    expected_den[k, 0] += 0.5 * (w_ab + w_ba)
+                    expected_num[k, 0] += ab + ba
+                    expected_den[k, 0] += w_ab + w_ba
 
         np.testing.assert_allclose(out_num, expected_num)
         np.testing.assert_allclose(out_den, expected_den)
@@ -792,11 +793,11 @@ class TestBackend(unittest.TestCase):
         out_ma_den = np.zeros((1, 1), dtype=np.float64)
         out_mg_num = np.zeros((1, 1), dtype=np.float64)
         out_mg_den = np.zeros((1, 1), dtype=np.float64)
-        out_xip_num = np.zeros((2, 1), dtype=np.float64)
-        out_xim_num = np.zeros((2, 1), dtype=np.float64)
-        out_xipm_den = np.zeros((2, 1), dtype=np.float64)
-        out_xig_num = np.zeros((2, 1), dtype=np.float64)
-        out_xig_den = np.zeros((2, 1), dtype=np.float64)
+        out_xip_num = np.zeros((1, 1), dtype=np.float64)
+        out_xim_num = np.zeros((1, 1), dtype=np.float64)
+        out_xipm_den = np.zeros((1, 1), dtype=np.float64)
+        out_xig_num = np.zeros((1, 1), dtype=np.float64)
+        out_xig_den = np.zeros((1, 1), dtype=np.float64)
         out_xit_num = np.zeros((1, 1), dtype=np.float64)
         out_xit_den = np.zeros((1, 1), dtype=np.float64)
 
@@ -892,8 +893,8 @@ class TestBackend(unittest.TestCase):
         out_xip_num = np.zeros((0, 1), dtype=np.float64)
         out_xim_num = np.zeros((0, 1), dtype=np.float64)
         out_xipm_den = np.zeros((0, 1), dtype=np.float64)
-        out_xig_num = np.zeros((6, 1), dtype=np.float64)
-        out_xig_den = np.zeros((6, 1), dtype=np.float64)
+        out_xig_num = np.zeros((3, 1), dtype=np.float64)
+        out_xig_den = np.zeros((3, 1), dtype=np.float64)
         out_xit_num = np.zeros((0, 1), dtype=np.float64)
         out_xit_den = np.zeros((0, 1), dtype=np.float64)
 
@@ -932,62 +933,46 @@ class TestBackend(unittest.TestCase):
             out_xit_den,
         )
 
-        ab_idx = 2
-        ba_idx = 3
+        # The cross combination (0, 1) is row 1 and holds both orientations.
         expected_den_ab = density_weights[0, 0] * density_weights[1, 1]
         expected_den_ba = density_weights[0, 1] * density_weights[1, 0]
         expected_num_ab = expected_den_ab * density_map[0, 0] * density_map[1, 1]
         expected_num_ba = expected_den_ba * density_map[0, 1] * density_map[1, 0]
 
-        self.assertAlmostEqual(out_xig_den[ab_idx, 0], expected_den_ab)
-        self.assertAlmostEqual(out_xig_den[ba_idx, 0], expected_den_ba)
-        self.assertAlmostEqual(out_xig_num[ab_idx, 0], expected_num_ab)
-        self.assertAlmostEqual(out_xig_num[ba_idx, 0], expected_num_ba)
+        self.assertAlmostEqual(out_xig_den[1, 0], expected_den_ab + expected_den_ba)
+        self.assertAlmostEqual(out_xig_num[1, 0], expected_num_ab + expected_num_ba)
+        self.assertAlmostEqual(out_xig_den[0, 0], density_weights[0, 0] * density_weights[1, 0])
+        self.assertAlmostEqual(out_xig_den[2, 0], density_weights[0, 1] * density_weights[1, 1])
 
-    def test_cupy_3x2pt_tomo_fused_kernel_missing_rawkernel_returns_false(self):
+    @staticmethod
+    def _aperture_args(dtype, q_dtype, n_density=1, n_shear=1, npatches=1):
+        return (
+            np.zeros((1, n_density), dtype=dtype),
+            np.zeros((1, n_shear, 2), dtype=dtype),
+            np.zeros((1, n_density), dtype=dtype),
+            np.zeros((1, n_shear), dtype=dtype),
+            np.zeros(1, dtype=np.uint32),
+            np.zeros(1, dtype=q_dtype),
+            np.zeros(1, dtype=q_dtype),
+            np.zeros(1, dtype=q_dtype),
+            np.arange(npatches + 1, dtype=np.int64),
+            np.ones(npatches, dtype=q_dtype),
+            np.zeros((n_shear, npatches), dtype=dtype),
+            np.zeros((n_shear, npatches), dtype=dtype),
+            np.zeros((n_density, npatches), dtype=dtype),
+            np.zeros((n_density, npatches), dtype=dtype),
+        )
+
+    def test_cupy_3x2pt_tomo_aperture_kernel_missing_rawkernel_returns_false(self):
         class FakeModule:
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
 
-        kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.zeros(1, dtype=np.uint32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.array([0, 1], dtype=np.int64),
-            np.ones(1, dtype=np.float32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
+        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        self.assertFalse(kernel(*self._aperture_args(np.float32, np.float32)))
 
-    def test_cupy_3x2pt_tomo_fused_kernel_compile_failure_returns_false(self):
+    def test_cupy_3x2pt_tomo_aperture_kernel_compile_failure_returns_false(self):
         compile_attempts = []
 
         class FakeModule:
@@ -1000,82 +985,12 @@ class TestBackend(unittest.TestCase):
                 compile_attempts.append(1)
                 raise RuntimeError("compile failed")
 
-        kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.zeros(1, dtype=np.uint32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.array([0, 1], dtype=np.int64),
-            np.ones(1, dtype=np.float32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        self.assertFalse(ok)
-        # Failed compilations are cached negatively: a second call must not
-        # retry the (expensive) NVRTC compilation.
-        args = (
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.zeros(1, dtype=np.uint32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.array([0, 1], dtype=np.int64),
-            np.ones(1, dtype=np.float32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
-        attempts_after_first = len(compile_attempts)
-        ok2 = kernel(*args)
-        self.assertFalse(ok2)
-        self.assertEqual(len(compile_attempts), attempts_after_first)
+        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        args = self._aperture_args(np.float32, np.float32)
+        self.assertFalse(kernel(*args))
+        self.assertFalse(kernel(*args))
+        # A failed compilation is cached negatively: not retried.
+        self.assertEqual(len(compile_attempts), 1)
 
     @staticmethod
     def _make_fake_cuda_namespace():
@@ -1110,9 +1025,10 @@ class TestBackend(unittest.TestCase):
 
         return FakeCuda
 
-    def test_cupy_3x2pt_tomo_fused_kernel_success_and_cache(self):
+    def test_cupy_3x2pt_tomo_aperture_kernel_success_and_cache(self):
         compile_calls = {"count": 0}
         launches = []
+        names = []
 
         class FakeKernel:
             def __call__(self, grid, block, args):
@@ -1125,70 +1041,36 @@ class TestBackend(unittest.TestCase):
             cuda = self._make_fake_cuda_namespace()
 
             @staticmethod
-            def RawKernel(*_args, **_kwargs):
+            def RawKernel(_source, name_expression, options=None):
                 compile_calls["count"] += 1
+                names.append(name_expression)
                 return FakeKernel()
 
-        kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
-        args = (
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1, 2), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex64),
-            np.zeros(1, dtype=np.complex64),
-            np.array([0, 1], dtype=np.int64),
-            np.zeros(1, dtype=np.uint32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-            np.array([0, 1], dtype=np.int64),
-            np.ones(1, dtype=np.float32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-            np.zeros((1, 1), dtype=np.float32),
-        )
+        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        args = self._aperture_args(np.float32, np.float32, n_density=3, n_shear=2, npatches=4)
         self.assertTrue(kernel(*args))
         self.assertTrue(kernel(*args))
         self.assertEqual(compile_calls["count"], 1)
-        # One launch per correlation section (5) for each of the two calls.
-        self.assertEqual(len(launches), 10)
-        # nbins_total=1, npatches=1, 1 tomo bin, 1 combination each:
+        self.assertEqual(names, ["gpu_3x2pt_tomo_aperture<float, float, 3, 2, float>"])
+        # One launch per aperture section for each of the two calls.
+        self.assertEqual(len(launches), 4)
         expected_grids = [
-            (1, 1, 1),  # z=0 M_ap:  (npatches, n_shear_bins)
-            (1, 1, 1),  # z=1 M_g:   (npatches, n_density_bins)
-            (1, 2, 1),  # z=2 xi+/-: (nbins_total, 2 * n_ss_comb)
-            (1, 2, 1),  # z=3 xi_g:  (nbins_total, 2 * n_dd_comb)
-            (1, 1, 1),  # z=4 xi_t:  (nbins_total, n_ds_comb)
+            (4, 2, 1),  # z=0 M_ap: (npatches, n_shear_bins)
+            (4, 3, 1),  # z=1 M_g:  (npatches, n_density_bins)
         ]
-        for section, (launch, expected_grid) in enumerate(
-            zip(launches[:5], expected_grids)
-        ):
+        for section, (launch, expected_grid) in enumerate(zip(launches[:2], expected_grids)):
             grid, block, launch_args = launch
             self.assertEqual(grid, expected_grid)
             self.assertEqual(block, (256,))
             # The section selector is appended as the last kernel argument
-            # (after the 32 wrapper args + 6 derived size scalars).
+            # (after the 14 wrapper args + npatches).
             self.assertEqual(int(launch_args[-1]), section)
-            self.assertEqual(len(launch_args), len(args) + 7)
+            self.assertEqual(len(launch_args), len(args) + 2)
+            self.assertEqual(int(launch_args[4]), 4)
 
-    def test_cupy_3x2pt_tomo_fused_kernel_complex128_branch(self):
+    def test_cupy_3x2pt_tomo_aperture_kernel_double_branch(self):
+        names = []
+
         class FakeKernel:
             def __call__(self, _grid, _block, _args):
                 return None
@@ -1201,45 +1083,13 @@ class TestBackend(unittest.TestCase):
             cuda = self._make_fake_cuda_namespace()
 
             @staticmethod
-            def RawKernel(_source, _kernel_name, options=None):
+            def RawKernel(_source, kernel_name, options=None):
+                names.append(kernel_name)
                 return FakeKernel()
 
-        kernel = _build_cupy_3x2pt_tomo_fused_kernel(FakeModule)
-        ok = kernel(
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1, 2), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.int64),
-            np.zeros(1, dtype=np.complex128),
-            np.zeros(1, dtype=np.complex128),
-            np.array([0, 1], dtype=np.int64),
-            np.zeros(1, dtype=np.uint32),
-            np.zeros(1, dtype=np.float64),
-            np.zeros(1, dtype=np.float64),
-            np.zeros(1, dtype=np.float64),
-            np.array([0, 1], dtype=np.int64),
-            np.ones(1, dtype=np.float64),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((2, 1), dtype=np.float64),
-            np.zeros((2, 1), dtype=np.float64),
-            np.zeros((2, 1), dtype=np.float64),
-            np.zeros((2, 1), dtype=np.float64),
-            np.zeros((2, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-            np.zeros((1, 1), dtype=np.float64),
-        )
-        self.assertTrue(ok)
+        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        self.assertTrue(kernel(*self._aperture_args(np.float64, np.float32)))
+        self.assertEqual(names, ["gpu_3x2pt_tomo_aperture<double, float, 1, 1, double>"])
 
     def test_cupy_density_density_tomo_vectorized_kernel_failure_modes_return_false(self):
         cases = [
@@ -1320,8 +1170,8 @@ class TestBackend(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
             np.array([0, 0, 1], dtype=np.int32),
             np.array([0, 1, 1], dtype=np.int32),
-            np.zeros((6, 1), dtype=np.float32),
-            np.zeros((6, 1), dtype=np.float32),
+            np.zeros((3, 1), dtype=np.float32),
+            np.zeros((3, 1), dtype=np.float32),
         )
         ok_cached = kernel(
             np.zeros((1, 2), dtype=np.float32),
@@ -1331,8 +1181,8 @@ class TestBackend(unittest.TestCase):
             np.array([0, 1], dtype=np.int64),
             np.array([0, 0, 1], dtype=np.int32),
             np.array([0, 1, 1], dtype=np.int32),
-            np.zeros((6, 1), dtype=np.float32),
-            np.zeros((6, 1), dtype=np.float32),
+            np.zeros((3, 1), dtype=np.float32),
+            np.zeros((3, 1), dtype=np.float32),
         )
         self.assertTrue(ok)
         self.assertTrue(ok_cached)
@@ -1340,7 +1190,7 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(compile_calls["count"], 1)
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_dd<float, 2, long long, float>",
+            "gpu_tiled_tomo_reduce_dd<float, 2, 0, long long, float>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
@@ -1415,6 +1265,8 @@ class TestBackend(unittest.TestCase):
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
+            zeros = staticmethod(np.zeros)
+            asarray = staticmethod(np.asarray)
 
             @staticmethod
             def RawKernel(source, kernel_name, options=None):
@@ -1439,9 +1291,11 @@ class TestBackend(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(len(compiled_sources), 1)
+        # A single requested combination is gathered from the tiled kernel's
+        # canonical lens x source product.
         self.assertEqual(
             compiled_sources[0][1],
-            "gpu_fused_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long, float>",
+            "gpu_tiled_tomo_reduce_ds<float, cuFloatComplex, 2, 2, long long, float>",
         )
         self.assertEqual(compiled_sources[0][2], ("--use_fast_math", "--std=c++14"))
 
@@ -1456,6 +1310,8 @@ class TestBackend(unittest.TestCase):
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
+            zeros = staticmethod(np.zeros)
+            asarray = staticmethod(np.asarray)
 
             @staticmethod
             def RawKernel(_source, _kernel_name, options=None):
@@ -1600,8 +1456,8 @@ class TestBackend(unittest.TestCase):
         bin_offsets = np.array([0, 1], dtype=np.int64)
         comb_i = np.array([0, 0, 1], dtype=np.int32)
         comb_j = np.array([0, 1, 1], dtype=np.int32)
-        out_num = np.zeros((2, 6, 1), dtype=np.complex64)
-        out_den = np.zeros((6, 1), dtype=np.float32)
+        out_num = np.zeros((2, 3, 1), dtype=np.float32)
+        out_den = np.zeros((3, 1), dtype=np.float32)
 
         ok1 = kernel(
             shear,
@@ -1634,10 +1490,11 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(ok2)
         self.assertEqual(rawkernel_calls["count"], 1)
         self.assertEqual(len(launches), 2)
-        # The launch tuple carries out_den directly after out_num.
+        # Tiled launch: one block per angular bin, out_den directly after out_num.
+        self.assertEqual(launches[0][0], (1, 1, 1))
         launch_args = launches[0][2]
-        self.assertIs(launch_args[9], out_num)
-        self.assertIs(launch_args[10], out_den)
+        self.assertIs(launch_args[7], out_num)
+        self.assertIs(launch_args[8], out_den)
 
     def test_cupy_tomo_vectorized_kernel_complex128(self):
         class FakeKernel:
@@ -1648,6 +1505,7 @@ class TestBackend(unittest.TestCase):
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
+            zeros = staticmethod(np.zeros)
             # complex128 needs to be present for checks, though not used in fake
             complex128 = np.complex128
 
@@ -1669,8 +1527,8 @@ class TestBackend(unittest.TestCase):
         bin_offsets = np.array([0, 1], dtype=np.int64)
         comb_i = np.array([0], dtype=np.int32)
         comb_j = np.array([0], dtype=np.int32)
-        out_num = np.zeros((2, 1), dtype=np.float64)
-        out_den = np.zeros((2, 1), dtype=np.float64)
+        out_num = np.zeros((2, 1, 1), dtype=np.float64)
+        out_den = np.zeros((1, 1), dtype=np.float64)
 
         ok = kernel(
             shear,
@@ -1698,6 +1556,7 @@ class TestBackend(unittest.TestCase):
             float32 = np.float32
             int32 = np.int32
             complex64 = np.complex64
+            zeros = staticmethod(np.zeros)
 
             @staticmethod
             def RawKernel(source, kernel_name, options=None):
@@ -1715,15 +1574,15 @@ class TestBackend(unittest.TestCase):
         weights_2 = np.zeros((1, 2), dtype=np.float32)
         comb_i_2 = np.array([0, 0, 1], dtype=np.int32)
         comb_j_2 = np.array([0, 1, 1], dtype=np.int32)
-        out_num_2 = np.zeros((2, 6, 1), dtype=np.float32)
-        out_den_2 = np.zeros((6, 1), dtype=np.float32)
+        out_num_2 = np.zeros((2, 3, 1), dtype=np.float32)
+        out_den_2 = np.zeros((3, 1), dtype=np.float32)
 
         shear_3 = np.zeros((1, 3, 2), dtype=np.float32)
         weights_3 = np.zeros((1, 3), dtype=np.float32)
         comb_i_3 = np.array([0, 0, 0, 1, 1, 2], dtype=np.int32)
         comb_j_3 = np.array([0, 1, 2, 1, 2, 2], dtype=np.int32)
-        out_num_3 = np.zeros((2, 12, 1), dtype=np.float32)
-        out_den_3 = np.zeros((12, 1), dtype=np.float32)
+        out_num_3 = np.zeros((2, 6, 1), dtype=np.float32)
+        out_den_3 = np.zeros((6, 1), dtype=np.float32)
 
         ok_2 = kernel(
             shear_2,
@@ -1793,8 +1652,8 @@ class TestBackend(unittest.TestCase):
         odd_j = np.array([1, 1], dtype=np.int32)
         self.assertTrue(
             kernel(shear_2, weights_2, ind_i, ind_j, rot_i, rot_j, bin_offsets,
-                   odd_i, odd_j, np.zeros((2, 4, 1), dtype=np.float32),
-                   np.zeros((4, 1), dtype=np.float32))
+                   odd_i, odd_j, np.zeros((2, 2, 1), dtype=np.float32),
+                   np.zeros((2, 1), dtype=np.float32))
         )
         self.assertEqual(len(compiled_sources), n_before)  # per-row kernel reused
         kernel.tiled = True

@@ -92,8 +92,11 @@ which decorrelates the shape noise without changing its variance.
 Packed and unpacked are indistinguishable at this level everywhere.
 
 ## Cross-combinations
-CosmoFuse's cross-bin ξ± is the mean of the two orientation ratios
-½(N_AB/W_AB + N_BA/W_BA); TreeCorr's is (N_AB + N_BA)/(W_AB + W_BA). With the
-real per-bin DES weights they differ by ~3 % of max|ξ+| per patch (0.024 σ rms);
-recombining CosmoFuse's raw numerators/denominators TreeCorr-style agrees to
-5e-8. With equal weights per bin the two definitions coincide (≤ 5e-9).
+At the time of this benchmark CosmoFuse's cross-bin ξ± was the mean of the
+two orientation ratios ½(N_AB/W_AB + N_BA/W_BA); TreeCorr's is
+(N_AB + N_BA)/(W_AB + W_BA). With the real per-bin DES weights they differ by
+~3 % of max|ξ+| per patch (0.024 σ rms); recombining CosmoFuse's raw
+numerators/denominators TreeCorr-style agrees to 5e-8. With equal weights per
+bin the two definitions coincide (≤ 5e-9). **Since stage 7 CosmoFuse uses the
+ratio of sums** (as it always did for ξ_g and ξ_t), so the cross combinations
+now agree with TreeCorr at the full-resolution level of the auto combinations.

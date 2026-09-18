@@ -61,7 +61,7 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
 - **Compact row space**: device buffers and indices only cover the unmasked pixels; maps can be passed full-sky or already cut to the footprint (`Correlation.row_pix` order) — no scatter, `npix / n_active` times less host→device traffic
 - **Static treecode (opt-in, `resolution_factor`)**: every angular bin is measured on the coarsest HEALPix level that still resolves it, cutting the pair geometry by orders of magnitude (nside 2048, $\theta_{\min}=5'$, ~900 patches fit on one GPU)
-- Combination-tiled GPU $\xi_\pm$ kernel (all tomographic combinations in one pass over the pairs) and a ring-buffer map loader (`RowSpaceMapLoader`) that keeps the GPU busy while measuring $10^5$ maps
+- Combination-tiled GPU pair kernels for $\xi_\pm$, $w(\theta)$ and $\gamma_t$ (all tomographic combinations in one pass over the pairs, also inside `get_3x2pt_tomo`), optional 8-byte pair packing, and a ring-buffer map loader (`RowSpaceMapLoader`) that keeps the GPU busy while measuring $10^5$ maps
 
 ## Installation
 Install using:
@@ -90,7 +90,7 @@ First create a Correlation object:
         accumulation_precision="float64",   # "same" / "float64"
         resolution_factor=None,             # None = full resolution (default); True = static treecode with k=4; or a number k
         aperture_nside=None,                # None = map resolution; e.g. 512 = aperture statistics on the degraded map
-        pair_search_precision="auto",       # "float64" recommended for theta_min < ~10'
+        pair_search_precision="float64",    # pair search precision ("rotation" = pre-4.21 float32)
         pack_pairs=False,                   # True: 8 instead of 24 bytes per pair on the GPU
     )
 
@@ -202,9 +202,9 @@ With $\sqrt 2$-spaced bin edges (e.g. `theta_min=5`, `theta_max=5*2**5.5`, `nbin
 
 Before pair finding a **preflight check** projects the pair memory from the mask and raises a `MemoryError` that names a `resolution_factor` that fits (budget: free device memory, or `memory_budget_gb=`), instead of failing with an out-of-memory error an hour into preprocessing. `load_pairs` adopts the resolution stored in the pair file and raises if the constructor explicitly asked for a different one.
 
-**Pair packing (`pack_pairs=True`).** On the device a pair normally costs 24 bytes (two int32 rows + two complex64 rotation factors). Packed it costs 8: the rotation factors have unit modulus, so only their angle is kept (uint16, resolution $2\pi/65536$), and the row indices become uint16 indices local to the row block of their patch and resolution level (the map rows of every patch are gathered into contiguous blocks once per map). Three times more pairs fit on the GPU — a higher `resolution_factor` or a denser patch grid — at unchanged speed (A100: 14.5 → 5.2 GB for nside 2048, 917 patches, $k=2.9$). It is not bit-identical: on real DES Y3 maps every per-patch estimate moves by $3\times10^{-5}$ (rms; max $2\times10^{-4}$) of its own patch-to-patch scatter, with no bias (mean shift $<10^{-7}\sigma$), and the same holds for patch averages and the i3PCFs — the error is a fixed tiny fraction of the statistical error at every level of averaging. Pair files and host arrays stay exact; the CPU backend uses the same quantised rotations, so both backends measure the same estimator. On GPU backends the packed geometry currently serves the shear path (`vectorized_shear_shear`, `get_full_tomo_shear`) and the aperture statistics; the other methods raise.
+**Pair packing (`pack_pairs=True`).** On the device a pair normally costs 24 bytes (two int32 rows + two complex64 rotation factors). Packed it costs 8: the rotation factors have unit modulus, so only their angle is kept (uint16, resolution $2\pi/65536$), and the row indices become uint16 indices local to the row block of their patch and resolution level (the map rows of every patch are gathered into contiguous blocks once per map). Three times more pairs fit on the GPU — a higher `resolution_factor` or a denser patch grid — at unchanged speed (A100: 14.5 → 5.2 GB for nside 2048, 917 patches, $k=2.9$). It is not bit-identical: on real DES Y3 maps every per-patch estimate moves by $3\times10^{-5}$ (rms; max $2\times10^{-4}$) of its own patch-to-patch scatter, with no bias (mean shift $<10^{-7}\sigma$), and the same holds for patch averages and the i3PCFs — the error is a fixed tiny fraction of the statistical error at every level of averaging. Pair files and host arrays stay exact; the CPU backend uses the same quantised rotations, so both backends measure the same estimator. On GPU backends the packed geometry serves every tomographic method (`vectorized_shear_shear`, `vectorized_density_density`, `vectorized_density_shear`, `get_full_tomo_*`, `get_3x2pt_tomo`) and the aperture statistics; only the single-map `compute_*` methods need `pack_pairs=False`.
 
-At small scales also set `pair_search_precision="float64"` (automatic with `resolution_factor`): a float32 pair search resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin. The stored rotation factors stay at `rotation_precision`, so this costs no memory.
+The pair search runs at float64 by default (`pair_search_precision="float64"`, no memory cost: the stored rotation factors stay at `rotation_precision`). The pre-4.21 search at rotation precision (`"rotation"`, float32 by default) resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin; even at nside 512 / 15′ it moves per-patch estimates by 0.05 σ (rms, up to 0.9 σ) against the exact result.
 
 ### Aperture filters
 
@@ -275,6 +275,8 @@ xi_t, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_le
 #### 2. Full Tomography (3x2pt)
 
 Calculate all correlations for all requested tomographic bin combinations at once.
+
+For a cross combination $(i, j)$, $i \ne j$, every pixel pair contributes in both orientations (bin $i$ at pixel $a$ and bin $j$ at pixel $b$, and vice versa); the estimator is the ratio of the summed orientations, $\xi_{ij} = (N_{ab} + N_{ba}) / (W_{ab} + W_{ba})$, for $\xi_\pm$, $w(\theta)$ and $\gamma_t$ alike — the standard weighted estimator and TreeCorr's definition (before 4.21 $\xi_\pm$ averaged the two orientation ratios instead). On the GPU every tomographic method walks the pairs once per statistic (combination-tiled kernels) and works on packed pairs.
 
 **Specific Probes**:
 

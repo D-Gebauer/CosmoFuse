@@ -2,9 +2,11 @@
 
 ## 4.21.0 (unreleased)
 
-Default behaviour is unchanged: with default arguments every public method
-returns bit-for-bit the results of 4.20.0 (verified on CPU, and on an A100
-against 4.20.0 on the DES Y3 production geometry with real maps).
+With default arguments the auto-combination results of every public method
+are bit-for-bit those of 4.20.0 (verified on CPU, and on an A100 against
+4.20.0 on the DES Y3 production geometry with real maps). Two deliberate
+default changes: the cross-bin xi+- estimator (ratio of the orientation sums,
+see *Changed*) and the pair search precision (float64).
 
 ### Added
 - **Static treecode** (`Correlation(..., resolution_factor=True)` for the
@@ -29,25 +31,50 @@ against 4.20.0 on the DES Y3 production geometry with real maps).
   (`Correlation.row_pix`, `n_active`, `to_row_space()`, `row_pix_hash`).
   Masked pixels are never read (they may be NaN). Read-only weight maps are
   gathered / uploaded / degraded once.
-- **Combination-tiled GPU xi+- kernel** (default; `kernel.tiled = False`
-  restores the per-row kernel): one pass over the pairs for all tomographic
-  combinations, bit-identical results, 4.2–4.5x faster on an A100.
+- **Combination-tiled GPU pair kernels** for xi+-, xi_g and xi_t (default;
+  `kernel.tiled = False` restores the per-row kernels): one pass over the
+  pairs for all tomographic combinations, shared tiles in
+  `cuda/pair_tiles.cuh`. The fused 3x2pt path (`get_3x2pt_tomo`) runs its
+  pair statistics in the same tiled kernels (its own kernel keeps only the
+  aperture sections). Auto-only (`gc_auto_correlations_only`) and subset
+  (`ggl_bin_combinations`) requests are served by the tiles too. xi+-:
+  bit-identical auto combinations, 4.2–4.5x faster on an A100.
 - **Payload packing** (`pack_pairs=True`, opt-in): 8 instead of 24 bytes per
   pair on the device (uint16 rotation angles + uint16 patch-local row indices,
-  per-patch contiguous row blocks; kernel `gpu_tiled_packed_reduce_xipm`).
+  per-patch contiguous row blocks; kernels `gpu_tiled_packed_reduce_{xipm,dd,ds}`).
   A100: pair memory 6.6 → 2.3 GB (nside 512 production), 14.5 → 5.2 GB
   (nside 2048, k = 2.9), speed unchanged; GPU vs CPU 5e-15. Not bit-identical
   to unpacked: estimates move by 3e-5 (rms) of their patch scatter, unbiased.
-  Shear path + aperture statistics only on GPU for now.
+  Serves every tomographic method (`vectorized_*`, `get_full_tomo_*`,
+  `get_3x2pt_tomo`) and the aperture statistics on the GPU; the single-map
+  `compute_*` methods need `pack_pairs=False`.
 - `RowSpaceMapLoader`: reader threads + ring of pinned buffers + upload
   stream; results identical to the serial loop, GPU idle < 5 %.
 - `pair_search_precision=`: precision of the pair search, decoupled from the
-  stored rotation precision. `"auto"` keeps the historical float32 search at
-  full resolution and uses float64 with `resolution_factor`. A float32 search
-  resolves separations only to `6e-8 / theta^2` (3 % at 5'); a warning is
-  logged when that exceeds 1 % at `theta_min`.
+  stored rotation precision; **default `"float64"`** (no memory cost).
+  `"rotation"` restores the historical search at rotation precision (float32
+  by default), `"auto"` keeps that at full resolution and uses float64 with
+  `resolution_factor`. A float32 search resolves separations only to
+  `6e-8 / theta^2` (3 % at 5'); on the DES Y3 nside-512 production geometry it
+  mis-bins pairs at the 0.05 sigma (rms) / 0.9 sigma (max) per-patch level
+  against the exact result. A warning is logged when the jitter exceeds 1 %
+  at `theta_min`.
 
 ### Changed
+- **Cross-bin xi+- estimator.** For a tomographic combination (i, j) with
+  i != j every pair contributes in both orientations (bin i at pixel a and j
+  at b, and vice versa). CosmoFuse used to average the two orientation
+  *ratios*, `(N_ab/W_ab + N_ba/W_ba) / 2`; it now takes the ratio of the
+  summed orientations, `(N_ab + N_ba) / (W_ab + W_ba)` — the standard
+  weighted estimator, TreeCorr's definition, and what xi_g and xi_t already
+  did. The two coincide for equal per-bin weights; with the real per-bin DES
+  Y3 weights they differ by ~3 % of max|xi+| per patch (0.02 sigma). The old
+  form also halved a bin's estimate wherever one orientation had zero weight
+  (bins with different masks). Auto combinations are unchanged. Applies to
+  `vectorized_shear_shear`, `get_full_tomo_shear` and `get_3x2pt_tomo` on
+  both backends; an explicit directional `sumofweights` is summed the same
+  way. The single-map `compute_shear_shear` keeps its historical form.
+- **Pair search precision default** is `"float64"` (see *Added*).
 - **Patch selection default** (`select_patch_centers`, `Correlation.from_mask`):
   the filter-support masking check now uses the |filter|-weighted masked
   fraction by default (`filter_weighting="abs"`); `"signed"`/`"raw"` measures

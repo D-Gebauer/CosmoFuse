@@ -2008,20 +2008,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected_numpy = (ab_num + ba_num) / (ab_den + ba_den)
         self.assertAlmostEqual(xi_g_np[1, 0, 0], expected_numpy)
 
-        original_name = corr.backend.name
-        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
-        original_to_device = corr.backend.to_device
-        original_to_numpy = corr.backend.to_numpy
-        try:
-            corr.backend.name = "cupy"
-            corr.backend.to_device = lambda arr: np.asarray(arr)
-            corr.backend.to_numpy = lambda arr: np.asarray(arr)
+        from .test_gpu_kernel_emulation import emulated_gpu
 
-            def launched_kernel(*args):
-                original_kernel(*args)
-                return True
-
-            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
+        with emulated_gpu(corr):
             out_fake_gpu = corr._compute_3x2pt_tomo_fused(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2029,11 +2018,6 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_weights=density_w,
                 gc_auto_correlations_only=False,
             )
-        finally:
-            corr.backend.name = original_name
-            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
-            corr.backend.to_device = original_to_device
-            corr.backend.to_numpy = original_to_numpy
 
         xi_g_fake_gpu = out_fake_gpu[4]
         # Both post-processing paths symmetrise cross-bin xi_g as the ratio
@@ -2105,20 +2089,58 @@ class TestCorrelationCoverage(unittest.TestCase):
             )
         np.testing.assert_allclose(out, out_explicit, rtol=1e-12, atol=1e-14)
 
-    def test_compute_3x2pt_tomo_fused_non_numpy_launch_decline_raises(self):
-        corr = self._make_small_cpu_corr()
+    @staticmethod
+    def _fake_gpu_3x2pt(corr, aperture_kernel, pair_kernel=None):
+        """Turn the CPU backend into a fake GPU backend for the fused path:
+        the aperture kernel and the three tiled pair wrappers are replaced.
+        Returns a restore() callable."""
+        names = ("name", "to_device", "to_numpy", "kernel_3x2pt_tomo_aperture",
+                 "xipm_tomo_vectorized_kernel", "kernel_density_density_tomo_vectorized",
+                 "kernel_density_shear_tomo_vectorized")
+        saved = {n: getattr(corr.backend, n) for n in names}
+        if pair_kernel is None:
+            pair_kernel = lambda *_args: True
         corr.backend.name = "cupy"
         corr.backend.to_device = lambda arr: np.asarray(arr)
         corr.backend.to_numpy = lambda arr: np.asarray(arr)
-        corr.backend.kernel_3x2pt_tomo_fused = lambda *_args: False
+        corr.backend.kernel_3x2pt_tomo_aperture = aperture_kernel
+        corr.backend.xipm_tomo_vectorized_kernel = pair_kernel
+        corr.backend.kernel_density_density_tomo_vectorized = pair_kernel
+        corr.backend.kernel_density_shear_tomo_vectorized = pair_kernel
 
-        with self.assertRaisesRegex(RuntimeError, "declined fused 3x2pt tomography kernel launch"):
-            corr._compute_3x2pt_tomo_fused(
-                shear_maps=np.ones((1, 2, 12), dtype=np.float64),
-                density_maps=np.ones((1, 12), dtype=np.float64),
-                shear_weights=np.ones((1, 12), dtype=np.float64),
-                density_weights=np.ones((1, 12), dtype=np.float64),
-            )
+        def restore():
+            for n, v in saved.items():
+                setattr(corr.backend, n, v)
+
+        return restore
+
+    def test_compute_3x2pt_tomo_fused_non_numpy_launch_decline_raises(self):
+        corr = self._make_small_cpu_corr()
+        maps = dict(
+            shear_maps=np.ones((1, 2, 12), dtype=np.float64),
+            density_maps=np.ones((1, 12), dtype=np.float64),
+            shear_weights=np.ones((1, 12), dtype=np.float64),
+            density_weights=np.ones((1, 12), dtype=np.float64),
+        )
+        restore = self._fake_gpu_3x2pt(corr, lambda *_args: False)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "declined fused 3x2pt aperture kernel launch"):
+                corr._compute_3x2pt_tomo_fused(**maps)
+        finally:
+            restore()
+        restore = self._fake_gpu_3x2pt(corr, lambda *_args: True, pair_kernel=lambda *_args: False)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "declined a 3x2pt pair kernel launch"):
+                corr._compute_3x2pt_tomo_fused(**maps)
+        finally:
+            restore()
+        corr.backend.kernel_3x2pt_tomo_aperture = None
+        corr.backend.name = "cupy"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "fused 3x2pt aperture kernel"):
+                corr._compute_3x2pt_tomo_fused(**maps)
+        finally:
+            corr.backend.name = "numpy"
 
     def test_compute_3x2pt_tomo_fused_reuses_cached_aperture_device_arrays(self):
         corr = self._make_small_cpu_corr()
@@ -2126,10 +2148,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.calculate_pairs_M_a()
         corr._invalidate_aperture_device_buffers()
 
-        original_name = corr.backend.name
         original_to_device = corr.backend.to_device
-        original_to_numpy = corr.backend.to_numpy
-        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
 
         # The filter geometry uploads at rotation precision (Q_inds as
         # uint32, Q_offsets as int64).
@@ -2154,14 +2173,12 @@ class TestCorrelationCoverage(unittest.TestCase):
         captured_q_buffers = []
 
         def launched_kernel(*args):
-            captured_q_buffers.append(args[9:15])
+            captured_q_buffers.append(args[4:10])
             return True
 
+        restore = self._fake_gpu_3x2pt(corr, launched_kernel)
         try:
-            corr.backend.name = "cupy"
             corr.backend.to_device = counting_to_device
-            corr.backend.to_numpy = lambda arr: np.asarray(arr)
-            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
 
             corr.prepare()
             q_uploads_after_prepare = q_upload_count
@@ -2185,10 +2202,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_weights=density_w,
             )
         finally:
-            corr.backend.name = original_name
+            restore()
             corr.backend.to_device = original_to_device
-            corr.backend.to_numpy = original_to_numpy
-            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
 
         self.assertEqual(q_upload_count, q_uploads_after_prepare)
         self.assertEqual(len(captured_q_buffers), 2)
@@ -2204,10 +2219,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr = self._make_small_cpu_corr()
         corr.calculate_pairs_M_a()
 
-        original_name = corr.backend.name
         original_to_device = corr.backend.to_device
-        original_to_numpy = corr.backend.to_numpy
-        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
 
         captured_inds = []
         pair_index_signatures = {
@@ -2223,15 +2235,18 @@ class TestCorrelationCoverage(unittest.TestCase):
                 pair_index_upload_count += 1
             return arr_np
 
-        def launched_kernel(*args):
-            captured_inds.append((args[4], args[5]))
+        def pair_kernel(*args):
+            # xi+-: (shear, weights, ind_i, ind_j, ...); xi_g: (density,
+            # weights, ind_i, ind_j, ...); xi_t: (..., ind_i, ind_j at 4, 5)
+            if len(args) == 13:
+                captured_inds.append((args[4], args[5]))
+            else:
+                captured_inds.append((args[2], args[3]))
             return True
 
+        restore = self._fake_gpu_3x2pt(corr, lambda *_args: True, pair_kernel=pair_kernel)
         try:
-            corr.backend.name = "cupy"
             corr.backend.to_device = counting_to_device
-            corr.backend.to_numpy = lambda arr: np.asarray(arr)
-            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
 
             corr.prepare()
             pair_index_uploads_after_prepare = pair_index_upload_count
@@ -2254,17 +2269,17 @@ class TestCorrelationCoverage(unittest.TestCase):
                 density_weights=density_w,
             )
         finally:
-            corr.backend.name = original_name
+            restore()
             corr.backend.to_device = original_to_device
-            corr.backend.to_numpy = original_to_numpy
-            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
 
-        self.assertEqual(len(captured_inds), 2)
+        # three pair kernels per call, all fed the same cached index arrays
+        self.assertEqual(len(captured_inds), 6)
         self.assertEqual(pair_index_upload_count, pair_index_uploads_after_prepare)
-        self.assertEqual(captured_inds[0][0].dtype, corr.index_dtype)
-        self.assertEqual(captured_inds[0][1].dtype, corr.index_dtype)
-        self.assertEqual(captured_inds[1][0].dtype, corr.index_dtype)
-        self.assertEqual(captured_inds[1][1].dtype, corr.index_dtype)
+        for inds_i, inds_j in captured_inds:
+            self.assertEqual(inds_i.dtype, corr.index_dtype)
+            self.assertEqual(inds_j.dtype, corr.index_dtype)
+            self.assertIs(inds_i, captured_inds[0][0])
+            self.assertIs(inds_j, captured_inds[0][1])
 
     def test_compute_3x2pt_tomo_fused_reuses_cached_input_staging_buffers_no_transpose(self):
         corr = self._make_small_cpu_corr()
@@ -2287,27 +2302,19 @@ class TestCorrelationCoverage(unittest.TestCase):
             def transpose(_arr, _axes=None):
                 raise AssertionError("transpose should not be called in fused 3x2pt path")
 
-        original_name = corr.backend.name
         original_module = corr.backend.module
-        original_to_device = corr.backend.to_device
-        original_to_numpy = corr.backend.to_numpy
-        original_kernel = corr.backend.kernel_3x2pt_tomo_fused
 
+        captured_density_buffers = []
+        captured_shear_buffers = []
+
+        def launched_kernel(*args):
+            captured_density_buffers.append(args[0])
+            captured_shear_buffers.append(args[1])
+            return True
+
+        restore = self._fake_gpu_3x2pt(corr, launched_kernel)
         try:
-            corr.backend.name = "cupy"
             corr.backend.module = _NoTransposeModule
-            corr.backend.to_device = lambda arr: np.asarray(arr)
-            corr.backend.to_numpy = lambda arr: np.asarray(arr)
-
-            captured_density_buffers = []
-            captured_shear_buffers = []
-
-            def launched_kernel(*args):
-                captured_density_buffers.append(args[0])
-                captured_shear_buffers.append(args[1])
-                return True
-
-            corr.backend.kernel_3x2pt_tomo_fused = launched_kernel
             corr.prepare()
 
             density_maps = np.ones((1, 12), dtype=np.float64)
@@ -2333,11 +2340,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 return_device=False,
             )
         finally:
-            corr.backend.name = original_name
+            restore()
             corr.backend.module = original_module
-            corr.backend.to_device = original_to_device
-            corr.backend.to_numpy = original_to_numpy
-            corr.backend.kernel_3x2pt_tomo_fused = original_kernel
 
         self.assertEqual(len(captured_density_buffers), 2)
         self.assertIs(captured_density_buffers[0], density_buf_first)

@@ -126,29 +126,76 @@ class TestPackedMeasurement(unittest.TestCase):
         for x, y in zip(cpu, gpu):
             np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)))
 
+    def test_emulated_gpu_packed_density_ggl_3x2pt_equal_cpu(self):
+        """Every tomographic method runs on the packed geometry (auto-only
+        and subset combination requests included)."""
+        corr = self.packed
+        dens = np.asarray(self.shear[1, :, 0]) * 3.0
+        wd = np.asarray(self.w[::-1])
+        calls_ref = dict(
+            dd=lambda: corr.get_full_tomo_density(dens, wd, return_device=False),
+            dd_auto=lambda: corr.vectorized_density_density(
+                dens, wd, gc_auto_correlations_only=True, return_device=False),
+            ggl=lambda: corr.get_full_tomo_ggl(
+                dens, self.shear[0], wd, self.w, return_N_ap=True, return_device=False),
+            ggl_sub=lambda: corr.vectorized_density_shear(
+                dens, self.shear[0], wd, self.w, ggl_bin_combinations=[(1, 0)],
+                return_device=False),
+            fused=lambda: corr.get_3x2pt_tomo(
+                shear_maps=self.shear[0], density_maps=dens,
+                weights={"shear": self.w, "density": wd}, flip_g1=True, return_device=False),
+        )
+        cpu = {k: f() for k, f in calls_ref.items()}
+        with emulated_gpu(corr) as calls:
+            corr.compute_context.Q_inds_dev = None
+            del LAUNCH_LOG[:]
+            gpu = {k: f() for k, f in calls_ref.items()}
+        corr.compute_context.Q_inds_dev = None
+        self.assertEqual(calls["kernel_density_density_tomo_packed"], 3)
+        self.assertEqual(calls["kernel_density_shear_tomo_packed"], 3)
+        self.assertEqual(calls["xipm_tomo_packed_kernel"], 1)
+        self.assertEqual(calls["kernel_density_density_tomo_vectorized"], 0)
+        self.assertEqual(calls["kernel_density_shear_tomo_vectorized"], 0)
+        self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 0)
+        for name in ("gpu_tiled_packed_reduce_dd", "gpu_tiled_packed_reduce_ds",
+                     "gpu_tiled_packed_reduce_xipm", "gpu_3x2pt_tomo_aperture"):
+            self.assertIn(name, LAUNCH_LOG)
+        for key in cpu:
+            for x, y in zip(cpu[key], gpu[key]):
+                x, y = np.asarray(x), np.asarray(y)
+                np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key)
+
     def test_gpu_without_unpacked_geometry(self):
-        """On a real GPU the 24 B geometry is not uploaded: the packed shear
-        path must not need it, everything else must refuse clearly."""
+        """On a real GPU the 24 B geometry is not uploaded: no tomographic
+        method may need it; the single-map compute_* methods refuse clearly."""
         corr, _ = make_setup(pack=True)
-        ref = corr.vectorized_shear_shear(self.shear[0], self.w, return_device=False)
+        dens = np.ones((2, NPIX)) + 0.1 * self.shear[1, :, 0]
+        ref = dict(
+            ss=corr.vectorized_shear_shear(self.shear[0], self.w, return_device=False),
+            dd=corr.vectorized_density_density(dens, self.w, return_device=False),
+            ds=corr.vectorized_density_shear(dens, self.shear[0], self.w, self.w, return_device=False),
+            fused=corr.get_3x2pt_tomo(shear_maps=self.shear[0], density_maps=dens, return_device=False),
+        )
         with emulated_gpu(corr):
             corr.inds_dev = None
             corr.exp2phi_dev = None
             corr.compute_context.inds_i_dev = corr.compute_context.inds_j_dev = None
-            got = corr.vectorized_shear_shear(self.shear[0], self.w, return_device=False)
-            for x, y in zip(ref, got):
-                np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)))
-            dens = np.ones((2, NPIX))
-            for call in (
-                lambda: corr.vectorized_density_density(dens, self.w),
-                lambda: corr.vectorized_density_shear(dens, self.shear[0], self.w, self.w),
-                lambda: corr.get_3x2pt_tomo(shear_maps=self.shear[0], density_maps=dens),
-                lambda: corr.compute_shear_shear(
+            corr.compute_context.Q_inds_dev = None
+            got = dict(
+                ss=corr.vectorized_shear_shear(self.shear[0], self.w, return_device=False),
+                dd=corr.vectorized_density_density(dens, self.w, return_device=False),
+                ds=corr.vectorized_density_shear(dens, self.shear[0], self.w, self.w, return_device=False),
+                fused=corr.get_3x2pt_tomo(shear_maps=self.shear[0], density_maps=dens, return_device=False),
+            )
+            as_list = lambda r: list(r) if isinstance(r, tuple) else [r]
+            for key in ref:
+                for x, y in zip(as_list(ref[key]), as_list(got[key])):
+                    x, y = np.asarray(x), np.asarray(y)
+                    np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key)
+            with self.assertRaisesRegex(NotImplementedError, "pack_pairs=False"):
+                corr.compute_shear_shear(
                     self.shear[0, 0, 0], self.shear[0, 0, 1], self.shear[0, 0, 0],
-                    self.shear[0, 0, 1], self.w[0], self.w[0]),
-            ):
-                with self.assertRaisesRegex(NotImplementedError, "pack_pairs=False"):
-                    call()
+                    self.shear[0, 0, 1], self.w[0], self.w[0])
 
     def test_quantisation_errors_average_out(self):
         exact = [self.exact.get_full_tomo_shear(m, self.w, return_device=False) for m in self.shear]

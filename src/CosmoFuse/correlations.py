@@ -333,7 +333,7 @@ class Correlation:
         resolution_factor: Union[None, bool, str, float] = None,
         aperture_nside: Optional[int] = None,
         memory_budget_gb: Optional[float] = None,
-        pair_search_precision: str = "auto",
+        pair_search_precision: str = "float64",
         pack_pairs: bool = False,
     ) -> None:
         """Initialize the Correlation class with validation.
@@ -386,17 +386,21 @@ class Correlation:
                 angle quantisation (<= 4.8e-5 rad) perturbs every estimate
                 by ~1e-5 of its statistical error and does not bias it.
                 Pair files and host arrays stay exact.  On GPU backends the
-                packed geometry currently serves the shear path
-                (``vectorized_shear_shear``, ``get_full_tomo_shear``) and
-                the aperture statistics.
+                packed geometry serves every tomographic method
+                (``vectorized_*``, ``get_full_tomo_*``, ``get_3x2pt_tomo``)
+                and the aperture statistics; the single-map ``compute_*``
+                methods need the unpacked geometry.
             pair_search_precision: Precision of the pair *search*
                 (separations, binning, position angles); the stored
                 rotation factors always use ``rotation_precision``.
-                ``"rotation"`` is the historical behaviour (search at
-                rotation precision), ``"float64"`` searches at double
-                precision at no memory cost.  ``"auto"`` (default) keeps
-                the historical behaviour at full resolution and uses
-                float64 for the static treecode.  float32 resolves
+                ``"float64"`` (default) searches at double precision at no
+                memory cost.  ``"rotation"`` is the historical (< 4.21)
+                behaviour, a search at rotation precision, i.e. float32 by
+                default: on the DES nside-512 production geometry it
+                mis-bins pairs at the 0.05 sigma (rms) / 0.9 sigma (max)
+                level per patch.  ``"auto"`` keeps that behaviour at full
+                resolution and uses float64 with the static treecode.
+                float32 resolves
                 separations only to ``d(theta)/theta ~ 6e-8 / theta^2``
                 (0.3 % at 15', 3 % at 5'): use ``"float64"`` for
                 ``theta_min`` below ~10'.
@@ -1181,7 +1185,7 @@ class Correlation:
         dd_ncomb: int,
         ds_ncomb: int,
         map_backend_dtype: Any,
-    ) -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+    ) -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
         ctx = self.compute_context
         if ctx.fused_output_buffers is None:
             ctx.fused_output_buffers = {}
@@ -1190,16 +1194,17 @@ class Correlation:
         module = self.backend.module
         empty = getattr(module, "empty", None)
 
+        # Pair statistics: one row per combination, both orientations of a
+        # cross combination summed (the kernels' contract on both backends).
         specs = (
             ("out_ma_num", (n_shear_bins, n_patches)),
             ("out_ma_den", (n_shear_bins, n_patches)),
             ("out_mg_num", (n_density_bins, n_patches)),
             ("out_mg_den", (n_density_bins, n_patches)),
-            ("out_xip_num", (2 * ss_ncomb, nbins_total)),
-            ("out_xim_num", (2 * ss_ncomb, nbins_total)),
-            ("out_xip_den", (2 * ss_ncomb, nbins_total)),
-            ("out_xig_num", (2 * dd_ncomb, nbins_total)),
-            ("out_xig_den", (2 * dd_ncomb, nbins_total)),
+            ("out_xipm_num", (2, ss_ncomb, nbins_total)),   # [xi+ | xi-]
+            ("out_xipm_den", (ss_ncomb, nbins_total)),
+            ("out_xig_num", (dd_ncomb, nbins_total)),
+            ("out_xig_den", (dd_ncomb, nbins_total)),
             ("out_xit_num", (ds_ncomb, nbins_total)),
             ("out_xit_den", (ds_ncomb, nbins_total)),
         )
@@ -1224,9 +1229,8 @@ class Correlation:
             buffers["out_ma_den"],
             buffers["out_mg_num"],
             buffers["out_mg_den"],
-            buffers["out_xip_num"],
-            buffers["out_xim_num"],
-            buffers["out_xip_den"],
+            buffers["out_xipm_num"],
+            buffers["out_xipm_den"],
             buffers["out_xig_num"],
             buffers["out_xig_den"],
             buffers["out_xit_num"],
@@ -1242,7 +1246,7 @@ class Correlation:
         dd_ncomb: int,
         ds_ncomb: int,
         map_backend_dtype: Any,
-    ) -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+    ) -> Tuple[Any, Any, Any, Any, Any, Any]:
         ctx = self.compute_context
         if ctx.fused_output_buffers is None:
             ctx.fused_output_buffers = {}
@@ -1258,8 +1262,6 @@ class Correlation:
             ("xim", (ss_ncomb, n_patches, self.nbins)),
             ("xi_g", (dd_ncomb, n_patches, self.nbins)),
             ("xi_t", (ds_ncomb, n_patches, self.nbins)),
-            ("tmp_a", (n_patches, self.nbins)),
-            ("tmp_b", (n_patches, self.nbins)),
         )
 
         buffers: Dict[str, Any] = {}
@@ -1285,8 +1287,6 @@ class Correlation:
             buffers["xim"],
             buffers["xi_g"],
             buffers["xi_t"],
-            buffers["tmp_a"],
-            buffers["tmp_b"],
         )
 
     def preprocess(
@@ -1671,13 +1671,28 @@ class Correlation:
             self.prepare()
 
     def _require_unpacked_pairs(self, what: str) -> None:
-        """Paths without a packed kernel need the 24 B device geometry."""
+        """Paths without a packed kernel need the 24 B device geometry
+        (the single-map ``compute_*`` methods and the explicit
+        sum-of-weights precomputation; every tomographic method has one)."""
         if self.inds_dev is None:
             raise NotImplementedError(
-                f"{what} is not available with pack_pairs=True on a GPU backend "
-                "(only the packed shear path and the aperture statistics are); "
-                "construct the Correlation with pack_pairs=False."
+                f"{what} is not available with pack_pairs=True on a GPU backend; "
+                "use the tomographic methods (vectorized_*, get_full_tomo_*, "
+                "get_3x2pt_tomo) or construct the Correlation with pack_pairs=False."
             )
+
+    def _pair_index_arrays(self) -> Tuple[Any, Any]:
+        """Contiguous device pair indices at the kernel index dtype (cached)."""
+        ctx = self.compute_context
+        if ctx.inds_i_dev is None or ctx.inds_j_dev is None:
+            module = self.backend.module
+            ctx.inds_i_dev = module.ascontiguousarray(
+                self.inds_dev[0].astype(self._index_device_dtype, copy=False)
+            )
+            ctx.inds_j_dev = module.ascontiguousarray(
+                self.inds_dev[1].astype(self._index_device_dtype, copy=False)
+            )
+        return ctx.inds_i_dev, ctx.inds_j_dev
 
     def compute_shear_shear(
         self,
@@ -2995,6 +3010,46 @@ class Correlation:
         weights_aos = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
         return shear_aos, weights_aos
 
+    def _symmetrised_denominators(
+        self, out_den: Any, sumofweights_dev: Any, auto_comb: np.ndarray
+    ) -> Any:
+        """Per-combination weight sums ``(ncomb, nbins_total)``.
+
+        From the kernel (both orientations of a cross combination already
+        summed) or from an explicit directional ``(2, ncomb, nbins_total)``
+        array, whose orientations are summed here for cross combinations
+        (auto combinations carry the same sum twice).
+        """
+        if sumofweights_dev is None:
+            return out_den
+        den = sumofweights_dev[0].copy()
+        for k in range(den.shape[0]):
+            if not auto_comb[k]:
+                den[k] = sumofweights_dev[0, k] + sumofweights_dev[1, k]
+        return den
+
+    def _finish_xipm_tomo(
+        self,
+        out_num: Any,
+        out_den: Any,
+        sumofweights_dev: Any,
+        auto_comb: np.ndarray,
+        nzbin_combs: int,
+    ) -> Tuple[Any, Any]:
+        """Normalise the ``(2, ncomb, nbins_total)`` numerators of the
+        tomographic ξ± kernels (ratio of the orientation sums)."""
+        den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
+        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
+        xip = self.backend.zeros(
+            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        )
+        xim = self.backend.zeros(
+            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        )
+        for k in range(nzbin_combs):
+            xip[k], xim[k] = self._normalize_xipm_pairs(out_num[0, k], out_num[1, k], den[k])
+        return xip, xim
+
     def _xipm_tomo_vectorized(
         self,
         shear_maps_dev: Any,
@@ -3044,33 +3099,18 @@ class Correlation:
         comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
             nzbins, nzbin_combs
         )
-        ctx = self.compute_context
-        packed_kernel = getattr(self.backend, "xipm_tomo_packed_kernel", None)
-        use_packed = ctx.packed_pairs_dev is not None and packed_kernel is not None
-        if not use_packed:
-            self._require_unpacked_pairs("The unpacked shear kernel")
-            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
-            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
-            exp_i = module.ascontiguousarray(self.exp2phi_dev[0])
-            exp_j = module.ascontiguousarray(self.exp2phi_dev[1])
-
-        map_backend_dtype = getattr(module, self.map_dtype.name)
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = int(self.n_patches * self.nbins)
-        # Auto-combination B→A rows are never written by the kernel, so both
-        # buffers must stay zero-initialised (do not switch to empty scratch).
         # Allocated at the accumulation dtype: the kernel reduces into them.
-        out_num = self.backend.zeros(
-            (2, 2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype
-        )
-        out_den = self.backend.zeros(
-            (2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype
-        )
+        out_num = self.backend.zeros((2, nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+        out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
 
-        if use_packed:
+        ctx = self.compute_context
+        if ctx.packed_pairs_dev is not None:
+            packed_kernel = getattr(self.backend, "xipm_tomo_packed_kernel", None)
             # Gather every patch's rows into its contiguous block.
             perm = ctx.packed_perm_dev
-            launched = packed_kernel(
+            launched = packed_kernel is not None and packed_kernel(
                 module.ascontiguousarray(shear_aos[perm]),
                 module.ascontiguousarray(weights_aos[perm]),
                 ctx.packed_pairs_dev,
@@ -3082,55 +3122,29 @@ class Correlation:
                 out_den,
             )
             if not launched:
-                raise RuntimeError("Backend declined the packed shear kernel launch.")
+                raise RuntimeError(
+                    "The packed ξ± kernel is unavailable for this configuration "
+                    f"({nzbins} tomographic bins); use pack_pairs=False."
+                )
         else:
+            inds_i, inds_j = self._pair_index_arrays()
             launched = tomo_kernel(
                 shear_aos,
                 weights_aos,
                 inds_i,
                 inds_j,
-                exp_i,
-                exp_j,
+                module.ascontiguousarray(self.exp2phi_dev[0]),
+                module.ascontiguousarray(self.exp2phi_dev[1]),
                 bin_offsets,
                 comb_i,
                 comb_j,
                 out_num,
                 out_den,
             )
-        if not launched:
-            return None
+            if not launched:
+                return None
 
-        if sumofweights_dev is None:
-            # Denominators accumulated inside the kernel: rows 2k are the
-            # A→B weight sums, rows 2k+1 the B→A sums.
-            sumofweights_dev = module.stack((out_den[0::2], out_den[1::2]), axis=0)
-
-        xip_reduced = out_num[0]
-        xim_reduced = out_num[1]
-        xip_num = module.stack((xip_reduced[0::2], xip_reduced[1::2]), axis=0)
-        xim_num = module.stack((xim_reduced[0::2], xim_reduced[1::2]), axis=0)
-        xip = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-        xim = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-
-        half = self.map_dtype.type(0.5)
-        for k in range(nzbin_combs):
-            xip_ab, xim_ab = self._normalize_xipm_pairs(
-                xip_num[0, k], xim_num[0, k], sumofweights_dev[0, k]
-            )
-            if auto_comb[k]:
-                xip[k], xim[k] = xip_ab, xim_ab
-            else:
-                xip_ba, xim_ba = self._normalize_xipm_pairs(
-                    xip_num[1, k], xim_num[1, k], sumofweights_dev[1, k]
-                )
-                xip[k] = half * (xip_ab + xip_ba)
-                xim[k] = half * (xim_ab + xim_ba)
-
-        return xip, xim
+        return self._finish_xipm_tomo(out_num, out_den, sumofweights_dev, auto_comb, nzbin_combs)
 
     def _xipm_tomo_vectorized_cpu(
         self,
@@ -3154,9 +3168,8 @@ class Correlation:
 
         nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
         # The numba kernel inherits its accumulator dtype from these arrays.
-        out_p = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
-        out_m = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
-        out_w = np.empty((2 * nzbin_combs, nbins_total), dtype=self.acc_dtype)
+        out_num = np.empty((2, nzbin_combs, nbins_total), dtype=self.acc_dtype)
+        out_w = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
         comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
             nzbins, nzbin_combs
         )
@@ -3172,45 +3185,15 @@ class Correlation:
             offsets,
             np.ascontiguousarray(comb_i),
             np.ascontiguousarray(comb_j),
-            out_p,
-            out_m,
+            out_num[0],
+            out_num[1],
             out_w,
         )
         if launched is False:
             raise RuntimeError(
                 "Backend tomography vectorized kernel unavailable for CPU backend."
             )
-
-        if sumofweights_dev is None:
-            # Denominators accumulated inside the kernel: rows 2k are the
-            # A→B weight sums, rows 2k+1 the B→A sums.
-            sumofweights_dev = np.stack((out_w[0::2], out_w[1::2]), axis=0)
-
-        xip_num = np.stack((out_p[0::2], out_p[1::2]), axis=0)
-        xim_num = np.stack((out_m[0::2], out_m[1::2]), axis=0)
-        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
-        xip = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-        xim = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-
-        half = self.map_dtype.type(0.5)
-        for k in range(nzbin_combs):
-            xip_ab, xim_ab = self._normalize_xipm_pairs(
-                xip_num[0, k], xim_num[0, k], sumofweights_dev[0, k]
-            )
-            if auto_comb[k]:
-                xip[k], xim[k] = xip_ab, xim_ab
-            else:
-                xip_ba, xim_ba = self._normalize_xipm_pairs(
-                    xip_num[1, k], xim_num[1, k], sumofweights_dev[1, k]
-                )
-                xip[k] = half * (xip_ab + xip_ba)
-                xim[k] = half * (xim_ab + xim_ba)
-
-        return xip, xim
+        return self._finish_xipm_tomo(out_num, out_w, sumofweights_dev, auto_comb, nzbin_combs)
 
     def vectorized_shear_shear(
         self,
@@ -3589,7 +3572,6 @@ class Correlation:
         gc_auto_correlations_only: bool = False,
     ) -> Any:
         self._ensure_prepared()
-        self._require_unpacked_pairs("vectorized_density_density")
 
         tomo_kernel = getattr(self.backend, "kernel_density_density_tomo_vectorized", None)
         if tomo_kernel is None:
@@ -3600,7 +3582,6 @@ class Correlation:
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
-        half = self.map_dtype.type(0.5)
         nbins_total = self.n_patches * self.nbins
 
         density_dev = self._map_to_device(density_maps)
@@ -3624,16 +3605,12 @@ class Correlation:
             # Both backends: the kernel accumulates the denominators itself.
             sumofweights_dev = None
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
 
-        out = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-
+        # Kernel contract (both backends): one row per combination, both
+        # orientations of a cross combination summed.
         if self.backend.name == "numpy":
             # The numba kernel inherits its accumulator dtype from these arrays.
             out_num = np.empty((nzbin_combs, nbins_total), dtype=self.acc_dtype)
@@ -3641,66 +3618,62 @@ class Correlation:
             tomo_kernel(
                 density_soa,
                 w_soa,
-                np.ascontiguousarray(inds_i),
-                np.ascontiguousarray(inds_j),
+                np.ascontiguousarray(self.inds_dev[0]),
+                np.ascontiguousarray(self.inds_dev[1]),
                 np.asarray(bin_offsets, dtype=np.int64),
                 np.ascontiguousarray(comb_i),
                 np.ascontiguousarray(comb_j),
                 out_num,
                 out_den,
             )
-
-            for k in range(nzbin_combs):
-                if sumofweights_dev is None:
-                    # In-kernel denominator: already the symmetrised
-                    # (i==j ? w_ab : (w_ab + w_ba)/2) sum.
-                    sum_k = out_den[k]
-                elif auto_comb[k]:
-                    sum_k = sumofweights_dev[0, k]
-                else:
-                    sum_k = half * (sumofweights_dev[0, k] + sumofweights_dev[1, k])
-                out[k] = self._normalize_scalar_pairs(out_num[k], sum_k)
-            return out
-
-        # Auto-combination B→A rows are never written by the kernel, so both
-        # buffers must stay zero-initialised (do not switch to empty scratch).
-        # Allocated at the accumulation dtype: the kernel reduces into them.
-        out_num = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-        out_den = self.backend.zeros((2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-        launched = tomo_kernel(
-            density_soa,
-            w_soa,
-            inds_i,
-            inds_j,
-            bin_offsets,
-            comb_i,
-            comb_j,
-            out_num,
-            out_den,
-        )
-        if not launched:
-            raise RuntimeError(
-                "Backend declined vectorized density-density tomography kernel launch."
-            )
-
-        num_ab = out_num[0::2]
-        num_ba = out_num[1::2]
-        if sumofweights_dev is None:
-            den_ab = out_den[0::2]
-            den_ba = out_den[1::2]
         else:
-            den_ab = sumofweights_dev[0]
-            den_ba = sumofweights_dev[1]
-        for k in range(nzbin_combs):
-            if auto_comb[k]:
-                out[k] = self._normalize_scalar_pairs(num_ab[k], den_ab[k])
-            else:
-                # Symmetrise as the ratio of summed orientations — the same
-                # weighted estimator the CPU kernel accumulates directly.
-                out[k] = self._normalize_scalar_pairs(
-                    num_ab[k] + num_ba[k], den_ab[k] + den_ba[k]
+            # Allocated at the accumulation dtype: the kernel reduces into them.
+            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+            ctx = self.compute_context
+            if ctx.packed_pairs_dev is not None:
+                packed_kernel = getattr(self.backend, "kernel_density_density_tomo_packed", None)
+                perm = ctx.packed_perm_dev
+                launched = packed_kernel is not None and packed_kernel(
+                    module.ascontiguousarray(density_soa[perm]),
+                    module.ascontiguousarray(w_soa[perm]),
+                    ctx.packed_pairs_dev,
+                    bin_offsets,
+                    ctx.packed_row_base_dev,
+                    comb_i,
+                    comb_j,
+                    out_num,
+                    out_den,
                 )
+                if not launched:
+                    raise RuntimeError(
+                        "The packed density-density kernel is unavailable for this "
+                        f"configuration ({nzbins} tomographic bins); use pack_pairs=False."
+                    )
+            else:
+                inds_i, inds_j = self._pair_index_arrays()
+                launched = tomo_kernel(
+                    density_soa,
+                    w_soa,
+                    inds_i,
+                    inds_j,
+                    bin_offsets,
+                    comb_i,
+                    comb_j,
+                    out_num,
+                    out_den,
+                )
+                if not launched:
+                    raise RuntimeError(
+                        "Backend declined vectorized density-density tomography kernel launch."
+                    )
 
+        den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
+        out = self.backend.zeros(
+            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        )
+        for k in range(nzbin_combs):
+            out[k] = self._normalize_scalar_pairs(out_num[k], den[k])
         return out
 
     def _density_shear_tomo_vectorized(
@@ -3715,7 +3688,6 @@ class Correlation:
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
     ) -> Any:
         self._ensure_prepared()
-        self._require_unpacked_pairs("vectorized_density_shear")
 
         tomo_kernel = getattr(self.backend, "kernel_density_shear_tomo_vectorized", None)
         if tomo_kernel is None:
@@ -3754,15 +3726,6 @@ class Correlation:
         comb_i = module.ascontiguousarray(comb_i_base)
         comb_j = module.ascontiguousarray(comb_j_base)
 
-        inds_i = self.compute_context.inds_i_dev
-        inds_j = self.compute_context.inds_j_dev
-        if inds_i is None or inds_j is None:
-            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
-            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
-            self.compute_context.inds_i_dev = inds_i
-            self.compute_context.inds_j_dev = inds_j
-        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
-        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
@@ -3776,10 +3739,10 @@ class Correlation:
                 shear_soa,
                 density_w_soa,
                 shear_w_soa,
-                np.ascontiguousarray(inds_i),
-                np.ascontiguousarray(inds_j),
-                np.ascontiguousarray(rot_i),
-                np.ascontiguousarray(rot_j),
+                np.ascontiguousarray(self.inds_dev[0]),
+                np.ascontiguousarray(self.inds_dev[1]),
+                np.ascontiguousarray(self.exp2phi_dev[0]),
+                np.ascontiguousarray(self.exp2phi_dev[1]),
                 np.asarray(bin_offsets, dtype=np.int64),
                 np.ascontiguousarray(comb_i),
                 np.ascontiguousarray(comb_j),
@@ -3790,25 +3753,50 @@ class Correlation:
             # Allocated at the accumulation dtype: the kernel reduces into them.
             out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
             out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-            launched = tomo_kernel(
-                density_soa,
-                shear_soa,
-                density_w_soa,
-                shear_w_soa,
-                inds_i,
-                inds_j,
-                rot_i,
-                rot_j,
-                bin_offsets,
-                comb_i,
-                comb_j,
-                out_num,
-                out_den,
-            )
-            if not launched:
-                raise RuntimeError(
-                    "Backend declined vectorized density-shear tomography kernel launch."
+            ctx = self.compute_context
+            if ctx.packed_pairs_dev is not None:
+                packed_kernel = getattr(self.backend, "kernel_density_shear_tomo_packed", None)
+                perm = ctx.packed_perm_dev
+                launched = packed_kernel is not None and packed_kernel(
+                    module.ascontiguousarray(density_soa[perm]),
+                    module.ascontiguousarray(shear_soa[perm]),
+                    module.ascontiguousarray(density_w_soa[perm]),
+                    module.ascontiguousarray(shear_w_soa[perm]),
+                    ctx.packed_pairs_dev,
+                    bin_offsets,
+                    ctx.packed_row_base_dev,
+                    comb_i,
+                    comb_j,
+                    out_num,
+                    out_den,
                 )
+                if not launched:
+                    raise RuntimeError(
+                        "The packed density-shear kernel is unavailable for this "
+                        f"configuration ({nlens_bins} lens x {nsource_bins} source "
+                        "bins); use pack_pairs=False."
+                    )
+            else:
+                inds_i, inds_j = self._pair_index_arrays()
+                launched = tomo_kernel(
+                    density_soa,
+                    shear_soa,
+                    density_w_soa,
+                    shear_w_soa,
+                    inds_i,
+                    inds_j,
+                    module.ascontiguousarray(self.exp2phi_dev[0]),
+                    module.ascontiguousarray(self.exp2phi_dev[1]),
+                    bin_offsets,
+                    comb_i,
+                    comb_j,
+                    out_num,
+                    out_den,
+                )
+                if not launched:
+                    raise RuntimeError(
+                        "Backend declined vectorized density-shear tomography kernel launch."
+                    )
 
         num_ab = out_num
 
@@ -4022,10 +4010,6 @@ class Correlation:
         flip_g2: bool = False,
         return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
-        if fused_kernel is None:
-            raise RuntimeError("Backend does not provide a fused 3x2pt tomography kernel.")
-
         shear_np = self._coerce_map_input_array(shear_maps)
         density_np = self._coerce_map_input_array(density_maps)
         shear_w_np = self._coerce_map_input_array(shear_weights)
@@ -4070,11 +4054,19 @@ class Correlation:
                 shear_np[:, 1] *= -1
 
         self._ensure_prepared()
-        self._require_unpacked_pairs("get_3x2pt_tomo")
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
+        on_gpu = self.backend.name == "cupy"
+        if on_gpu:
+            aperture_kernel = getattr(self.backend, "kernel_3x2pt_tomo_aperture", None)
+            if aperture_kernel is None:
+                raise RuntimeError("Backend does not provide the fused 3x2pt aperture kernel.")
+        else:
+            fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
+            if fused_kernel is None:
+                raise RuntimeError("Backend does not provide a fused 3x2pt tomography kernel.")
 
         density_dev = self._to_backend_array(density_np, dtype=self.map_dtype)
         shear_dev = self._to_backend_array(shear_np, dtype=self.map_dtype)
@@ -4132,10 +4124,6 @@ class Correlation:
             ggl_bin_combinations=ggl_bin_combinations,
         )
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
-        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
-        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
         pair_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
@@ -4154,9 +4142,8 @@ class Correlation:
             out_ma_den,
             out_mg_num,
             out_mg_den,
-            out_xip_num,
-            out_xim_num,
-            out_xip_den,
+            out_xipm_num,
+            out_xipm_den,
             out_xig_num,
             out_xig_den,
             out_xit_num,
@@ -4174,16 +4161,16 @@ class Correlation:
             map_backend_dtype=getattr(module, self.acc_dtype.name),
         )
 
-        if self.backend.name == "numpy":
+        if not on_gpu:
             fused_kernel(
                 np.ascontiguousarray(density_soa),
                 np.ascontiguousarray(shear_soa),
                 np.ascontiguousarray(density_w_soa),
                 np.ascontiguousarray(shear_w_soa),
-                np.ascontiguousarray(inds_i),
-                np.ascontiguousarray(inds_j),
-                np.ascontiguousarray(rot_i),
-                np.ascontiguousarray(rot_j),
+                np.ascontiguousarray(self.inds_dev[0]),
+                np.ascontiguousarray(self.inds_dev[1]),
+                np.ascontiguousarray(self.exp2phi_dev[0]),
+                np.ascontiguousarray(self.exp2phi_dev[1]),
                 np.ascontiguousarray(pair_offsets),
                 np.ascontiguousarray(q_inds),
                 np.ascontiguousarray(q_cos),
@@ -4201,51 +4188,42 @@ class Correlation:
                 out_ma_den,
                 out_mg_num,
                 out_mg_den,
-                out_xip_num,
-                out_xim_num,
-                out_xip_den,
+                out_xipm_num[0],
+                out_xipm_num[1],
+                out_xipm_den,
                 out_xig_num,
                 out_xig_den,
                 out_xit_num,
                 out_xit_den,
             )
         else:
-            launched = fused_kernel(
+            # Aperture sections (ACC accumulation) on the AoS inputs, then the
+            # three pair statistics in the combination-tiled pair kernels --
+            # the same kernels as the standalone tomographic methods, so the
+            # packed geometry is supported here too.
+            launched = aperture_kernel(
                 density_soa,
                 shear_soa,
                 density_w_soa,
                 shear_w_soa,
-                inds_i,
-                inds_j,
-                rot_i,
-                rot_j,
-                pair_offsets,
                 q_inds,
                 q_cos,
                 q_sin,
                 q_val,
                 q_offsets,
                 q_patch_area,
-                module.ascontiguousarray(ss_comb_i),
-                module.ascontiguousarray(ss_comb_j),
-                module.ascontiguousarray(dd_comb_i),
-                module.ascontiguousarray(dd_comb_j),
-                module.ascontiguousarray(ds_comb_i),
-                module.ascontiguousarray(ds_comb_j),
                 out_ma_num,
                 out_ma_den,
                 out_mg_num,
                 out_mg_den,
-                out_xip_num,
-                out_xim_num,
-                out_xip_den,
-                out_xig_num,
-                out_xig_den,
-                out_xit_num,
-                out_xit_den,
             )
             if not launched:
-                raise RuntimeError("Backend declined fused 3x2pt tomography kernel launch.")
+                raise RuntimeError("Backend declined fused 3x2pt aperture kernel launch.")
+            self._launch_3x2pt_pair_kernels(
+                density_soa, shear_soa, density_w_soa, shear_w_soa, pair_offsets,
+                ss_comb_i, ss_comb_j, dd_comb_i, dd_comb_j, ds_comb_i, ds_comb_j,
+                out_xipm_num, out_xipm_den, out_xig_num, out_xig_den, out_xit_num, out_xit_den,
+            )
 
         def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
             out = np.zeros_like(num, dtype=self.map_dtype)
@@ -4260,7 +4238,8 @@ class Correlation:
             out *= mask.astype(out.dtype, copy=False)
             return out
 
-        if return_device and self.backend.name == "cupy":
+        shape_pb = (n_patches, self.nbins)
+        if return_device and on_gpu:
             (
                 M_a_dev,
                 M_g_dev,
@@ -4268,8 +4247,6 @@ class Correlation:
                 xim_dev,
                 xi_g_dev,
                 xi_t_dev,
-                tmp_a,
-                tmp_b,
             ) = self._get_or_create_fused_post_buffers(
                 n_shear_bins=n_shear_bins,
                 n_density_bins=n_density_bins,
@@ -4282,124 +4259,114 @@ class Correlation:
 
             _safe_div_into_device(out_ma_num, out_ma_den, M_a_dev)
             _safe_div_into_device(out_mg_num, out_mg_den, M_g_dev)
-
-            half = self.map_dtype.type(0.5)
-
             for k in range(ss_ncomb):
-                ab_idx = 2 * k
-                ba_idx = ab_idx + 1
-
-                _safe_div_into_device(
-                    out_xip_num[ab_idx].reshape((n_patches, self.nbins)),
-                    out_xip_den[ab_idx].reshape((n_patches, self.nbins)),
-                    xip_dev[k],
-                )
-                _safe_div_into_device(
-                    out_xim_num[ab_idx].reshape((n_patches, self.nbins)),
-                    out_xip_den[ab_idx].reshape((n_patches, self.nbins)),
-                    xim_dev[k],
-                )
-
-                if not ss_auto[k]:
-                    _safe_div_into_device(
-                        out_xip_num[ba_idx].reshape((n_patches, self.nbins)),
-                        out_xip_den[ba_idx].reshape((n_patches, self.nbins)),
-                        tmp_a,
-                    )
-                    xip_dev[k] += tmp_a
-                    xip_dev[k] *= half
-
-                    _safe_div_into_device(
-                        out_xim_num[ba_idx].reshape((n_patches, self.nbins)),
-                        out_xip_den[ba_idx].reshape((n_patches, self.nbins)),
-                        tmp_b,
-                    )
-                    xim_dev[k] += tmp_b
-                    xim_dev[k] *= half
-
+                den_k = out_xipm_den[k].reshape(shape_pb)
+                _safe_div_into_device(out_xipm_num[0, k].reshape(shape_pb), den_k, xip_dev[k])
+                _safe_div_into_device(out_xipm_num[1, k].reshape(shape_pb), den_k, xim_dev[k])
             for k in range(dd_ncomb):
-                ab_idx = 2 * k
-                ba_idx = ab_idx + 1
-
-                if dd_auto[k]:
-                    _safe_div_into_device(
-                        out_xig_num[ab_idx].reshape((n_patches, self.nbins)),
-                        out_xig_den[ab_idx].reshape((n_patches, self.nbins)),
-                        xi_g_dev[k],
-                    )
-                else:
-                    # Symmetrise as the ratio of summed orientations — the
-                    # same weighted estimator as the CPU backend.
-                    _safe_div_into_device(
-                        (out_xig_num[ab_idx] + out_xig_num[ba_idx]).reshape(
-                            (n_patches, self.nbins)
-                        ),
-                        (out_xig_den[ab_idx] + out_xig_den[ba_idx]).reshape(
-                            (n_patches, self.nbins)
-                        ),
-                        xi_g_dev[k],
-                    )
-
+                _safe_div_into_device(
+                    out_xig_num[k].reshape(shape_pb), out_xig_den[k].reshape(shape_pb), xi_g_dev[k]
+                )
             for k in range(ds_ncomb):
                 _safe_div_into_device(
-                    out_xit_num[k].reshape((n_patches, self.nbins)),
-                    out_xit_den[k].reshape((n_patches, self.nbins)),
-                    xi_t_dev[k],
+                    out_xit_num[k].reshape(shape_pb), out_xit_den[k].reshape(shape_pb), xi_t_dev[k]
                 )
-
             return M_a_dev, M_g_dev, xip_dev, xim_dev, xi_g_dev, xi_t_dev
 
-        ma_num_np = np.asarray(self.backend.to_numpy(out_ma_num), dtype=self.map_dtype)
-        ma_den_np = np.asarray(self.backend.to_numpy(out_ma_den), dtype=self.map_dtype)
-        mg_num_np = np.asarray(self.backend.to_numpy(out_mg_num), dtype=self.map_dtype)
-        mg_den_np = np.asarray(self.backend.to_numpy(out_mg_den), dtype=self.map_dtype)
-        M_a = _safe_div(ma_num_np, ma_den_np)
-        M_g = _safe_div(mg_num_np, mg_den_np)
+        to_np = lambda arr: np.asarray(self.backend.to_numpy(arr), dtype=self.map_dtype)
+        M_a = _safe_div(to_np(out_ma_num), to_np(out_ma_den))
+        M_g = _safe_div(to_np(out_mg_num), to_np(out_mg_den))
 
-        xip_num_np = np.asarray(self.backend.to_numpy(out_xip_num), dtype=self.map_dtype)
-        xim_num_np = np.asarray(self.backend.to_numpy(out_xim_num), dtype=self.map_dtype)
-        xip_den_np = np.asarray(self.backend.to_numpy(out_xip_den), dtype=self.map_dtype)
+        xipm_num_np = to_np(out_xipm_num)
+        xipm_den_np = to_np(out_xipm_den)
         xip = np.zeros((ss_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
         xim = np.zeros((ss_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
-
-        half = self.map_dtype.type(0.5)
         for k in range(ss_ncomb):
-            ab_idx = 2 * k
-            ba_idx = ab_idx + 1
-            xip_ab = _safe_div(xip_num_np[ab_idx], xip_den_np[ab_idx]).reshape((n_patches, self.nbins))
-            xim_ab = _safe_div(xim_num_np[ab_idx], xip_den_np[ab_idx]).reshape((n_patches, self.nbins))
-            if ss_auto[k]:
-                xip[k] = xip_ab
-                xim[k] = xim_ab
-            else:
-                xip_ba = _safe_div(xip_num_np[ba_idx], xip_den_np[ba_idx]).reshape((n_patches, self.nbins))
-                xim_ba = _safe_div(xim_num_np[ba_idx], xip_den_np[ba_idx]).reshape((n_patches, self.nbins))
-                xip[k] = half * (xip_ab + xip_ba)
-                xim[k] = half * (xim_ab + xim_ba)
+            xip[k] = _safe_div(xipm_num_np[0, k], xipm_den_np[k]).reshape(shape_pb)
+            xim[k] = _safe_div(xipm_num_np[1, k], xipm_den_np[k]).reshape(shape_pb)
 
-        xig_num_np = np.asarray(self.backend.to_numpy(out_xig_num), dtype=self.map_dtype)
-        xig_den_np = np.asarray(self.backend.to_numpy(out_xig_den), dtype=self.map_dtype)
+        xig_num_np = to_np(out_xig_num)
+        xig_den_np = to_np(out_xig_den)
         xi_g = np.zeros((dd_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
         for k in range(dd_ncomb):
-            ab_idx = 2 * k
-            ba_idx = ab_idx + 1
-            if dd_auto[k]:
-                xi_g[k] = _safe_div(xig_num_np[ab_idx], xig_den_np[ab_idx]).reshape((n_patches, self.nbins))
-            else:
-                # Symmetrise as the ratio of summed orientations — the same
-                # weighted estimator on both backends.
-                xi_g[k] = _safe_div(
-                    xig_num_np[ab_idx] + xig_num_np[ba_idx],
-                    xig_den_np[ab_idx] + xig_den_np[ba_idx],
-                ).reshape((n_patches, self.nbins))
+            xi_g[k] = _safe_div(xig_num_np[k], xig_den_np[k]).reshape(shape_pb)
 
-        xit_num_np = np.asarray(self.backend.to_numpy(out_xit_num), dtype=self.map_dtype)
-        xit_den_np = np.asarray(self.backend.to_numpy(out_xit_den), dtype=self.map_dtype)
+        xit_num_np = to_np(out_xit_num)
+        xit_den_np = to_np(out_xit_den)
         xi_t = np.zeros((ds_ncomb, n_patches, self.nbins), dtype=self.map_dtype)
         for k in range(ds_ncomb):
-            xi_t[k] = _safe_div(xit_num_np[k], xit_den_np[k]).reshape((n_patches, self.nbins))
+            xi_t[k] = _safe_div(xit_num_np[k], xit_den_np[k]).reshape(shape_pb)
 
         return M_a, M_g, xip, xim, xi_g, xi_t
+
+    def _launch_3x2pt_pair_kernels(
+        self,
+        density_aos: Any,
+        shear_aos: Any,
+        density_w_aos: Any,
+        shear_w_aos: Any,
+        pair_offsets: Any,
+        ss_comb_i: Any,
+        ss_comb_j: Any,
+        dd_comb_i: Any,
+        dd_comb_j: Any,
+        ds_comb_i: Any,
+        ds_comb_j: Any,
+        out_xipm_num: Any,
+        out_xipm_den: Any,
+        out_xig_num: Any,
+        out_xig_den: Any,
+        out_xit_num: Any,
+        out_xit_den: Any,
+    ) -> None:
+        """GPU pair statistics of the fused 3x2pt path: xi+/-, xi_g and xi_t in
+        the combination-tiled pair kernels (packed geometry when prepared)."""
+        module = self.backend.module
+        ctx = self.compute_context
+        backend = self.backend
+        if ctx.packed_pairs_dev is not None:
+            perm = ctx.packed_perm_dev
+            g = lambda arr: module.ascontiguousarray(arr[perm])
+            density_p, shear_p = g(density_aos), g(shear_aos)
+            density_w_p, shear_w_p = g(density_w_aos), g(shear_w_aos)
+            pairs, row_base = ctx.packed_pairs_dev, ctx.packed_row_base_dev
+            ok_ss = backend.xipm_tomo_packed_kernel is not None and backend.xipm_tomo_packed_kernel(
+                shear_p, shear_w_p, pairs, pair_offsets, row_base,
+                ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
+            )
+            ok_dd = backend.kernel_density_density_tomo_packed is not None and backend.kernel_density_density_tomo_packed(
+                density_p, density_w_p, pairs, pair_offsets, row_base,
+                dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
+            )
+            ok_ds = backend.kernel_density_shear_tomo_packed is not None and backend.kernel_density_shear_tomo_packed(
+                density_p, shear_p, density_w_p, shear_w_p, pairs, pair_offsets, row_base,
+                ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,
+            )
+            if not (ok_ss and ok_dd and ok_ds):
+                raise RuntimeError(
+                    "A packed pair kernel is unavailable for this tomographic "
+                    "configuration; use pack_pairs=False."
+                )
+            return
+
+        inds_i, inds_j = self._pair_index_arrays()
+        rot_i = module.ascontiguousarray(self.exp2phi_dev[0])
+        rot_j = module.ascontiguousarray(self.exp2phi_dev[1])
+        ok_ss = backend.xipm_tomo_vectorized_kernel(
+            shear_aos, shear_w_aos, inds_i, inds_j, rot_i, rot_j, pair_offsets,
+            ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
+        )
+        ok_dd = backend.kernel_density_density_tomo_vectorized(
+            density_aos, density_w_aos, inds_i, inds_j, pair_offsets,
+            dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
+        )
+        ok_ds = backend.kernel_density_shear_tomo_vectorized(
+            density_aos, shear_aos, density_w_aos, shear_w_aos,
+            inds_i, inds_j, rot_i, rot_j, pair_offsets,
+            ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,
+        )
+        if not (ok_ss and ok_dd and ok_ds):
+            raise RuntimeError("Backend declined a 3x2pt pair kernel launch.")
 
     def get_3x2pt_tomo(
         self,

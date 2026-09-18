@@ -20,6 +20,7 @@
  */
 
 __COMMON_CUDA_SOURCE__
+__PAIR_TILES_CUDA_SOURCE__
 
 /*
  * T          -- scalar type (float / double)
@@ -94,4 +95,62 @@ __global__ void gpu_fused_tomo_reduce_dd(
         out_num[out_idx] = sum_val;
         out_den[out_idx] = sum_w;
     }
+}
+
+
+/*
+ * Combination-tiled kernels (default): one block per angular bin walks each
+ * pair once and accumulates every combination (pair_tiles.cuh: tile_dd).
+ * AUTO_ONLY = 0 -> row-major upper triangle (NCOMB = ND (ND + 1) / 2),
+ * AUTO_ONLY = 1 -> auto combinations only (NCOMB = ND).  Cross combinations
+ * sum both orientations into one row.  The per-(bin, row) kernel above is
+ * the fallback for other layouts.
+ *
+ * Output: out_num / out_den [k] x nbins_total.
+ * Grid: blockIdx.x = angular bin, threadIdx.x strides the pairs.
+ */
+template<typename T, int TOMO_BINS, int AUTO_ONLY, typename I, typename ACC>
+__global__ void gpu_tiled_tomo_reduce_dd(
+    const T* density,
+    const T* weights,
+    const I* ind_i,
+    const I* ind_j,
+    const long long* bin_offsets,
+    ACC* out_num,
+    ACC* out_den,
+    const long long nbins_total)
+{
+    const long long bin_flat = (long long)blockIdx.x;
+    if (bin_flat >= nbins_total) {
+        return;
+    }
+    /* Scalar fields need no rotations: tile_dd uses load_rows only. */
+    const UnpackedPairs<T, cuFloatComplex, I> pairs = {ind_i, ind_j, nullptr, nullptr};
+    tile_dd<T, TOMO_BINS, AUTO_ONLY, ACC>(
+        pairs, density, weights, bin_offsets[bin_flat], bin_offsets[bin_flat + 1],
+        out_num, out_den, nbins_total, bin_flat);
+}
+
+
+/* Same on packed pairs (8 B per pair, see pair_tiles.cuh). */
+template<typename T, int TOMO_BINS, int AUTO_ONLY, typename ACC>
+__global__ void gpu_tiled_packed_reduce_dd(
+    const T* density,
+    const T* weights,
+    const unsigned short* pairs,
+    const long long* bin_offsets,
+    const long long* row_base,
+    ACC* out_num,
+    ACC* out_den,
+    const long long nbins_total)
+{
+    const long long bin_flat = (long long)blockIdx.x;
+    if (bin_flat >= nbins_total) {
+        return;
+    }
+    const PackedPairs<T> packed = {
+        reinterpret_cast<const ushort4*>(pairs), row_base[bin_flat]};
+    tile_dd<T, TOMO_BINS, AUTO_ONLY, ACC>(
+        packed, density, weights, bin_offsets[bin_flat], bin_offsets[bin_flat + 1],
+        out_num, out_den, nbins_total, bin_flat);
 }

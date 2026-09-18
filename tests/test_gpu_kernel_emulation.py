@@ -23,10 +23,12 @@ import healpy as hp
 import numpy as np
 
 from CosmoFuse.backend import (
-    _build_cupy_3x2pt_tomo_fused_kernel,
+    _build_cupy_3x2pt_tomo_aperture_kernel,
     _build_cupy_aperture_tomo_density_kernel,
     _build_cupy_aperture_tomo_shear_kernel,
+    _build_cupy_density_density_tomo_packed_kernel,
     _build_cupy_density_density_tomo_vectorized_kernel,
+    _build_cupy_density_shear_tomo_packed_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
     _build_cupy_tomo_packed_kernel,
     _build_cupy_tomo_vectorized_kernel,
@@ -35,25 +37,18 @@ from CosmoFuse.correlations import Correlation
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 
-_EMULATED_KERNEL_ATTRS = (
-    "xipm_tomo_vectorized_kernel",
-    "xipm_tomo_packed_kernel",
-    "kernel_density_density_tomo_vectorized",
-    "kernel_density_shear_tomo_vectorized",
-    "aperture_tomo_shear_kernel",
-    "aperture_tomo_density_kernel",
-    "kernel_3x2pt_tomo_fused",
-)
-
 _BUILDERS = {
     "xipm_tomo_vectorized_kernel": _build_cupy_tomo_vectorized_kernel,
     "xipm_tomo_packed_kernel": _build_cupy_tomo_packed_kernel,
     "kernel_density_density_tomo_vectorized": _build_cupy_density_density_tomo_vectorized_kernel,
+    "kernel_density_density_tomo_packed": _build_cupy_density_density_tomo_packed_kernel,
     "kernel_density_shear_tomo_vectorized": _build_cupy_density_shear_tomo_vectorized_kernel,
+    "kernel_density_shear_tomo_packed": _build_cupy_density_shear_tomo_packed_kernel,
     "aperture_tomo_shear_kernel": _build_cupy_aperture_tomo_shear_kernel,
     "aperture_tomo_density_kernel": _build_cupy_aperture_tomo_density_kernel,
-    "kernel_3x2pt_tomo_fused": _build_cupy_3x2pt_tomo_fused_kernel,
+    "kernel_3x2pt_tomo_aperture": _build_cupy_3x2pt_tomo_aperture_kernel,
 }
+_EMULATED_KERNEL_ATTRS = tuple(_BUILDERS)
 
 
 @contextmanager
@@ -263,12 +258,52 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
                 weights={"shear": m["w_shear"], "density": m["w_density"]},
                 return_device=False,
             )
-        self.assertGreaterEqual(calls["kernel_3x2pt_tomo_fused"], 1)
+        self.assertGreaterEqual(calls["kernel_3x2pt_tomo_aperture"], 1)
+        # The pair statistics run in the tiled pair kernels.
+        self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 1)
+        self.assertEqual(calls["kernel_density_density_tomo_vectorized"], 1)
+        self.assertEqual(calls["kernel_density_shear_tomo_vectorized"], 1)
         for actual, ref, label in zip(
             results, self.ref_fused, ("M_a", "M_g", "xip", "xim", "xi_g", "xi_t")
         ):
             with self.subTest(output=label):
                 self._allclose(actual, ref)
+
+    def test_tiled_and_per_row_dd_ds_kernels_agree(self):
+        """The tiled xi_g / xi_t kernels and the per-row fallbacks give one
+        result; auto-only and subset combination requests go through the
+        tiles too (canonical rows gathered)."""
+        m = self.maps
+        for tiled in (True, False):
+            with emulated_gpu(self.corr) as calls:
+                calls["_built"]["kernel_density_density_tomo_vectorized"].tiled = tiled
+                calls["_built"]["kernel_density_shear_tomo_vectorized"].tiled = tiled
+                del LAUNCH_LOG[:]
+                xi_g = self.corr.vectorized_density_density(
+                    m["density"], m["w_density"], return_device=False
+                )
+                xi_g_auto = self.corr.vectorized_density_density(
+                    m["density"], m["w_density"], gc_auto_correlations_only=True,
+                    return_device=False,
+                )
+                xi_t = self.corr.vectorized_density_shear(
+                    m["density"], m["shear"], m["w_density"], m["w_shear"],
+                    return_device=False,
+                )
+                xi_t_sub = self.corr.vectorized_density_shear(
+                    m["density"], m["shear"], m["w_density"], m["w_shear"],
+                    ggl_bin_combinations=[(1, 0), (0, 0)], return_device=False,
+                )
+                expected = (
+                    ["gpu_tiled_tomo_reduce_dd"] * 2 + ["gpu_tiled_tomo_reduce_ds"] * 2
+                    if tiled
+                    else ["gpu_fused_tomo_reduce_dd"] * 2 + ["gpu_fused_tomo_reduce_ds"] * 2
+                )
+                self.assertEqual(LAUNCH_LOG, expected)
+            self._allclose(xi_g, self.ref_xig)
+            self._allclose(xi_g_auto, self.ref_xig[[0, 2]])   # (0,0), (1,1)
+            self._allclose(xi_t, self.ref_xit)
+            self._allclose(xi_t_sub, self.ref_xit[[2, 0]])    # (1,0), (0,0)
 
     def test_single_map_aperture_routes_through_tomo_kernel(self):
         m = self.maps

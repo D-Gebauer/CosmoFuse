@@ -13,11 +13,10 @@ kernels.
 Faithfulness notes:
   - Block reductions are replaced by ``np.sum`` over the pairs of a bin;
     only the summation order differs (roundoff-level for float64).
-  - ``gpu_fused_tomo_reduce_xipm`` performs its complex rotation at the
-    rotation precision ``C`` (float32 math for cuFloatComplex); the
-    emulator reproduces that by computing in ``complex64``.
-  - All other kernels promote float32 rotation/filter values into the map
-    type at use; NumPy's dtype promotion reproduces this exactly.
+  - All kernels promote float32 rotation/filter values into the map type
+    at use; NumPy's dtype promotion reproduces this exactly.
+  - The packed loaders evaluate the rotation angles with ``sincospi``;
+    the emulator uses ``np.cos(np.pi * x)`` (1e-16-level difference).
 """
 
 import re
@@ -96,6 +95,7 @@ class EmulatedCupyModule:
     cuda = _EmulatedCuda
     ascontiguousarray = staticmethod(np.ascontiguousarray)
     asarray = staticmethod(np.asarray)
+    zeros = staticmethod(np.zeros)
 
     @staticmethod
     def RawKernel(_source, name_expression, options=None):
@@ -168,119 +168,219 @@ def _emulate_xipm(params, grid, args):
             den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
 
 
-def _emulate_xipm_tiled(params, grid, args):
-    """tomo_vectorized_xipm.cu :: gpu_tiled_tomo_reduce_xipm<T, C, TOMO, I, ACC>.
+# ── Tile helpers (pair_tiles.cuh) ─────────────────────────────────────────
+#
+# One block per angular bin; every (combination) row holds BOTH orientations
+# of a cross combination summed (ratio-of-sums estimator).
 
-    One block per angular bin: every pair is visited once, all tomographic
-    bins of both pixels are loaded and rotated once, and every
-    (combination, orientation) row is accumulated.
-    """
-    map_dtype = _SCALAR_TYPES[params[0]]
-    tomo_bins = int(params[2])
-    acc = _SCALAR_TYPES[params[4]]
 
-    (shear, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets,
-     comb_i, comb_j, out_num, out_den, ncomb, nbins_total, _npairs) = args
-    ncomb = int(ncomb)
-    nbins_total = int(nbins_total)
-    assert int(grid[1]) == 1, "tiled kernel launches one block per angular bin"
-    # The kernel generates the row-major upper triangle at compile time.
-    expect = [(i, j) for i in range(tomo_bins) for j in range(i, tomo_bins)]
-    if ncomb != len(expect):
-        return
-    assert [(int(a), int(b)) for a, b in zip(comb_i, comb_j)] == expect
+def _unpacked_geometry(map_dtype, ind_i, ind_j, rot_i, rot_j, start, stop):
+    idx_a = ind_i[start:stop].astype(np.int64)
+    idx_b = ind_j[start:stop].astype(np.int64)
+    ea_r = rot_i[start:stop].real.astype(map_dtype)
+    ea_i = rot_i[start:stop].imag.astype(map_dtype)
+    eb_r = rot_j[start:stop].real.astype(map_dtype)
+    eb_i = rot_j[start:stop].imag.astype(map_dtype)
+    return idx_a, idx_b, ea_r, ea_i, eb_r, eb_i
+
+
+def _packed_geometry(map_dtype, pairs, base, start, stop):
+    """ushort4 {local_a, local_b, angle_a, angle_b}; alpha = pi * code / 32768
+    (sincospi in the kernel; np.cos(np.pi * x) here, 1e-16-level difference)."""
+    p = np.asarray(pairs[start:stop])
+    assert p.dtype == np.uint16 and p.shape[1] == 4
+    idx_a = base + p[:, 0].astype(np.int64)
+    idx_b = base + p[:, 1].astype(np.int64)
+    ha = p[:, 2].astype(map_dtype) * map_dtype(1.0 / 32768.0)
+    hb = p[:, 3].astype(map_dtype) * map_dtype(1.0 / 32768.0)
+    pi = map_dtype(np.pi)
+    return (idx_a, idx_b,
+            np.cos(pi * ha).astype(map_dtype), np.sin(pi * ha).astype(map_dtype),
+            np.cos(pi * hb).astype(map_dtype), np.sin(pi * hb).astype(map_dtype))
+
+
+def _tile_xipm(shear, weights, tomo_bins, acc, geom, out_num, out_den, nbins_total, bin_flat):
+    idx_a, idx_b, ea_r, ea_i, eb_r, eb_i = geom
+    ncomb = (tomo_bins * (tomo_bins + 1)) // 2
     shear3 = np.asarray(shear).reshape(-1, tomo_bins, 2)
     weights2 = np.asarray(weights).reshape(-1, tomo_bins)
     num_flat = out_num.reshape(-1)
     den_flat = out_den.reshape(-1)
-
-    for bin_flat in range(int(grid[0])):
-        if bin_flat >= nbins_total:
-            continue
-        start = int(bin_offsets[bin_flat])
-        stop = int(bin_offsets[bin_flat + 1])
-        idx_a = ind_i[start:stop].astype(np.int64)
-        idx_b = ind_j[start:stop].astype(np.int64)
-        ea_r = rot_i[start:stop].real.astype(map_dtype)[:, None]
-        ea_i = rot_i[start:stop].imag.astype(map_dtype)[:, None]
-        eb_r = rot_j[start:stop].real.astype(map_dtype)[:, None]
-        eb_i = rot_j[start:stop].imag.astype(map_dtype)[:, None]
-        ga, gb = shear3[idx_a], shear3[idx_b]          # (npairs, TOMO, 2)
-        a_r = ga[..., 0] * ea_r - ga[..., 1] * ea_i
-        a_i = ga[..., 0] * ea_i + ga[..., 1] * ea_r
-        b_r = gb[..., 0] * eb_r - gb[..., 1] * eb_i
-        b_i = gb[..., 0] * eb_i + gb[..., 1] * eb_r
-        w_a, w_b = weights2[idx_a], weights2[idx_b]
-
-        for k in range(ncomb):
-            i = int(comb_i[k])
-            j = int(comb_j[k])
+    ga, gb = shear3[idx_a], shear3[idx_b]          # (npairs, TOMO, 2)
+    a_r = ga[..., 0] * ea_r[:, None] - ga[..., 1] * ea_i[:, None]
+    a_i = ga[..., 0] * ea_i[:, None] + ga[..., 1] * ea_r[:, None]
+    b_r = gb[..., 0] * eb_r[:, None] - gb[..., 1] * eb_i[:, None]
+    b_i = gb[..., 0] * eb_i[:, None] + gb[..., 1] * eb_r[:, None]
+    w_a, w_b = weights2[idx_a], weights2[idx_b]
+    k = 0
+    for i in range(tomo_bins):
+        for j in range(i, tomo_bins):
+            sum_p = sum_m = sum_w = acc(0)
             for ori, (ta, tb) in enumerate(((i, j), (j, i))):
                 if ori == 1 and i == j:
-                    continue  # auto-combination rows stay zero (never written)
-                row = 2 * k + ori
+                    continue
                 w_pair = w_a[:, ta] * w_b[:, tb]
                 rr = b_r[:, tb] * a_r[:, ta]
                 ii = b_i[:, tb] * a_i[:, ta]
-                out_p_idx = row * nbins_total + bin_flat
-                out_m_idx = (2 * ncomb + row) * nbins_total + bin_flat
-                num_flat[out_p_idx] = np.sum(w_pair * (rr + ii), dtype=acc)
-                num_flat[out_m_idx] = np.sum(w_pair * (rr - ii), dtype=acc)
-                den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
+                sum_p += np.sum(w_pair * (rr + ii), dtype=acc)
+                sum_m += np.sum(w_pair * (rr - ii), dtype=acc)
+                sum_w += np.sum(w_pair, dtype=acc)
+            num_flat[k * nbins_total + bin_flat] = sum_p
+            num_flat[(ncomb + k) * nbins_total + bin_flat] = sum_m
+            den_flat[k * nbins_total + bin_flat] = sum_w
+            k += 1
 
 
-def _emulate_xipm_packed(params, grid, args):
-    """tomo_packed_xipm.cu :: gpu_tiled_packed_reduce_xipm<T, TOMO, ACC>."""
-    map_dtype = _SCALAR_TYPES[params[0]]
-    tomo_bins = int(params[1])
-    acc = _SCALAR_TYPES[params[2]]
-    (shear, weights, pairs, bin_offsets, row_base, out_num, out_den,
-     ncomb, nbins_total) = args
-    ncomb, nbins_total = int(ncomb), int(nbins_total)
-    assert int(grid[1]) == 1
-    if ncomb != (tomo_bins * (tomo_bins + 1)) // 2:
-        return
-    assert np.asarray(pairs).dtype == np.uint16 and np.asarray(pairs).shape[1] == 4
-    shear3 = np.asarray(shear).reshape(-1, tomo_bins, 2)
+def _tile_dd(density, weights, tomo_bins, auto_only, acc, geom, out_num, out_den, nbins_total, bin_flat):
+    idx_a, idx_b = geom[0], geom[1]
+    density2 = np.asarray(density).reshape(-1, tomo_bins)
     weights2 = np.asarray(weights).reshape(-1, tomo_bins)
     num_flat = out_num.reshape(-1)
     den_flat = out_den.reshape(-1)
-    angle_unit = map_dtype(9.587379924285257e-05)
+    d_a, d_b = density2[idx_a], density2[idx_b]
+    w_a, w_b = weights2[idx_a], weights2[idx_b]
+    k = 0
+    for i in range(tomo_bins):
+        for j in range(i, (i + 1) if auto_only else tomo_bins):
+            w_ab = w_a[:, i] * w_b[:, j]
+            sum_n = np.sum(w_ab * d_a[:, i] * d_b[:, j], dtype=acc)
+            sum_w = np.sum(w_ab, dtype=acc)
+            if i != j:
+                w_ba = w_a[:, j] * w_b[:, i]
+                sum_n += np.sum(w_ba * d_a[:, j] * d_b[:, i], dtype=acc)
+                sum_w += np.sum(w_ba, dtype=acc)
+            num_flat[k * nbins_total + bin_flat] = sum_n
+            den_flat[k * nbins_total + bin_flat] = sum_w
+            k += 1
 
+
+def _tile_ds(density, shear, lens_w, source_w, lens_bins, source_bins, acc, geom,
+             out_num, out_den, nbins_total, bin_flat):
+    idx_a, idx_b, ea_r, ea_i, eb_r, eb_i = geom
+    density2 = np.asarray(density).reshape(-1, lens_bins)
+    lens_w2 = np.asarray(lens_w).reshape(-1, lens_bins)
+    shear3 = np.asarray(shear).reshape(-1, source_bins, 2)
+    source_w2 = np.asarray(source_w).reshape(-1, source_bins)
+    num_flat = out_num.reshape(-1)
+    den_flat = out_den.reshape(-1)
+    d_a, d_b = density2[idx_a], density2[idx_b]
+    dw_a, dw_b = lens_w2[idx_a], lens_w2[idx_b]
+    ga, gb = shear3[idx_a], shear3[idx_b]
+    gt_a = -ga[..., 0] * ea_r[:, None] + ga[..., 1] * ea_i[:, None]
+    gt_b = -gb[..., 0] * eb_r[:, None] + gb[..., 1] * eb_i[:, None]
+    sw_a, sw_b = source_w2[idx_a], source_w2[idx_b]
+    for l in range(lens_bins):
+        for s_ in range(source_bins):
+            k = l * source_bins + s_
+            w_ab = dw_a[:, l] * sw_b[:, s_]
+            w_ba = dw_b[:, l] * sw_a[:, s_]
+            num_flat[k * nbins_total + bin_flat] = (
+                np.sum(w_ab * d_a[:, l] * gt_b[:, s_], dtype=acc)
+                + np.sum(w_ba * d_b[:, l] * gt_a[:, s_], dtype=acc)
+            )
+            den_flat[k * nbins_total + bin_flat] = (
+                np.sum(w_ab, dtype=acc) + np.sum(w_ba, dtype=acc)
+            )
+
+
+def _emulate_xipm_tiled(params, grid, args):
+    """tomo_vectorized_xipm.cu :: gpu_tiled_tomo_reduce_xipm<T, C, TOMO, I, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins = int(params[2])
+    acc = _SCALAR_TYPES[params[4]]
+    (shear, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets, out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1, "tiled kernel launches one block per angular bin"
     for bin_flat in range(int(grid[0])):
         if bin_flat >= nbins_total:
             continue
         start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
-        p = np.asarray(pairs[start:stop])
-        base = int(row_base[bin_flat])
-        idx_a = base + p[:, 0].astype(np.int64)
-        idx_b = base + p[:, 1].astype(np.int64)
-        ang_a = p[:, 2].astype(map_dtype) * angle_unit
-        ang_b = p[:, 3].astype(map_dtype) * angle_unit
-        ea_r, ea_i = np.cos(ang_a)[:, None], np.sin(ang_a)[:, None]
-        eb_r, eb_i = np.cos(ang_b)[:, None], np.sin(ang_b)[:, None]
-        ga, gb = shear3[idx_a], shear3[idx_b]
-        a_r = ga[..., 0] * ea_r - ga[..., 1] * ea_i
-        a_i = ga[..., 0] * ea_i + ga[..., 1] * ea_r
-        b_r = gb[..., 0] * eb_r - gb[..., 1] * eb_i
-        b_i = gb[..., 0] * eb_i + gb[..., 1] * eb_r
-        w_a, w_b = weights2[idx_a], weights2[idx_b]
-        k = 0
-        for i in range(tomo_bins):
-            for j in range(i, tomo_bins):
-                for ori, (ta, tb) in enumerate(((i, j), (j, i))):
-                    if ori == 1 and i == j:
-                        continue
-                    row = 2 * k + ori
-                    w_pair = w_a[:, ta] * w_b[:, tb]
-                    rr = b_r[:, tb] * a_r[:, ta]
-                    ii = b_i[:, tb] * a_i[:, ta]
-                    out_p_idx = row * nbins_total + bin_flat
-                    out_m_idx = (2 * ncomb + row) * nbins_total + bin_flat
-                    num_flat[out_p_idx] = np.sum(w_pair * (rr + ii), dtype=acc)
-                    num_flat[out_m_idx] = np.sum(w_pair * (rr - ii), dtype=acc)
-                    den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
-                k += 1
+        geom = _unpacked_geometry(map_dtype, ind_i, ind_j, rot_i, rot_j, start, stop)
+        _tile_xipm(shear, weights, tomo_bins, acc, geom, out_num, out_den, nbins_total, bin_flat)
+
+
+def _emulate_xipm_packed(params, grid, args):
+    """tomo_vectorized_xipm.cu :: gpu_tiled_packed_reduce_xipm<T, TOMO, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins = int(params[1])
+    acc = _SCALAR_TYPES[params[2]]
+    (shear, weights, pairs, bin_offsets, row_base, out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        geom = _packed_geometry(map_dtype, pairs, int(row_base[bin_flat]), start, stop)
+        _tile_xipm(shear, weights, tomo_bins, acc, geom, out_num, out_den, nbins_total, bin_flat)
+
+
+def _emulate_dd_tiled(params, grid, args):
+    """density_density_tomo_vectorized.cu :: gpu_tiled_tomo_reduce_dd<T, TOMO, AUTO, I, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins, auto_only = int(params[1]), bool(int(params[2]))
+    acc = _SCALAR_TYPES[params[4]]
+    (density, weights, ind_i, ind_j, bin_offsets, out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        geom = (ind_i[start:stop].astype(np.int64), ind_j[start:stop].astype(np.int64))
+        _tile_dd(density, weights, tomo_bins, auto_only, acc, geom, out_num, out_den, nbins_total, bin_flat)
+
+
+def _emulate_dd_packed(params, grid, args):
+    """density_density_tomo_vectorized.cu :: gpu_tiled_packed_reduce_dd<T, TOMO, AUTO, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins, auto_only = int(params[1]), bool(int(params[2]))
+    acc = _SCALAR_TYPES[params[3]]
+    (density, weights, pairs, bin_offsets, row_base, out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        geom = _packed_geometry(map_dtype, pairs, int(row_base[bin_flat]), start, stop)
+        _tile_dd(density, weights, tomo_bins, auto_only, acc, geom, out_num, out_den, nbins_total, bin_flat)
+
+
+def _emulate_ds_tiled(params, grid, args):
+    """density_shear_tomo_vectorized.cu :: gpu_tiled_tomo_reduce_ds<T, C, L, S, I, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    lens_bins, source_bins = int(params[2]), int(params[3])
+    acc = _SCALAR_TYPES[params[5]]
+    (density, shear, lens_w, source_w, ind_i, ind_j, rot_i, rot_j, bin_offsets,
+     out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        geom = _unpacked_geometry(map_dtype, ind_i, ind_j, rot_i, rot_j, start, stop)
+        _tile_ds(density, shear, lens_w, source_w, lens_bins, source_bins, acc, geom,
+                 out_num, out_den, nbins_total, bin_flat)
+
+
+def _emulate_ds_packed(params, grid, args):
+    """density_shear_tomo_vectorized.cu :: gpu_tiled_packed_reduce_ds<T, L, S, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    lens_bins, source_bins = int(params[1]), int(params[2])
+    acc = _SCALAR_TYPES[params[3]]
+    (density, shear, lens_w, source_w, pairs, bin_offsets, row_base,
+     out_num, out_den, nbins_total) = args
+    nbins_total = int(nbins_total)
+    assert int(grid[1]) == 1
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        geom = _packed_geometry(map_dtype, pairs, int(row_base[bin_flat]), start, stop)
+        _tile_ds(density, shear, lens_w, source_w, lens_bins, source_bins, acc, geom,
+                 out_num, out_den, nbins_total, bin_flat)
 
 
 def _emulate_dd(params, grid, args):
@@ -450,30 +550,21 @@ def _emulate_aperture_density_tomo(params, grid, args):
             out_den[bin_idx, patch] = np.sum(wv)
 
 
-def _emulate_fused_3x2pt(params, grid, args):
-    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_fused<T, C, I, QT, ND, NS, ACC>.
+def _emulate_fused_aperture(params, grid, args):
+    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_aperture<T, QT, ND, NS, ACC>.
 
     One call per section (the trailing launch argument selects it), like
     the per-section launches of the cupy wrapper.
     """
-    n_density = int(params[4])
-    n_shear = int(params[5])
-    acc = _SCALAR_TYPES[params[6]]
+    n_density = int(params[2])
+    n_shear = int(params[3])
+    acc = _SCALAR_TYPES[params[4]]
 
-    (density, shear, density_w, shear_w, ind_i, ind_j, rot_i, rot_j,
-     pair_offsets, nbins_total, npatches, _npix,
+    (density, shear, density_w, shear_w, npatches,
      q_inds, q_cos, q_sin, q_val, q_offsets, q_patch_area,
-     ss_comb_i, ss_comb_j, n_ss_comb, dd_comb_i, dd_comb_j, n_dd_comb,
-     ds_comb_i, ds_comb_j, n_ds_comb,
-     out_ma_num, out_ma_den, out_mg_num, out_mg_den,
-     out_xip_num, out_xim_num, out_xipm_den,
-     out_xig_num, out_xig_den, out_xit_num, out_xit_den, section) = args
+     out_ma_num, out_ma_den, out_mg_num, out_mg_den, section) = args
 
-    nbins_total = int(nbins_total)
     npatches = int(npatches)
-    n_ss_comb = int(n_ss_comb)
-    n_dd_comb = int(n_dd_comb)
-    n_ds_comb = int(n_ds_comb)
     section = int(section)
     gx, gy = int(grid[0]), int(grid[1])
 
@@ -523,118 +614,7 @@ def _emulate_fused_3x2pt(params, grid, args):
                 mg_den[y * npatches + x] = np.sum(wv, dtype=acc)
         return
 
-    if section == 2:  # cosmic shear xi+/xi-
-        xip_num = out_xip_num.reshape(-1)
-        xim_num = out_xim_num.reshape(-1)
-        xipm_den = out_xipm_den.reshape(-1)
-        for x in range(gx):
-            if x >= nbins_total:
-                continue
-            start, stop = int(pair_offsets[x]), int(pair_offsets[x + 1])
-            pix_a = ind_i[start:stop].astype(np.int64)
-            pix_b = ind_j[start:stop].astype(np.int64)
-            ex_a = rot_i[start:stop]
-            ex_b = rot_j[start:stop]
-            for y in range(gy):
-                if y >= 2 * n_ss_comb:
-                    continue
-                comb_idx = y >> 1
-                ori = y & 1
-                i = int(ss_comb_i[comb_idx])
-                j = int(ss_comb_j[comb_idx])
-                if ori == 1 and i == j:
-                    continue
-                ai, bj = (j, i) if ori == 1 else (i, j)
-
-                a_base = (pix_a * n_shear + ai) * 2
-                b_base = (pix_b * n_shear + bj) * 2
-                ga1, ga2 = shear_flat[a_base], shear_flat[a_base + 1]
-                gb1, gb2 = shear_flat[b_base], shear_flat[b_base + 1]
-                # Rotation expanded at map precision (real/imag parts of C
-                # promote exactly).
-                a_r = ga1 * ex_a.real - ga2 * ex_a.imag
-                a_i = ga1 * ex_a.imag + ga2 * ex_a.real
-                b_r = gb1 * ex_b.real - gb2 * ex_b.imag
-                b_i = gb1 * ex_b.imag + gb2 * ex_b.real
-
-                wv = shear_w_flat[pix_a * n_shear + ai] * shear_w_flat[pix_b * n_shear + bj]
-                out_idx = y * nbins_total + x
-                xip_num[out_idx] = np.sum(wv * (b_r * a_r + b_i * a_i), dtype=acc)
-                xim_num[out_idx] = np.sum(wv * (b_r * a_r - b_i * a_i), dtype=acc)
-                xipm_den[out_idx] = np.sum(wv, dtype=acc)
-        return
-
-    if section == 3:  # galaxy clustering xi_g
-        xig_num = out_xig_num.reshape(-1)
-        xig_den = out_xig_den.reshape(-1)
-        for x in range(gx):
-            if x >= nbins_total:
-                continue
-            start, stop = int(pair_offsets[x]), int(pair_offsets[x + 1])
-            pix_a = ind_i[start:stop].astype(np.int64)
-            pix_b = ind_j[start:stop].astype(np.int64)
-            for y in range(gy):
-                if y >= 2 * n_dd_comb:
-                    continue
-                comb_idx = y >> 1
-                ori = y & 1
-                i = int(dd_comb_i[comb_idx])
-                j = int(dd_comb_j[comb_idx])
-                if ori == 1 and i == j:
-                    continue
-                ai, bj = (j, i) if ori == 1 else (i, j)
-
-                ia = pix_a * n_density + ai
-                jb = pix_b * n_density + bj
-                wv = density_w_flat[ia] * density_w_flat[jb]
-                out_idx = y * nbins_total + x
-                xig_num[out_idx] = np.sum(
-                    wv * density_flat[ia] * density_flat[jb], dtype=acc
-                )
-                xig_den[out_idx] = np.sum(wv, dtype=acc)
-        return
-
-    if section == 4:  # galaxy-galaxy lensing xi_t
-        xit_num = out_xit_num.reshape(-1)
-        xit_den = out_xit_den.reshape(-1)
-        for x in range(gx):
-            if x >= nbins_total:
-                continue
-            start, stop = int(pair_offsets[x]), int(pair_offsets[x + 1])
-            pix_a = ind_i[start:stop].astype(np.int64)
-            pix_b = ind_j[start:stop].astype(np.int64)
-            ex_ab = rot_j[start:stop]
-            ex_ba = rot_i[start:stop]
-            for y in range(gy):
-                if y >= n_ds_comb:
-                    continue
-                lens_bin = int(ds_comb_i[y])
-                source_bin = int(ds_comb_j[y])
-
-                lens_ab = pix_a * n_density + lens_bin
-                src_ab = pix_b * n_shear + source_bin
-                gt_ab = (
-                    -shear_flat[src_ab * 2] * ex_ab.real
-                    + shear_flat[src_ab * 2 + 1] * ex_ab.imag
-                )
-                w_ab = density_w_flat[lens_ab] * shear_w_flat[src_ab]
-
-                lens_ba = pix_b * n_density + lens_bin
-                src_ba = pix_a * n_shear + source_bin
-                gt_ba = (
-                    -shear_flat[src_ba * 2] * ex_ba.real
-                    + shear_flat[src_ba * 2 + 1] * ex_ba.imag
-                )
-                w_ba = density_w_flat[lens_ba] * shear_w_flat[src_ba]
-
-                out_idx = y * nbins_total + x
-                xit_num[out_idx] = np.sum(
-                    w_ab * density_flat[lens_ab] * gt_ab, dtype=acc
-                ) + np.sum(w_ba * density_flat[lens_ba] * gt_ba, dtype=acc)
-                xit_den[out_idx] = np.sum(w_ab, dtype=acc) + np.sum(w_ba, dtype=acc)
-        return
-
-    raise ValueError(f"Unknown fused section: {section}")
+    raise ValueError(f"Unknown aperture section: {section}")
 
 
 _KERNEL_EMULATORS = {
@@ -642,8 +622,12 @@ _KERNEL_EMULATORS = {
     "gpu_tiled_tomo_reduce_xipm": _emulate_xipm_tiled,
     "gpu_tiled_packed_reduce_xipm": _emulate_xipm_packed,
     "gpu_fused_tomo_reduce_dd": _emulate_dd,
+    "gpu_tiled_tomo_reduce_dd": _emulate_dd_tiled,
+    "gpu_tiled_packed_reduce_dd": _emulate_dd_packed,
     "gpu_fused_tomo_reduce_ds": _emulate_ds,
+    "gpu_tiled_tomo_reduce_ds": _emulate_ds_tiled,
+    "gpu_tiled_packed_reduce_ds": _emulate_ds_packed,
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,
     "gpu_aperture_density_tomo": _emulate_aperture_density_tomo,
-    "gpu_3x2pt_tomo_fused": _emulate_fused_3x2pt,
+    "gpu_3x2pt_tomo_aperture": _emulate_fused_aperture,
 }

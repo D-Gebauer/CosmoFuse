@@ -114,3 +114,36 @@ Findings worth remembering
 Open (not started): payload packing (§8.2), multi-map kernel (§8.3), block
 shapes (§8.4), tiling of the fused-3x2pt / ds / dd kernels, coverage chunking
 (§8.5), T10 (ζ level, needs non-Gaussian nside-2048 sims), float16 archives.
+
+---
+
+# Stage 7 results (2026-09-18): tiled + packed kernels for every pair statistic
+
+`stage7_gpu_tiles.py`, A100 (idle), DES Y3 Q110 (917 patches), 4 source + 4
+lens bins, float32 maps + float64 accumulators, host input, synchronised
+wall time per map-set (median of 8). "per-row" = the 4.21 kernels before
+this stage for ξ_g / ξ_t / 3x2pt (one block per bin × combination ×
+orientation); "tiled" = one block per bin, every pair once
+(`cuda/pair_tiles.cuh`); the fused 3x2pt path now launches the same three
+pair tiles after its aperture sections.
+
+| nside 512, 265 M pairs | per-row | tiled | tiled + packed |
+|---|---|---|---|
+| `get_full_tomo_shear` | 74.1 ms | 13.6 ms | 13.4 ms |
+| `get_full_tomo_density` | 31.5 ms | 8.4 ms | 8.3 ms |
+| `get_full_tomo_ggl` | 96.4 ms | 23.6 ms | 22.3 ms |
+| `get_3x2pt_tomo` | 203 ms | 46.6 ms | 45.1 ms |
+
+| nside 2048, k = 2.9, 592 M pairs, random maps | tiled | tiled + packed |
+|---|---|---|
+| `get_full_tomo_shear` | 86.7 ms | 87.7 ms |
+| `get_full_tomo_density` | 49.2 ms | 50.3 ms |
+| `get_full_tomo_ggl` | 129 ms | 132 ms |
+| `get_3x2pt_tomo` | 251 ms | 226 ms |
+
+Gates (24–48 patches, `bitwise_check.py` + part A of the script):
+* GPU float64 vs CPU float64, every method, packed and unpacked: ≤ 1.4e-14.
+* tiled vs per-row on the GPU (float32 maps + float64 acc): **bitwise** for
+  M_ap, the auto combinations of ξ±, ξ_g, all of ξ_t and every output of
+  `get_3x2pt_tomo` (cross terms included on this data).
+* packed vs unpacked: ≤ 1.1e-14 relative (float64 maps).

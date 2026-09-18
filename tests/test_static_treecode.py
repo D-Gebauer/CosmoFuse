@@ -101,7 +101,8 @@ def brute_force_reference(corr, shear, dens, w_s, w_d):
     """For every fine pair: parents' bin + parents' rotation, fine values.
 
     Returns dict of (n_patches, nbins) arrays: numerators and denominators of
-    xi+/xi- (tomo 0 x tomo 1, A->B orientation), xi_g, xi_t (lens 0, source 1).
+    xi+/xi- (tomo 0 x tomo 1, both orientations summed), xi_g, xi_t (lens 0,
+    source 1).
     """
     nb = corr.nbins
     keys = ("xip", "xim", "ss_den", "xig", "dd_den", "xit", "ds_den", "npairs")
@@ -122,12 +123,13 @@ def brute_force_reference(corr, shear, dens, w_s, w_d):
             members = [pix[index == c] for c in range(ra.size)]
             for a, b, bb, e1, e2 in zip(I, J, bins + b0, c1 + 1j * s1, c2 + 1j * s2):
                 pa, pb = members[a], members[b]
-                # shear-shear, tomo 0 at a, tomo 1 at b
-                wa, wb = w_s[0][pa], w_s[1][pb]
-                ga, gb = g[0][pa] * e1, g[1][pb] * e2
-                out["xip"][ip, bb] += np.real(np.sum(wb * gb) * np.conj(np.sum(wa * ga)))
-                out["xim"][ip, bb] += np.real(np.sum(wb * gb) * np.sum(wa * ga))
-                out["ss_den"][ip, bb] += wa.sum() * wb.sum()
+                # shear-shear, tomo 0 x tomo 1: (0 at a, 1 at b) + (1 at a, 0 at b)
+                for ta, tb in ((0, 1), (1, 0)):
+                    wa, wb = w_s[ta][pa], w_s[tb][pb]
+                    ga, gb = g[ta][pa] * e1, g[tb][pb] * e2
+                    out["xip"][ip, bb] += np.real(np.sum(wb * gb) * np.conj(np.sum(wa * ga)))
+                    out["xim"][ip, bb] += np.real(np.sum(wb * gb) * np.sum(wa * ga))
+                    out["ss_den"][ip, bb] += wa.sum() * wb.sum()
                 # density-density, tomo 0 x tomo 1 (both orientations summed)
                 da, db = w_d[0][pa] * dens[0][pa], w_d[1][pb] * dens[1][pb]
                 da2, db2 = w_d[1][pa] * dens[1][pa], w_d[0][pb] * dens[0][pb]
@@ -326,13 +328,16 @@ class TestPairSearchPrecision(unittest.TestCase):
 
     def test_modes(self):
         mask = make_mask()
-        legacy = make_corr(mask, rotation_precision="float32")
+        default = make_corr(mask, rotation_precision="float32")
+        self.assertEqual(default._pair_finder.search_dtype, np.float64)  # default
+        legacy = make_corr(mask, rotation_precision="float32", pair_search_precision="rotation")
         self.assertEqual(legacy._pair_finder.search_dtype, np.float32)  # historical
         self.assertEqual(
-            make_corr(mask, rotation_precision="float32", pair_search_precision="float64")
-            ._pair_finder.search_dtype, np.float64)
-        tree32 = make_corr(mask, resolution_factor=2.0, rotation_precision="float32")
-        self.assertEqual(tree32._pair_finder.search_dtype, np.float64)  # auto
+            make_corr(mask, rotation_precision="float32", pair_search_precision="auto")
+            ._pair_finder.search_dtype, np.float32)  # auto = historical at full resolution
+        tree32 = make_corr(mask, resolution_factor=2.0, rotation_precision="float32",
+                           pair_search_precision="auto")
+        self.assertEqual(tree32._pair_finder.search_dtype, np.float64)  # auto + treecode
         with self.assertRaisesRegex(ValueError, "pair_search_precision"):
             make_corr(mask, pair_search_precision="float16")
 
@@ -352,12 +357,13 @@ class TestPairSearchPrecision(unittest.TestCase):
 
     def test_small_scale_float32_search_warns(self):
         with self.assertLogs("CosmoFuse.correlations", level="WARNING") as logs:
-            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu")
+            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu",
+                        pair_search_precision="rotation")
         self.assertIn("pair_search_precision='float64'", logs.output[0])
         with self.assertNoLogs("CosmoFuse.correlations", level="WARNING"):
-            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=15, theta_max=50, device="cpu")
-            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu",
-                        pair_search_precision="float64")
+            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=15, theta_max=50, device="cpu",
+                        pair_search_precision="rotation")
+            Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu")
 
 
 class TestBruteForceReference(TreecodeBase):
@@ -387,7 +393,10 @@ class TestBruteForceReference(TreecodeBase):
         _, ws = corr._expand_rows((), rows(self.w_s), "pairs")
         _, wd = corr._expand_rows((), rows(self.w_d), "pairs")
         shape = (corr.n_patches, corr.nbins)
-        ss = np.asarray(corr._compute_xipm_sumofweights(ws[0], ws[1])).reshape(shape)
+        ss = (
+            np.asarray(corr._compute_xipm_sumofweights(ws[0], ws[1]))
+            + np.asarray(corr._compute_xipm_sumofweights(ws[1], ws[0]))
+        ).reshape(shape)
         self.assert_close(ss, self.ref["ss_den"], "ss_den")
         dd = (
             np.asarray(corr._compute_xipm_sumofweights(wd[0], wd[1]))
@@ -427,41 +436,41 @@ class TestBruteForceReference(TreecodeBase):
         xi_t = corr.vectorized_density_shear(dens, shear, w_d, w_s, return_device=False)
         self.assert_close(xi_t[1], xit_ref, "vectorized xi_t (0,1)")
 
-        # fused kernel: xi_g, xi_t as above; xi+- cross term is the mean of the
-        # A->B and B->A ratios -> check A->B via the raw fused outputs
+        # fused kernel: xi_g, xi_t as above; the xi+- cross term is the ratio
+        # of the summed orientations -> the raw fused numerators / denominators
         M_a, M_g, xip, xim, xi_g2, xi_t2 = (
             np.array(o) for o in corr.get_3x2pt_tomo(
                 shear_maps=shear, density_maps=dens, weights=(w_s, w_d), return_device=False)
         )
         self.assert_close(xi_g2[1], xig_ref, "fused xi_g (0,1)")
         self.assert_close(xi_t2[1], xit_ref, "fused xi_t (0,1)")
+        self.assert_close(xip[1], xip_ref, "fused xi+ (0,1)")
+        self.assert_close(xim[1], xim_ref, "fused xi- (0,1)")
         buf = corr.compute_context.fused_output_buffers
         shape = (corr.n_patches, corr.nbins)
-        self.assert_close(np.asarray(buf["out_xip_num"][2]).reshape(shape), ref["xip"], "fused xi+ num")
-        self.assert_close(np.asarray(buf["out_xim_num"][2]).reshape(shape), ref["xim"], "fused xi- num")
-        self.assert_close(np.asarray(buf["out_xip_den"][2]).reshape(shape), ref["ss_den"], "fused den")
+        self.assert_close(np.asarray(buf["out_xipm_num"][0, 1]).reshape(shape), ref["xip"], "fused xi+ num")
+        self.assert_close(np.asarray(buf["out_xipm_num"][1, 1]).reshape(shape), ref["xim"], "fused xi- num")
+        self.assert_close(np.asarray(buf["out_xipm_den"][1]).reshape(shape), ref["ss_den"], "fused den")
         self.assert_close(np.asarray(buf["out_xit_num"][1]).reshape(shape), ref["xit"], "fused xi_t num")
         self.assert_close(np.asarray(buf["out_xit_den"][1]).reshape(shape), ref["ds_den"], "fused xi_t den")
-        self.assert_close(
-            np.asarray(buf["out_xig_num"][2] + buf["out_xig_num"][3]).reshape(shape),
-            ref["xig"], "fused xi_g num")
+        self.assert_close(np.asarray(buf["out_xig_num"][1]).reshape(shape), ref["xig"], "fused xi_g num")
 
         # vectorized xi+- must agree with the fused kernel bit-for-bit-ish
         xip_v, xim_v = corr.vectorized_shear_shear(shear, w_s, return_device=False)
         np.testing.assert_allclose(xip_v, xip, rtol=0, atol=1e-13 * np.max(np.abs(xip)))
         np.testing.assert_allclose(xim_v, xim, rtol=0, atol=1e-13 * np.max(np.abs(xim)))
+        self.assert_close(xip_v[1], xip_ref, "vectorized xi+ (0,1)")
         # auto-correlation through the single-pair API vs the vectorized path
         xip_s, xim_s = corr.compute_shear_shear(
             shear[0, 0], shear[0, 1], shear[0, 0], shear[0, 1], w_s[0], w_s[0], return_device=False)
         np.testing.assert_allclose(xip_s, xip_v[0], rtol=0, atol=1e-13 * np.max(np.abs(xip_v)))
         np.testing.assert_allclose(xim_s, xim_v[0], rtol=0, atol=1e-13 * np.max(np.abs(xim_v)))
-        # cross term = mean of the two orientation ratios
-        with np.errstate(invalid="ignore", divide="ignore"):
-            ab_p = ref["xip"] / ref["ss_den"]
+        # the single-map cross API keeps the historical mean of the two
+        # orientation ratios: equal to the ratio of sums only for equal weights
         xip_c, _ = corr.compute_shear_shear(
-            shear[0, 0], shear[0, 1], shear[1, 0], shear[1, 1], w_s[0], w_s[1], return_device=False)
-        np.testing.assert_allclose(xip_c, xip_v[1], rtol=0, atol=1e-13 * np.max(np.abs(xip_v)))
-        self.assertTrue(np.all(np.isfinite(ab_p)))
+            shear[0, 0], shear[0, 1], shear[1, 0], shear[1, 1], w_s[0], w_s[0], return_device=False)
+        xip_e, _ = corr.vectorized_shear_shear(shear, np.stack((w_s[0], w_s[0])), return_device=False)
+        np.testing.assert_allclose(xip_c, xip_e[1], rtol=0, atol=1e-13 * np.max(np.abs(xip_e)))
         return xip_v, xim_v
 
     def test_cpu_paths_match_reference(self):

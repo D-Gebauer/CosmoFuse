@@ -26,6 +26,7 @@
  */
 
 __COMMON_CUDA_SOURCE__
+__PAIR_TILES_CUDA_SOURCE__
 
 
 /*
@@ -116,4 +117,67 @@ __global__ void gpu_fused_tomo_reduce_ds(
         out_num[out_idx] = sum_val;
         out_den[out_idx] = sum_w;
     }
+}
+
+
+/*
+ * Combination-tiled kernels (default): one block per angular bin walks each
+ * pair once and accumulates the full row-major lens x source cartesian
+ * product (pair_tiles.cuh: tile_ds; k = lens * SOURCE_TOMO_BINS + source).
+ * The per-(bin, combination) kernel above is the fallback.
+ *
+ * Output: out_num / out_den [k] x nbins_total.
+ * Grid: blockIdx.x = angular bin, threadIdx.x strides the pairs.
+ */
+template<typename T, typename C, int LENS_TOMO_BINS, int SOURCE_TOMO_BINS, typename I, typename ACC>
+__global__ void gpu_tiled_tomo_reduce_ds(
+    const T* density,
+    const T* shear,
+    const T* lens_weights,
+    const T* source_weights,
+    const I* ind_i,
+    const I* ind_j,
+    const C* rot_i,
+    const C* rot_j,
+    const long long* bin_offsets,
+    ACC* out_num,
+    ACC* out_den,
+    const long long nbins_total)
+{
+    const long long bin_flat = (long long)blockIdx.x;
+    if (bin_flat >= nbins_total) {
+        return;
+    }
+    const UnpackedPairs<T, C, I> pairs = {ind_i, ind_j, rot_i, rot_j};
+    tile_ds<T, LENS_TOMO_BINS, SOURCE_TOMO_BINS, ACC>(
+        pairs, density, shear, lens_weights, source_weights,
+        bin_offsets[bin_flat], bin_offsets[bin_flat + 1],
+        out_num, out_den, nbins_total, bin_flat);
+}
+
+
+/* Same on packed pairs (8 B per pair, see pair_tiles.cuh). */
+template<typename T, int LENS_TOMO_BINS, int SOURCE_TOMO_BINS, typename ACC>
+__global__ void gpu_tiled_packed_reduce_ds(
+    const T* density,
+    const T* shear,
+    const T* lens_weights,
+    const T* source_weights,
+    const unsigned short* pairs,
+    const long long* bin_offsets,
+    const long long* row_base,
+    ACC* out_num,
+    ACC* out_den,
+    const long long nbins_total)
+{
+    const long long bin_flat = (long long)blockIdx.x;
+    if (bin_flat >= nbins_total) {
+        return;
+    }
+    const PackedPairs<T> packed = {
+        reinterpret_cast<const ushort4*>(pairs), row_base[bin_flat]};
+    tile_ds<T, LENS_TOMO_BINS, SOURCE_TOMO_BINS, ACC>(
+        packed, density, shear, lens_weights, source_weights,
+        bin_offsets[bin_flat], bin_offsets[bin_flat + 1],
+        out_num, out_den, nbins_total, bin_flat);
 }
