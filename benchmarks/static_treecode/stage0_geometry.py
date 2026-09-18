@@ -1,6 +1,7 @@
 """Stage 0 (CPU part): real geometry numbers for the production configuration.
 
-Replaces the [estimate] pair counts of STATIC_TREECODE_GUIDE.md with counts
+Replaces the [estimate] pair counts of the (retired) implementation guide
+with counts
 from the actual pair finder on the DES Y3 mask:
 
 * production geometry (nside 512, 15-250', 8 bins, Q110, nside_centers 32,

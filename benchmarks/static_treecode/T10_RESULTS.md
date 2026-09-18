@@ -70,7 +70,9 @@ cell window.
   (slicing a float64 archive, casting, uploading, measuring) and are
   dominated by that host work, which is why they barely move with k. The
   measurement call itself goes 11.4 → 4.4 ms device-resident, 13.6 → 7.8 ms
-  with a host row-space array (see `OPTIMISATION_IDEAS.md`).
+  with a host row-space array (see the optimisation record in
+  `CLAUDE.md`; the retired `OPTIMISATION_IDEAS.md` is in git history at
+  `5b556d7`).
 
 ## 4. T11 (float16 archives), same harness
 
