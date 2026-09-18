@@ -32,8 +32,9 @@ load as before.
   window), carry weighted means / weight sums, and sit at the binary-mask
   centroid of their members. Pair geometry shrinks by orders of magnitude
   (nside 2048, 5'–175', 917 DES patches, k = 2.9: 592 M pairs / 17.7 GB instead
-  of ~72 G pairs). **It is a different, windowed estimator** — see the README
-  for the measured suppression per `k`. No CUDA kernel was changed for it:
+  of ~72 G pairs). **It is a different, windowed estimator** — see
+  `benchmarks/static_treecode/STAGE1_RESULTS.md` for the measured suppression
+  per `k`. No CUDA kernel was changed for it:
   cells are appended as virtual rows behind the pixel rows.
 - `aperture_nside=`: aperture statistics on the (weighted-mean) degraded map.
 - `Correlation.level_table`: per-bin resolution provenance; written to pair
