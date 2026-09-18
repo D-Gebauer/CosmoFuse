@@ -66,11 +66,24 @@ __device__ inline T block_reduce_sum(T val) {
  * __syncthreads() barrier.  Used when a kernel accumulates two quantities
  * over the same pair loop, e.g. xi+ and xi- numerators, or a numerator
  * and its weight denominator.
+ *
+ * The `_into` form reduces on caller-supplied shared buffers, so a kernel
+ * that reduces several quantities in sequence -- one per tomographic bin,
+ * say -- pays for one buffer pair instead of one per call site: the
+ * __shared__ declarations below are function-scope, so inlining this NZ
+ * times allocates NZ copies (2 x 256 x 4 B x NZ = 16 kB at NZ = 8, 32 kB
+ * at float64), which starts costing occupancy.  The caller must
+ * __syncthreads() between reuses of the same buffers.
+ *
+ * Both forms share one reduction tree, so a kernel that moves from one to
+ * the other sums exactly the same partials in exactly the same order --
+ * which is what keeps the fused aperture kernels bitwise identical to the
+ * per-(patch, bin) ones they replace.
  */
 template<typename T>
-__device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
-    __shared__ T s1[BLOCK_SIZE];
-    __shared__ T s2[BLOCK_SIZE];
+__device__ inline void block_reduce_sum_pair_into(T val1, T val2,
+                                                  T* s1, T* s2,
+                                                  T* out1, T* out2) {
     int lane = threadIdx.x;
     s1[lane] = val1;
     s2[lane] = val2;
@@ -85,6 +98,13 @@ __device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
     }
     *out1 = s1[0];
     *out2 = s2[0];
+}
+
+template<typename T>
+__device__ inline void block_reduce_sum_pair(T val1, T val2, T* out1, T* out2) {
+    __shared__ T s1[BLOCK_SIZE];
+    __shared__ T s2[BLOCK_SIZE];
+    block_reduce_sum_pair_into(val1, val2, s1, s2, out1, out2);
 }
 
 /*

@@ -23,8 +23,16 @@
  *
  * Grid layout (one launch per section, exactly-sized grid):
  *   blockIdx.x  = patch index
- *   blockIdx.y  = tomographic bin
+ *   blockIdx.y  = tomographic bin        (gpu_3x2pt_tomo_aperture)
  *   threadIdx.x = aperture pixel (strided loop)
+ *
+ * `gpu_3x2pt_tomo_aperture_fused` is the default: one block per patch with
+ * the tomographic bins looped inside it, so the disc geometry (q_inds +
+ * q_cos + q_sin + q_val, 16 B per disc pixel) is read once per pixel
+ * rather than once per bin.  Same restructure, same reasoning and the same
+ * bitwise guarantee as the standalone kernels in aperture_tomo.cu -- see
+ * that file's header.  The per-(patch, bin) kernel stays as the fallback
+ * for bin counts beyond the accumulator budget.
  */
 
 __COMMON_CUDA_SOURCE__
@@ -106,6 +114,117 @@ __global__ void gpu_3x2pt_tomo_aperture(
             const long long out_idx = (long long)y * (long long)npatches + x;
             out_mg_num[out_idx] = (ACC)q_patch_area[x] * sum_num;
             out_mg_den[out_idx] = sum_den;
+        }
+        return;
+    }
+}
+
+
+/*
+ * One block per patch, the tomographic bins looped inside it.  Bitwise
+ * identical to gpu_3x2pt_tomo_aperture: only the bin loop moves inside
+ * the block, the thread->pixel mapping and the reduction tree are
+ * unchanged.  N_SHEAR / N_DENSITY are already compile-time constants
+ * here, so the per-thread accumulator arrays stay in registers.
+ */
+template<typename T, typename QT, int N_DENSITY, int N_SHEAR, typename ACC>
+__global__ void gpu_3x2pt_tomo_aperture_fused(
+    const T* density,
+    const T* shear,
+    const T* density_w,
+    const T* shear_w,
+    const int npatches,
+    const unsigned int* q_inds,
+    const QT* q_cos,
+    const QT* q_sin,
+    const QT* q_val,
+    const long long* q_offsets,
+    const QT* q_patch_area,
+    ACC* out_ma_num,
+    ACC* out_ma_den,
+    ACC* out_mg_num,
+    ACC* out_mg_den,
+    const int section)
+{
+    const int lane = (int)threadIdx.x;
+    const long long x = (long long)blockIdx.x;  /* patch index */
+    if (x >= (long long)npatches) return;
+
+    const long long start = q_offsets[x];
+    const long long stop = q_offsets[x + 1];
+    /* One buffer pair for every bin of either section (ACC is the wider
+       of the two types in play, so the allocation covers both). */
+    __shared__ ACC s1[BLOCK_SIZE];
+    __shared__ ACC s2[BLOCK_SIZE];
+    const ACC area = (ACC)q_patch_area[x];
+
+    /* z=0 : M_ap = A_patch * Sum_pix [ w * gamma_t * Q ] / Sum_pix [ w ],
+       gamma_t = -gamma_1 cos(2phi) - gamma_2 sin(2phi) around the centre */
+    if (section == 0) {
+        ACC sn[N_SHEAR];
+        ACC sd[N_SHEAR];
+#pragma unroll
+        for (int y = 0; y < N_SHEAR; ++y) { sn[y] = (ACC)0.0; sd[y] = (ACC)0.0; }
+
+        for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
+            const unsigned int pix = q_inds[idx];
+            const T qc = (T)q_cos[idx];
+            const T qs = (T)q_sin[idx];
+            const T qv = (T)q_val[idx];
+#pragma unroll
+            for (int y = 0; y < N_SHEAR; ++y) {
+                const long long shear_idx = ((long long)pix * (long long)N_SHEAR + (long long)y) * 2LL;
+                const long long w_idx = (long long)pix * (long long)N_SHEAR + (long long)y;
+                const T g1 = shear[shear_idx];
+                const T g2 = shear[shear_idx + 1LL];
+                const T wv = shear_w[w_idx];
+                const T gt = -g1 * qc - g2 * qs;
+                sn[y] += (ACC)(wv * gt * qv);
+                sd[y] += (ACC)wv;
+            }
+        }
+#pragma unroll
+        for (int y = 0; y < N_SHEAR; ++y) {
+            ACC n, d;
+            __syncthreads();            /* the buffers are being reused */
+            block_reduce_sum_pair_into(sn[y], sd[y], s1, s2, &n, &d);
+            if (lane == 0) {
+                const long long out_idx = (long long)y * (long long)npatches + x;
+                out_ma_num[out_idx] = area * n;
+                out_ma_den[out_idx] = d;
+            }
+        }
+        return;
+    }
+
+    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * Q ] / Sum_pix [ w ] */
+    if (section == 1) {
+        ACC sn[N_DENSITY];
+        ACC sd[N_DENSITY];
+#pragma unroll
+        for (int y = 0; y < N_DENSITY; ++y) { sn[y] = (ACC)0.0; sd[y] = (ACC)0.0; }
+
+        for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
+            const unsigned int pix = q_inds[idx];
+            const T qv = (T)q_val[idx];
+#pragma unroll
+            for (int y = 0; y < N_DENSITY; ++y) {
+                const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;
+                const T wv = density_w[d_idx];
+                sn[y] += (ACC)(wv * density[d_idx] * qv);
+                sd[y] += (ACC)wv;
+            }
+        }
+#pragma unroll
+        for (int y = 0; y < N_DENSITY; ++y) {
+            ACC n, d;
+            __syncthreads();
+            block_reduce_sum_pair_into(sn[y], sd[y], s1, s2, &n, &d);
+            if (lane == 0) {
+                const long long out_idx = (long long)y * (long long)npatches + x;
+                out_mg_num[out_idx] = area * n;
+                out_mg_den[out_idx] = d;
+            }
         }
         return;
     }

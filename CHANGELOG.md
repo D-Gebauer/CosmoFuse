@@ -1,5 +1,47 @@
 # Changelog
 
+## 6.2.0 (2026-09-18)
+
+### Performance
+- **One block per patch in the aperture kernels, not one per (patch, tomo
+  bin).** The aperture pass was the largest non-pair item in
+  `get_full_tomo_shear` and the only one the treecode does not shrink, because
+  each block re-read the disc geometry -- `q_inds` + `q_cos` + `q_sin` +
+  `q_val`, 16 B per disc pixel -- once per tomographic bin while using 12 B of
+  map data: 28*nz B/pixel where one block per patch needs 16 + 12*nz (112 vs
+  64 at nz = 4). 6.1.0 measured that L2 does not catch those re-reads; this
+  ships the restructure. `gpu_aperture_shear_tomo_fused`,
+  `gpu_aperture_density_tomo_fused` and `gpu_3x2pt_tomo_aperture_fused` loop
+  the bins inside one block, with NZ a template parameter so the per-thread
+  accumulators stay in registers, and `block_reduce_sum_pair_into` reduces on
+  caller-supplied shared buffers so the bin loop pays for one buffer pair
+  rather than one per call site.
+  - Measured on the A100 at nside 512, k = 2.9, 450 patches, 4 bins, float32
+    maps: the aperture kernel **0.451 -> 0.259 ms** in the probe and
+    **431 -> 236 us (1.83x)** inside the real `get_full_tomo_shear` (nsys).
+    `get_3x2pt_tomo` -- the 3x2pt production path, where both sections run --
+    **4.455 -> 3.962 ms** of wall time.
+  - `get_full_tomo_shear` itself gains the same 0.2 ms of *GPU* time
+    (1.567 -> 1.367 ms per call) but only 0.02 ms of wall time: at this size
+    the isolated call is host-bound, ~1.78 ms of wall against ~1.37 ms of
+    kernel time. The saving is real; it shows up as device idle rather than
+    wall clock unless the call is overlapped or the kernels are larger
+    (nside 2048), which is where the 2.08x of the probe applies.
+  - **Bitwise identical**, which is required: `resolution_factor=None` must
+    stay bit-for-bit identical to 4.20.0 and this kernel is on that path. Only
+    the bin loop moves inside the block -- the thread->pixel mapping,
+    `BLOCK_SIZE` and the reduction tree are untouched, so every bin sums the
+    same partials in the same order. `tests/test_aperture_fused.py` (new) is
+    the gate: `np.array_equal`, never a tolerance, through the real wrappers
+    against the numpy twins and, marked `gpu`, against the real kernels
+    compiled with the library's own `--use_fast_math` options.
+  - The per-(patch, bin) kernels stay as the fallback and are launched
+    unchanged beyond `_MAX_FUSED_APERTURE_BINS` = 16 tomographic bins (the
+    accumulators would spill) or below 2 blocks/SM of patches (the fused grid
+    is `ntomo` times smaller and would underfill the device).
+  - SoA stays: AoS wins only at nside-2048-sized discs, so `_expansion_scope`
+    and `_pair_row_layout` are unchanged.
+
 ## 6.1.0 (2026-09-18)
 
 ### Measured (no library change)

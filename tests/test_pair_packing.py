@@ -165,7 +165,8 @@ class TestPackedMeasurement(unittest.TestCase):
         self.assertEqual(calls["kernel_density_shear_tomo_vectorized"], 0)
         self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 0)
         for name in ("gpu_tiled_packed_reduce_dd", "gpu_tiled_packed_reduce_ds",
-                     "gpu_tiled_packed_reduce_3x2pt", "gpu_3x2pt_tomo_aperture"):
+                     "gpu_tiled_packed_reduce_3x2pt",
+                     "gpu_3x2pt_tomo_aperture_fused"):
             self.assertIn(name, LAUNCH_LOG)
         for key in cpu:
             for x, y in zip(cpu[key], gpu[key]):

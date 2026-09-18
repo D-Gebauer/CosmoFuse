@@ -1,9 +1,34 @@
 /*
  * aperture_tomo.cu -- Block-reduced aperture statistics for all
- * tomographic bins in one launch.  Grid: blockIdx.x = patch,
- * blockIdx.y = tomo bin; threadIdx.x strides the aperture pixels.
- * Replaces the per-pixel ElementwiseKernel + add.reduceat path
- * (two npixels_in_apertures-sized temporaries per call).
+ * tomographic bins in one launch.  Replaces the per-pixel
+ * ElementwiseKernel + add.reduceat path (two npixels_in_apertures-sized
+ * temporaries per call).
+ *
+ * Two kernels per statistic, one launch contract:
+ *
+ *   gpu_aperture_*_tomo         one block per (patch, tomo bin);
+ *                               grid (npatches, ntomo).  The fallback.
+ *   gpu_aperture_*_tomo_fused   one block per patch, the NZ bins looped
+ *                               inside it; grid (npatches,).  The default.
+ *
+ * The per-(patch, bin) form re-reads the disc geometry -- q_inds + q_cos +
+ * q_sin + q_val, 16 B per disc pixel -- once per tomographic bin while
+ * using 12 B of map data (g1, g2, w), so it moves 28*nz B/pixel where one
+ * block per patch needs 16 + 12*nz: 112 vs 64 at nz = 4.  L2 does not
+ * catch the reuse (measured: benchmarks/static_treecode/APERTURE_RESULTS.md),
+ * and the fused form duly runs 1.75x faster at nside 512.
+ *
+ * The fused form is *bitwise* identical, which it has to be --
+ * resolution_factor=None must stay bit-for-bit identical to 4.20.0 and
+ * this kernel is on that path.  Only the bin loop moves inside the block:
+ * the thread->pixel mapping, BLOCK_SIZE and the reduction tree of
+ * block_reduce_sum_pair(_into) are unchanged, so each bin sums exactly the
+ * same partials in exactly the same order.  Changing the stride or
+ * BLOCK_SIZE would leave that regime.
+ *
+ * NZ is a template parameter, not a run-time argument: run-time indexed
+ * per-thread accumulators spill to local memory, which is what made the
+ * first combination-tiled pair kernel 3x slower than the per-row one.
  *
  * Stride contract: g1/g2/values/weights are base pointers of 2D
  * (tomo bin, row) views; the caller passes BOTH element strides
@@ -112,5 +137,132 @@ __global__ void gpu_aperture_density_tomo(
         const long long o = (long long)bin * npatches + patch;
         out_num[o] = (T)q_patch_area[patch] * sum_num;
         out_den[o] = sum_den;
+    }
+}
+
+
+/*
+ * One block per patch, all NZ tomographic bins inside it.  The disc
+ * geometry is read once per pixel instead of NZ times; bitwise identical
+ * to gpu_aperture_shear_tomo (see the file header).
+ */
+template<typename T, typename QT, int NZ>
+__global__ void gpu_aperture_shear_tomo_fused(
+    const T* g1,                 /* base ptr, bin b at g1 + b*g_stride  */
+    const T* g2,
+    const long long g_stride,
+    const long long g_elem,
+    const T* weights,
+    const long long w_stride,
+    const long long w_elem,
+    const unsigned int* q_inds,
+    const QT* q_cos,
+    const QT* q_sin,
+    const QT* q_val,
+    const long long* q_offsets,
+    const QT* q_patch_area,
+    T* out_num,                  /* [NZ x npatches] */
+    T* out_den,
+    const int npatches)
+{
+    const int lane = (int)threadIdx.x;
+    const int patch = (int)blockIdx.x;
+    if (patch >= npatches) return;
+
+    const long long start = q_offsets[patch];
+    const long long stop  = q_offsets[patch + 1];
+
+    T sn[NZ];
+    T sd[NZ];
+#pragma unroll
+    for (int b = 0; b < NZ; ++b) { sn[b] = (T)0.0; sd[b] = (T)0.0; }
+
+    for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
+        const long long pix = (long long)q_inds[idx];
+        const T qc = (T)q_cos[idx];     /* the 16 B read once, not NZ times */
+        const T qs = (T)q_sin[idx];
+        const T qv = (T)q_val[idx];
+#pragma unroll
+        for (int b = 0; b < NZ; ++b) {
+            const T wv = weights[(long long)b * w_stride + pix * w_elem];
+            /* Tangential shear w.r.t. the patch centre */
+            const T gt = -g1[(long long)b * g_stride + pix * g_elem] * qc
+                       - g2[(long long)b * g_stride + pix * g_elem] * qs;
+            sn[b] += wv * gt * qv;
+            sd[b] += wv;
+        }
+    }
+
+    __shared__ T s1[BLOCK_SIZE];        /* one buffer pair for all NZ bins */
+    __shared__ T s2[BLOCK_SIZE];
+    const T area = (T)q_patch_area[patch];
+#pragma unroll
+    for (int b = 0; b < NZ; ++b) {
+        T n, d;
+        __syncthreads();                /* the buffers are being reused */
+        block_reduce_sum_pair_into(sn[b], sd[b], s1, s2, &n, &d);
+        if (lane == 0) {
+            const long long o = (long long)b * npatches + patch;
+            out_num[o] = area * n;
+            out_den[o] = d;
+        }
+    }
+}
+
+/* Density counterpart of gpu_aperture_shear_tomo_fused.  One value array
+   instead of two, so 8 B of map data per visit: 12*nz B/pixel becomes
+   8 + 4*nz, a slightly larger relative win than the shear kernel's. */
+template<typename T, typename QT, int NZ>
+__global__ void gpu_aperture_density_tomo_fused(
+    const T* values,
+    const long long v_stride,
+    const long long v_elem,
+    const T* weights,
+    const long long w_stride,
+    const long long w_elem,
+    const unsigned int* q_inds,
+    const QT* q_val,
+    const long long* q_offsets,
+    const QT* q_patch_area,
+    T* out_num,
+    T* out_den,
+    const int npatches)
+{
+    const int lane = (int)threadIdx.x;
+    const int patch = (int)blockIdx.x;
+    if (patch >= npatches) return;
+
+    const long long start = q_offsets[patch];
+    const long long stop  = q_offsets[patch + 1];
+
+    T sn[NZ];
+    T sd[NZ];
+#pragma unroll
+    for (int b = 0; b < NZ; ++b) { sn[b] = (T)0.0; sd[b] = (T)0.0; }
+
+    for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
+        const long long pix = (long long)q_inds[idx];
+        const T qv = (T)q_val[idx];
+#pragma unroll
+        for (int b = 0; b < NZ; ++b) {
+            const T wv = weights[(long long)b * w_stride + pix * w_elem];
+            sn[b] += wv * values[(long long)b * v_stride + pix * v_elem] * qv;
+            sd[b] += wv;
+        }
+    }
+
+    __shared__ T s1[BLOCK_SIZE];
+    __shared__ T s2[BLOCK_SIZE];
+    const T area = (T)q_patch_area[patch];
+#pragma unroll
+    for (int b = 0; b < NZ; ++b) {
+        T n, d;
+        __syncthreads();
+        block_reduce_sum_pair_into(sn[b], sd[b], s1, s2, &n, &d);
+        if (lane == 0) {
+            const long long o = (long long)b * npatches + patch;
+            out_num[o] = area * n;
+            out_den[o] = d;
+        }
     }
 }

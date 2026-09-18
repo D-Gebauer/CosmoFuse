@@ -1,0 +1,92 @@
+{
+  "config": {
+    "nside": 512,
+    "nz": 4,
+    "nz_scan": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "aperture_nside": null,
+    "nbins": 7,
+    "theta_min": 18.0,
+    "theta_max": 148.0,
+    "patch_size": 110.0,
+    "theta_Q": 110.0,
+    "nside_centers": 16,
+    "map_precision": "float32",
+    "repeats": 30,
+    "out": "benchmarks/static_treecode/results/aperture_fused_probe_512_shipped.json"
+  },
+  "npatches": 450,
+  "disc_pixel_visits": 8406683,
+  "n_rows": 495281,
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "bitwise_vs_shipped_kernel": {
+    "current": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    },
+    "fused_soa": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    },
+    "fused_aos": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    }
+  },
+  "ms": {
+    "shipped_lib_kernel": 0.258895568549633,
+    "probe_current": 0.4466134123504162,
+    "probe_fused_soa": 0.2532335929572582,
+    "probe_fused_aos": 0.26925746351480484
+  },
+  "speedup_vs_current": {
+    "shipped_lib_kernel": 1.7250716760136264,
+    "probe_current": 1.0,
+    "probe_fused_soa": 1.7636420473874388,
+    "probe_fused_aos": 1.658685358320103
+  },
+  "nz_scan_ms": {
+    "1": {
+      "current": 0.15467917546629906,
+      "fused_soa": 0.1423773355782032,
+      "fused_aos": 0.14170678332448006
+    },
+    "2": {
+      "current": 0.2626185305416584,
+      "fused_soa": 0.15834765508770943,
+      "fused_aos": 0.15565520152449608
+    },
+    "4": {
+      "current": 0.44496916234493256,
+      "fused_soa": 0.25326991453766823,
+      "fused_aos": 0.2673706039786339
+    },
+    "8": {
+      "current": 0.8897418156266212,
+      "fused_soa": 0.505274161696434,
+      "fused_aos": 0.7262122817337513
+    }
+  },
+  "fit_current": {
+    "slope_ms_per_bin": 0.10461547290501394,
+    "intercept_ms": 0.04569414760107564,
+    "intercept_over_slope": 0.4367819246256606
+  },
+  "fit_fused_soa": {
+    "slope_ms_per_bin": 0.053637794664372594,
+    "intercept_ms": 0.06367553673360649,
+    "intercept_over_slope": 1.1871393507515173
+  },
+  "fit_fused_aos": {
+    "slope_ms_per_bin": 0.08664885535836223,
+    "intercept_ms": -0.0021969899535181146,
+    "intercept_over_slope": -0.02535509493382003
+  }
+}

@@ -69,6 +69,52 @@ to local memory, which is what made the first combination-tiled pair kernel
 3× slower.
 
 
+### Shipped in 6.2.0 (2026-09-18)
+
+Built as described above — `block_reduce_sum_pair_into` on caller-supplied
+buffers, `template<int NZ>` accumulators, the bin loop the only thing that
+moved.  `gpu_aperture_shear_tomo_fused`, `gpu_aperture_density_tomo_fused`
+and `gpu_3x2pt_tomo_aperture_fused`; the per-(patch, bin) kernels stay as the
+fallback beyond `_MAX_FUSED_APERTURE_BINS` = 16 bins or below 2 blocks/SM of
+patches.  Re-running the probe against the *shipped* library kernel:
+
+| configuration | shipped before | shipped now | probe_current | probe_fused_soa |
+|---|---|---|---|---|
+| nside 512, aperture full res | 0.456 ms | **0.259 ms** | 0.447 ms | 0.253 ms |
+| nside 2048, aperture full res | 9.100 ms | **5.283 ms** | 9.099 ms | 5.285 ms |
+
+The library kernel now lands on `probe_fused_soa` in both, i.e. **1.72×** —
+the SoA number, which is the one that ships (AoS was faster only at
+nside-2048-sized discs, 4.363 ms, and is not used; see the layout verdict
+above).  Bitwise checks all still `true`, max relative difference 0.0.
+
+Inside the real calls, on the same A100 (nside 512, k = 2.9, 450 patches,
+4 bins, float32 maps, device-resident input, `flip_g1`):
+
+| | fallback | fused | |
+|---|---|---|---|
+| aperture kernel, `nsys`, in `get_full_tomo_shear` | 431 µs | **236 µs** | 1.83× |
+| `_compute_tomo_aperture_shear` (wall) | 0.644 ms | **0.444 ms** | −0.200 ms |
+| `get_3x2pt_tomo` (wall) | 4.455 ms | **3.962 ms** | −0.493 ms |
+| `get_full_tomo_shear` (wall) | 1.798 ms | 1.779 ms | −0.020 ms |
+| `get_full_tomo_shear` (sum of kernel time, `nsys`) | 1.567 ms | **1.367 ms** | −0.200 ms |
+
+**The last two rows are the thing to take away.** The GPU saving is exactly
+the predicted 0.2 ms in every call, but `get_full_tomo_shear` at this size is
+**host-bound** — ~1.78 ms of wall against ~1.37 ms of kernel time — so the
+saving lands as device idle, not as wall clock.  `get_3x2pt_tomo`, which is
+GPU-bound at 4 ms and runs both aperture sections, converts all of it.  Two
+consequences: the earlier "1.80 → 1.60 ms" projection for the shear call was
+wrong (it assumed the call was device-bound), and the next thing worth
+measuring on *that* call is the ~0.4 ms of per-call host overhead, not
+another kernel.
+
+Every output of `get_full_tomo_shear` and `get_3x2pt_tomo` is bitwise equal
+between the two kernels on the real treecode geometry (`np.array_equal`,
+numerators and denominators).  `tests/test_aperture_fused.py` is the
+permanent gate.
+
+
 ## 2. `aperture_nside`: what a coarse aperture costs zeta
 
 `aperture_nside` was deliberately left at `None` in T10 so that only ξ±

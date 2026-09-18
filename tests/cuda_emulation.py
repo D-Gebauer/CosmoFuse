@@ -19,6 +19,7 @@ Faithfulness notes:
     the emulator uses ``np.cos(np.pi * x)`` (1e-16-level difference).
 """
 
+import functools
 import re
 
 import numpy as np
@@ -603,11 +604,67 @@ def _emulate_aperture_density_tomo(params, grid, args):
             out_den[bin_idx, patch] = np.sum(wv)
 
 
-def _emulate_fused_aperture(params, grid, args):
-    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_aperture<T, QT, ND, NS, ACC>.
+def _emulate_aperture_shear_tomo_fused(params, grid, args):
+    """aperture_tomo.cu :: gpu_aperture_shear_tomo_fused<T, QT, NZ>.
+
+    One block per patch, NZ a template parameter, no trailing `ntomo`
+    launch argument -- so the bin loop is driven by NZ, not by grid.y.
+    """
+    ntomo = int(params[2])
+    (g1, g2, g_stride, g_elem, weights, w_stride, w_elem, q_inds, q_cos,
+     q_sin, q_val, q_offsets, q_patch_area, out_num, out_den, npatches) = args
+    _check_planar_stride(g1, g_stride, g_elem)
+    _check_planar_stride(g2, g_stride, g_elem)
+    _check_planar_stride(weights, w_stride, w_elem)
+    npatches = int(npatches)
+
+    for patch in range(int(grid[0])):
+        if patch >= npatches:
+            continue
+        start = int(q_offsets[patch])
+        stop = int(q_offsets[patch + 1])
+        pix = q_inds[start:stop].astype(np.int64)
+        qc = q_cos[start:stop]
+        qs = q_sin[start:stop]
+        qv = q_val[start:stop]
+        for bin_idx in range(ntomo):
+            wv = weights[bin_idx, :][pix]
+            gt = -g1[bin_idx, :][pix] * qc - g2[bin_idx, :][pix] * qs
+            out_num[bin_idx, patch] = q_patch_area[patch] * np.sum(wv * gt * qv)
+            out_den[bin_idx, patch] = np.sum(wv)
+
+
+def _emulate_aperture_density_tomo_fused(params, grid, args):
+    """aperture_tomo.cu :: gpu_aperture_density_tomo_fused<T, QT, NZ>."""
+    ntomo = int(params[2])
+    (values, v_stride, v_elem, weights, w_stride, w_elem, q_inds, q_val,
+     q_offsets, q_patch_area, out_num, out_den, npatches) = args
+    _check_planar_stride(values, v_stride, v_elem)
+    _check_planar_stride(weights, w_stride, w_elem)
+    npatches = int(npatches)
+
+    for patch in range(int(grid[0])):
+        if patch >= npatches:
+            continue
+        start = int(q_offsets[patch])
+        stop = int(q_offsets[patch + 1])
+        pix = q_inds[start:stop].astype(np.int64)
+        qv = q_val[start:stop]
+        for bin_idx in range(ntomo):
+            wv = weights[bin_idx, :][pix]
+            out_num[bin_idx, patch] = q_patch_area[patch] * np.sum(
+                wv * values[bin_idx, :][pix] * qv
+            )
+            out_den[bin_idx, patch] = np.sum(wv)
+
+
+def _emulate_fused_aperture(params, grid, args, fused=False):
+    """tomo_fused_3x2pt.cu :: gpu_3x2pt_tomo_aperture[_fused]<T, QT, ND, NS, ACC>.
 
     One call per section (the trailing launch argument selects it), like
-    the per-section launches of the cupy wrapper.
+    the per-section launches of the cupy wrapper.  ``fused`` selects the
+    one-block-per-patch kernel, whose bin loop is driven by the compile-time
+    N_SHEAR / N_DENSITY rather than by grid.y.
     """
     n_density = int(params[2])
     n_shear = int(params[3])
@@ -620,6 +677,8 @@ def _emulate_fused_aperture(params, grid, args):
     npatches = int(npatches)
     section = int(section)
     gx, gy = int(grid[0]), int(grid[1])
+    if fused:
+        gy = n_shear if section == 0 else n_density
 
     density_flat = np.asarray(density).reshape(-1)
     shear_flat = np.asarray(shear).reshape(-1)
@@ -773,8 +832,13 @@ _KERNEL_EMULATORS = {
     "gpu_tiled_tomo_reduce_3x2pt": _emulate_3x2pt_pairs(packed=False),
     "gpu_tiled_packed_reduce_3x2pt": _emulate_3x2pt_pairs(packed=True),
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,
+    "gpu_aperture_shear_tomo_fused": _emulate_aperture_shear_tomo_fused,
     "gpu_aperture_density_tomo": _emulate_aperture_density_tomo,
+    "gpu_aperture_density_tomo_fused": _emulate_aperture_density_tomo_fused,
     "gpu_3x2pt_tomo_aperture": _emulate_fused_aperture,
+    "gpu_3x2pt_tomo_aperture_fused": functools.partial(
+        _emulate_fused_aperture, fused=True
+    ),
     "gpu_degrade_level": _emulate_degrade_level,
     "gpu_degrade_finalize": _emulate_degrade_finalize,
 }

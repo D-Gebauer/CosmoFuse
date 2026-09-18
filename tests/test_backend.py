@@ -10,6 +10,7 @@ import numpy as np
 import CosmoFuse.backend
 from CosmoFuse.backend import (
     Backend,
+    _MAX_FUSED_APERTURE_BINS,
     _MAX_VECTOR_TOMO_BINS,
     _compile_raw_cuda_kernel,
     _build_cupy_3x2pt_tomo_aperture_kernel,
@@ -1052,12 +1053,14 @@ class TestBackend(unittest.TestCase):
         self.assertTrue(kernel(*args))
         self.assertTrue(kernel(*args))
         self.assertEqual(compile_calls["count"], 1)
-        self.assertEqual(names, ["gpu_3x2pt_tomo_aperture<float, float, 3, 2, float>"])
+        self.assertEqual(
+            names, ["gpu_3x2pt_tomo_aperture_fused<float, float, 3, 2, float>"]
+        )
         # One launch per aperture section for each of the two calls.
         self.assertEqual(len(launches), 4)
         expected_grids = [
-            (4, 2, 1),  # z=0 M_ap: (npatches, n_shear_bins)
-            (4, 3, 1),  # z=1 M_g:  (npatches, n_density_bins)
+            (4, 1, 1),  # z=0 M_ap: one block per patch, bins inside it
+            (4, 1, 1),  # z=1 M_g:  likewise
         ]
         for section, (launch, expected_grid) in enumerate(zip(launches[:2], expected_grids)):
             grid, block, launch_args = launch
@@ -1090,7 +1093,42 @@ class TestBackend(unittest.TestCase):
 
         kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
         self.assertTrue(kernel(*self._aperture_args(np.float64, np.float32)))
-        self.assertEqual(names, ["gpu_3x2pt_tomo_aperture<double, float, 1, 1, double>"])
+        self.assertEqual(
+            names, ["gpu_3x2pt_tomo_aperture_fused<double, float, 1, 1, double>"]
+        )
+
+    def test_cupy_3x2pt_tomo_aperture_kernel_wide_bins_fall_back(self):
+        """Beyond the accumulator budget the per-(patch, bin) kernel runs."""
+        names, launches = [], []
+
+        class FakeKernel:
+            def __call__(self, grid, block, args):
+                launches.append((grid, block, args))
+
+        class FakeModule:
+            float32 = np.float32
+            int32 = np.int32
+            complex64 = np.complex64
+            cuda = self._make_fake_cuda_namespace()
+
+            @staticmethod
+            def RawKernel(_source, kernel_name, options=None):
+                names.append(kernel_name)
+                return FakeKernel()
+
+        n_shear = _MAX_FUSED_APERTURE_BINS + 1
+        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        args = self._aperture_args(
+            np.float32, np.float32, n_density=1, n_shear=n_shear, npatches=4
+        )
+        self.assertTrue(kernel(*args))
+        self.assertEqual(
+            names, [f"gpu_3x2pt_tomo_aperture<float, float, 1, {n_shear}, float>"]
+        )
+        self.assertEqual(launches[0][0], (4, n_shear, 1))  # z=0 M_ap
+        self.assertEqual(launches[1][0], (4, 1, 1))        # z=1 M_g
+        # The fallback kernel still takes the section selector last.
+        self.assertEqual(int(launches[0][2][-1]), 0)
 
     def test_cupy_3x2pt_tomo_pairs_kernel_modes_and_budget(self):
         names, launches = [], []

@@ -1,0 +1,92 @@
+{
+  "config": {
+    "nside": 2048,
+    "nz": 4,
+    "nz_scan": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "aperture_nside": null,
+    "nbins": 7,
+    "theta_min": 18.0,
+    "theta_max": 148.0,
+    "patch_size": 110.0,
+    "theta_Q": 110.0,
+    "nside_centers": 16,
+    "map_precision": "float32",
+    "repeats": 30,
+    "out": "/project/ocean1-seitz/users/dgebauer/research/CosmoFuse/benchmarks/static_treecode/results/aperture_fused_probe_2048_shipped.json"
+  },
+  "npatches": 450,
+  "disc_pixel_visits": 134532229,
+  "n_rows": 7925532,
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "bitwise_vs_shipped_kernel": {
+    "current": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    },
+    "fused_soa": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    },
+    "fused_aos": {
+      "num": true,
+      "den": true,
+      "max_rel": 0.0
+    }
+  },
+  "ms": {
+    "shipped_lib_kernel": 5.282888654619455,
+    "probe_current": 9.099020157009363,
+    "probe_fused_soa": 5.2845836617052555,
+    "probe_fused_aos": 4.374432843178511
+  },
+  "speedup_vs_current": {
+    "shipped_lib_kernel": 1.7223569815451272,
+    "probe_current": 1.0,
+    "probe_fused_soa": 1.7218045430797941,
+    "probe_fused_aos": 2.0800456843676027
+  },
+  "nz_scan_ms": {
+    "1": {
+      "current": 2.3264470510184765,
+      "fused_soa": 2.201694529503584,
+      "fused_aos": 2.1474608220160007
+    },
+    "2": {
+      "current": 4.876814316958189,
+      "fused_soa": 3.022627905011177,
+      "fused_aos": 2.67274072393775
+    },
+    "4": {
+      "current": 9.091699961572886,
+      "fused_soa": 5.31851127743721,
+      "fused_aos": 4.361059982329607
+    },
+    "8": {
+      "current": 18.433960154652596,
+      "fused_soa": 9.371062740683556,
+      "fused_aos": 10.919963009655476
+    }
+  },
+  "fit_current": {
+    "slope_ms_per_bin": 2.284699172267448,
+    "intercept_ms": 0.11460847504760426,
+    "intercept_over_slope": 0.050163486046113086
+  },
+  "fit_fused_soa": {
+    "slope_ms_per_bin": 1.0369525452994788,
+    "intercept_ms": 1.089902068285837,
+    "intercept_over_slope": 1.0510626288795752
+  },
+  "fit_fused_aos": {
+    "slope_ms_per_bin": 1.2840798003194132,
+    "intercept_ms": 0.21000688328690909,
+    "intercept_over_slope": 0.16354659829916346
+  }
+}

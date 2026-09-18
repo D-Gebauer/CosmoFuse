@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 # scripts/compile_check_nvrtc.py.
 _CUPY_FASTMATH_OPTIONS = ("--use_fast_math", "--std=c++14")
 _MAX_VECTOR_TOMO_BINS = 64
+# Beyond this many tomographic bins the fused aperture kernels (one block per
+# patch, the bins looped inside it) hold too many per-thread accumulators --
+# 2*NZ each -- and the per-(patch, bin) kernel is launched instead.
+_MAX_FUSED_APERTURE_BINS = 16
 _CUDA_DIR = Path(__file__).with_name("cuda")
 _CUDA_SOURCE_CACHE: dict[str, str] = {}
 # Sentinel distinguishing "never attempted" from "compilation failed" in the
@@ -235,6 +239,56 @@ def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int, int]
     )
 
 
+# (runtime id, device) -> (runtime, SM count).  The runtime object is kept
+# alive by the value so its id cannot be reused by a different one.
+_SM_COUNT_CACHE: dict[Tuple[int, int], Tuple[Any, Optional[int]]] = {}
+
+
+def _multiprocessor_count(module: Any) -> Optional[int]:
+    """SM count of the active device, or None when it cannot be queried.
+
+    Only used to size a launch grid, so a stand-in module without
+    ``cuda.runtime`` (the emulated cupy of the tests) simply imposes no
+    constraint.
+    """
+    runtime = getattr(getattr(module, "cuda", None), "runtime", None)
+    if runtime is None:
+        return None
+    try:
+        device = int(runtime.getDevice())
+    except Exception:  # pragma: no cover - no device behind the module
+        return None
+    key = (id(runtime), device)
+    if key not in _SM_COUNT_CACHE:
+        try:
+            props = runtime.getDeviceProperties(device)
+            count: Optional[int] = int(props["multiProcessorCount"])
+        except Exception:  # pragma: no cover - older runtime without the field
+            count = None
+        _SM_COUNT_CACHE[key] = (runtime, count)
+    return _SM_COUNT_CACHE[key][1]
+
+
+def _use_fused_aperture(module: Any, ntomo: int, npatches: int) -> bool:
+    """Whether to launch the one-block-per-patch aperture kernel.
+
+    It reads the aperture disc geometry once per pixel instead of once per
+    tomographic bin: 1.72x on the kernel at nside 512 and 1.83x measured in
+    situ inside ``get_full_tomo_shear`` (the result is bitwise identical
+    either way).  Two things take it back to the
+    per-(patch, bin) kernel: a bin set wide enough for the per-thread
+    accumulators to spill, and a patch set small enough that one block per
+    patch underfills the device -- the fused grid is ``ntomo`` times
+    smaller, which is the point of it.
+    """
+    if ntomo <= 0 or ntomo > _MAX_FUSED_APERTURE_BINS:
+        return False
+    n_sm = _multiprocessor_count(module)
+    if n_sm is not None and npatches < 2 * n_sm:
+        return False
+    return True
+
+
 def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
     """Builder for the fused treecode row-degrade kernels.
 
@@ -370,18 +424,35 @@ def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
 
 
 def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
-    """Builder for the GPU block-reduced tomographic aperture-mass kernel."""
-    kernel_cache: dict[tuple[str, str], Any] = {}
+    """Builder for the GPU block-reduced tomographic aperture-mass kernel.
 
-    def _get_or_build_raw_kernel(map_c_type: str, q_c_type: str) -> Optional[Any]:
-        key = (map_c_type, q_c_type)
+    Two kernels behind one launch contract (see ``aperture_tomo.cu``): the
+    fused one-block-per-patch kernel is the default and reads the disc
+    geometry once per pixel instead of once per tomographic bin; the
+    per-(patch, bin) kernel is the fallback for wide bin sets and small
+    patch counts.  The two are bitwise identical, so which one ran is never
+    observable in the result.  ``ntomo`` is a template argument of the
+    fused kernel and therefore part of the cache key (``None`` = fallback);
+    it is small and stable, so compiling on demand per value is fine.
+    """
+    kernel_cache: dict[tuple[str, str, Optional[int]], Any] = {}
+
+    def _get_or_build_raw_kernel(
+        map_c_type: str, q_c_type: str, ntomo: Optional[int]
+    ) -> Optional[Any]:
+        key = (map_c_type, q_c_type, ntomo)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
             # so it is not retried (and re-logged) on every call.
             return cached
 
-        name_expression = f"gpu_aperture_shear_tomo<{map_c_type}, {q_c_type}>"
+        if ntomo is None:
+            name_expression = f"gpu_aperture_shear_tomo<{map_c_type}, {q_c_type}>"
+        else:
+            name_expression = (
+                f"gpu_aperture_shear_tomo_fused<{map_c_type}, {q_c_type}, {ntomo}>"
+            )
         source = _prepare_cuda_source("aperture_tomo.cu")
 
         try:
@@ -417,7 +488,12 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         q_c_type = "float" if q_cos.dtype == module.float32 else "double"
-        raw_kernel = _get_or_build_raw_kernel(map_c_type, q_c_type)
+        npatches = int(q_offsets.shape[0] - 1)
+        ntomo = int(g1.shape[0])
+        fused = _use_fused_aperture(module, ntomo, npatches)
+        raw_kernel = _get_or_build_raw_kernel(
+            map_c_type, q_c_type, ntomo if fused else None
+        )
         if raw_kernel is None:
             return False
 
@@ -430,10 +506,15 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
             g1_elem = g2_elem = 1
         weights, w_stride, w_elem = _aperture_tomo_prepare_planar(module, weights)
 
-        npatches = int(q_offsets.shape[0] - 1)
-        ntomo = int(g1.shape[0])
         threads = 256
-        blocks = (max(1, npatches), max(1, ntomo), 1)
+        blocks = (
+            (max(1, npatches), 1, 1) if fused
+            else (max(1, npatches), max(1, ntomo), 1)
+        )
+        # The fused kernel knows NZ at compile time and takes no `ntomo`.
+        tail: Tuple[Any, ...] = (np.int32(npatches),)
+        if not fused:
+            tail += (np.int32(ntomo),)
         raw_kernel(
             blocks,
             (threads,),
@@ -453,8 +534,7 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
                 q_patch_area,
                 out_num,
                 out_den,
-                np.int32(npatches),
-                np.int32(ntomo),
+                *tail,
             ),
         )
         return True
@@ -463,18 +543,30 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
 
 
 def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
-    """Builder for the GPU block-reduced tomographic aperture-density kernel."""
-    kernel_cache: dict[tuple[str, str], Any] = {}
+    """Builder for the GPU block-reduced tomographic aperture-density kernel.
 
-    def _get_or_build_raw_kernel(map_c_type: str, q_c_type: str) -> Optional[Any]:
-        key = (map_c_type, q_c_type)
+    Same two-kernel contract as the aperture-mass builder above: the fused
+    one-block-per-patch kernel by default, the per-(patch, bin) kernel as
+    the fallback, bitwise identical results either way.
+    """
+    kernel_cache: dict[tuple[str, str, Optional[int]], Any] = {}
+
+    def _get_or_build_raw_kernel(
+        map_c_type: str, q_c_type: str, ntomo: Optional[int]
+    ) -> Optional[Any]:
+        key = (map_c_type, q_c_type, ntomo)
         cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
         if cached is not _KERNEL_CACHE_MISS:
             # May be None: a previously failed compilation is cached negatively
             # so it is not retried (and re-logged) on every call.
             return cached
 
-        name_expression = f"gpu_aperture_density_tomo<{map_c_type}, {q_c_type}>"
+        if ntomo is None:
+            name_expression = f"gpu_aperture_density_tomo<{map_c_type}, {q_c_type}>"
+        else:
+            name_expression = (
+                f"gpu_aperture_density_tomo_fused<{map_c_type}, {q_c_type}, {ntomo}>"
+            )
         source = _prepare_cuda_source("aperture_tomo.cu")
 
         try:
@@ -507,17 +599,27 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
 
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         q_c_type = "float" if q_val.dtype == module.float32 else "double"
-        raw_kernel = _get_or_build_raw_kernel(map_c_type, q_c_type)
+        npatches = int(q_offsets.shape[0] - 1)
+        ntomo = int(values.shape[0])
+        fused = _use_fused_aperture(module, ntomo, npatches)
+        raw_kernel = _get_or_build_raw_kernel(
+            map_c_type, q_c_type, ntomo if fused else None
+        )
         if raw_kernel is None:
             return False
 
         values, v_stride, v_elem = _aperture_tomo_prepare_planar(module, values)
         weights, w_stride, w_elem = _aperture_tomo_prepare_planar(module, weights)
 
-        npatches = int(q_offsets.shape[0] - 1)
-        ntomo = int(values.shape[0])
         threads = 256
-        blocks = (max(1, npatches), max(1, ntomo), 1)
+        blocks = (
+            (max(1, npatches), 1, 1) if fused
+            else (max(1, npatches), max(1, ntomo), 1)
+        )
+        # The fused kernel knows NZ at compile time and takes no `ntomo`.
+        tail: Tuple[Any, ...] = (np.int32(npatches),)
+        if not fused:
+            tail += (np.int32(ntomo),)
         raw_kernel(
             blocks,
             (threads,),
@@ -534,8 +636,7 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
                 q_patch_area,
                 out_num,
                 out_den,
-                np.int32(npatches),
-                np.int32(ntomo),
+                *tail,
             ),
         )
         return True
@@ -1871,14 +1972,19 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
         q_c_type = "float" if q_cos.dtype == module.float32 else "double"
         # Accumulator type follows the orchestrator-allocated output buffers.
         acc_c_type = "float" if out_ma_num.dtype == module.float32 else "double"
+        npatches = int(q_offsets.shape[0] - 1)
+        # One decision for both sections: they share the kernel, and the
+        # widest bin set is what the accumulator budget has to cover.
+        fused = _use_fused_aperture(
+            module, max(n_density_bins, n_shear_bins), npatches
+        )
         raw_kernel = build(
-            "gpu_3x2pt_tomo_aperture",
+            "gpu_3x2pt_tomo_aperture_fused" if fused else "gpu_3x2pt_tomo_aperture",
             (map_c_type, q_c_type, n_density_bins, n_shear_bins, acc_c_type),
         )
         if raw_kernel is None:
             return False
 
-        npatches = int(q_offsets.shape[0] - 1)
         base_args = (
             density_map,
             shear_map,
@@ -1897,8 +2003,8 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
             out_mg_den,
         )
         section_grids = (
-            (npatches, n_shear_bins),      # z=0  M_ap
-            (npatches, n_density_bins),    # z=1  M_g
+            (npatches, 1 if fused else n_shear_bins),      # z=0  M_ap
+            (npatches, 1 if fused else n_density_bins),    # z=1  M_g
         )
         if not section_streams:
             section_streams.extend(
