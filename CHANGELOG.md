@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+- **Batched normalisation of the tomographic wrappers.** `vectorized_shear_shear`,
+  `vectorized_density_density`, `vectorized_density_shear` and the device path
+  of `get_3x2pt_tomo` normalised one tomographic combination at a time, which
+  issued roughly a dozen tiny elementwise kernels per combination; the GPU was
+  idle waiting for launches. The whole stack is now normalised in one set of
+  operations. Results are bitwise unchanged (verified on an A100 over 56
+  DES-Y3-sized map-sets). On an A100 at nside 512, 917 patches, 4 source bins,
+  `resolution_factor=2.9`: `vectorized_shear_shear` 4.40 → 3.03 ms and
+  `get_full_tomo_shear` 5.84 → 4.40 ms per map-set with device-resident input.
+
+### Testing
+- The handful of exactness gates that dominate the suite wall time are marked
+  `slow`; `pytest -m "not gpu and not slow"` runs 308 of 317 tests in ~1 min
+  instead of ~5.5 min. CI still runs them (it only deselects `gpu`).
+
 ## 5.0.0 (2026-09-18)
 
 Major release: static treecode, compact row space, combination-tiled and

@@ -11,6 +11,7 @@ import unittest
 
 import healpy as hp
 import numpy as np
+import pytest
 
 from CosmoFuse import Correlation, calculate_all_zetas
 from CosmoFuse import packing
@@ -80,7 +81,11 @@ class TestCodec(unittest.TestCase):
             packing.MAX_LOCAL_ROWS = old
 
 
+@pytest.mark.slow
 class TestPackedMeasurement(unittest.TestCase):
+    """Slow only because the pure-Python kernels run with the JIT disabled;
+    these are exactness gates and CI runs them (it does not deselect `slow`)."""
+
     @classmethod
     def setUpClass(cls):
         cls.exact, cls.mask = make_setup(pack=False)

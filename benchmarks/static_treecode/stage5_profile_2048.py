@@ -14,26 +14,28 @@ def sync(corr):
 
 
 def build(args):
-    nside = 2048
+    nside = args.nside
     mask = hp.read_map(MASK)
     if hp.npix2nside(mask.size) != nside:
         mask = hp.ud_grade(mask.astype(np.float64), nside)
     mask = mask != 0
     phi = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_phi.dat")
     theta = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_theta.dat")
-    edges = np.geomspace(5.0, 250.0, 12)
+    edges = np.geomspace(args.theta_min, args.theta_max, args.nedges)
     edges = edges[edges < 2 * args.Q - 5]
     corr = Correlation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
                        patch_size=args.Q, theta_Q=args.Q, mask=mask, device="gpu", map_precision="float32",
-                       accumulation_precision="float64", resolution_factor=args.k, aperture_nside=512)
-    if os.path.exists(args.pairs):
+                       accumulation_precision="float64", resolution_factor=args.k or None,
+                       aperture_nside=args.aperture_nside or None)
+    if args.pairs and os.path.exists(args.pairs):
         t0 = time.perf_counter(); corr.load_pairs(args.pairs, release_host_pairs=True)
         print(f"loaded geometry in {time.perf_counter()-t0:.1f}s", flush=True)
     else:
         t0 = time.perf_counter(); corr.calculate_pairs_M_a(); corr.calculate_pairs_2PCF()
         print(f"geometry in {time.perf_counter()-t0:.1f}s", flush=True)
-        t0 = time.perf_counter(); corr.save_pairs(args.pairs)
-        print(f"saved in {time.perf_counter()-t0:.1f}s, {os.path.getsize(args.pairs)/1e9:.1f} GB", flush=True)
+        if args.pairs:  # --pairs "" keeps the (multi-GB) geometry off disk
+            t0 = time.perf_counter(); corr.save_pairs(args.pairs)
+            print(f"saved in {time.perf_counter()-t0:.1f}s, {os.path.getsize(args.pairs)/1e9:.1f} GB", flush=True)
         corr.prepare(release_host_pairs=True)
     return corr
 
@@ -44,12 +46,19 @@ def main():
     ap.add_argument("--k", type=float, default=2.9)
     ap.add_argument("--pairs", default="benchmarks/static_treecode/results/pairs_2048_k2.9_Q110.h5")
     ap.add_argument("--ncalls", type=int, default=8)
+    ap.add_argument("--nside", type=int, default=2048)
+    ap.add_argument("--theta-min", type=float, default=5.0)
+    ap.add_argument("--theta-max", type=float, default=250.0)
+    ap.add_argument("--nedges", type=int, default=12)
+    ap.add_argument("--aperture-nside", type=int, default=512,
+                    help="0 = full resolution")
+    ap.add_argument("--nz", type=int, default=4)
     args = ap.parse_args()
     corr = build(args)
     xp = corr.backend.module
     rng = np.random.default_rng(0)
-    maps = [rng.normal(size=(4, 2, corr.n_active)).astype(np.float32) * 0.1 for _ in range(2)]
-    w = rng.uniform(0.5, 2.0, size=(4, corr.n_active)).astype(np.float32)
+    maps = [rng.normal(size=(args.nz, 2, corr.n_active)).astype(np.float32) * 0.1 for _ in range(2)]
+    w = rng.uniform(0.5, 2.0, size=(args.nz, corr.n_active)).astype(np.float32)
     w.flags.writeable = False
     corr.get_full_tomo_shear(maps[0], w, flip_g1=True, return_device=False); sync(corr)
 

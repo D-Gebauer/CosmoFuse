@@ -2179,6 +2179,17 @@ class Correlation:
         out = (num / safe_den) * mask
         return out.astype(num.dtype, copy=False)
 
+    @staticmethod
+    def _align_denominator(num: Any, den: Any) -> Any:
+        """Right-pad a per-combination denominator so that it broadcasts
+        against a stacked numerator ``(ncomb, ...)``.  ``den`` may be one
+        scalar per combination, a full ``(ncomb, nbins_total)`` array, or a
+        plain scalar."""
+        ndim = getattr(den, "ndim", 0)
+        if ndim and ndim < num.ndim:
+            return den.reshape(den.shape + (1,) * (num.ndim - ndim))
+        return den
+
     def _normalize_xipm_pairs(
         self, xip_num: Any, xim_num: Any, sumofweights_dev: Any
     ) -> Tuple[Any, Any]:
@@ -3022,11 +3033,14 @@ class Correlation:
         """
         if sumofweights_dev is None:
             return out_den
-        den = sumofweights_dev[0].copy()
-        for k in range(den.shape[0]):
-            if not auto_comb[k]:
-                den[k] = sumofweights_dev[0, k] + sumofweights_dev[1, k]
-        return den
+        direct = sumofweights_dev[0]
+        cross = ~np.asarray(auto_comb, dtype=bool)[: direct.shape[0]]
+        if not cross.any():
+            return direct.copy()
+        module = self.backend.module
+        # one set of launches for all combinations (was one per combination)
+        keep = module.asarray(cross.reshape((-1,) + (1,) * (direct.ndim - 1)))
+        return module.where(keep, direct + sumofweights_dev[1], direct)
 
     def _finish_xipm_tomo(
         self,
@@ -3040,15 +3054,17 @@ class Correlation:
         tomographic ξ± kernels (ratio of the orientation sums)."""
         den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
         map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
-        xip = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        # Normalise both orientations of every combination in one go: the
+        # per-combination loop issued ~12 tiny kernels per combination, which
+        # dominated the per-call launch latency at nside 512.
+        shape = (nzbin_combs, self.n_patches, self.nbins)
+        den = self._align_denominator(out_num[0], den)
+        xip = self._normalize_by_weights(out_num[0], den)
+        xim = self._normalize_by_weights(out_num[1], den)
+        return (
+            xip.reshape(shape).astype(map_backend_dtype, copy=False),
+            xim.reshape(shape).astype(map_backend_dtype, copy=False),
         )
-        xim = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
-        )
-        for k in range(nzbin_combs):
-            xip[k], xim[k] = self._normalize_xipm_pairs(out_num[0, k], out_num[1, k], den[k])
-        return xip, xim
 
     def _xipm_tomo_vectorized(
         self,
@@ -3669,12 +3685,12 @@ class Correlation:
                     )
 
         den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
-        out = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        shape = (nzbin_combs, self.n_patches, self.nbins)
+        return (
+            self._normalize_by_weights(out_num, self._align_denominator(out_num, den))
+            .reshape(shape)
+            .astype(map_backend_dtype, copy=False)
         )
-        for k in range(nzbin_combs):
-            out[k] = self._normalize_scalar_pairs(out_num[k], den[k])
-        return out
 
     def _density_shear_tomo_vectorized(
         self,
@@ -3828,12 +3844,14 @@ class Correlation:
                 else:
                     sum_total = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
 
-        out = self.backend.zeros(
-            (nzbin_combs, self.n_patches, self.nbins), dtype=map_backend_dtype
+        shape = (nzbin_combs, self.n_patches, self.nbins)
+        return (
+            self._normalize_by_weights(
+                num_ab, self._align_denominator(num_ab, sum_total)
+            )
+            .reshape(shape)
+            .astype(map_backend_dtype, copy=False)
         )
-        for k in range(nzbin_combs):
-            out[k] = self._normalize_scalar_pairs(num_ab[k], sum_total[k])
-        return out
 
     def vectorized_density_density(
         self,
@@ -4259,18 +4277,24 @@ class Correlation:
 
             _safe_div_into_device(out_ma_num, out_ma_den, M_a_dev)
             _safe_div_into_device(out_mg_num, out_mg_den, M_g_dev)
-            for k in range(ss_ncomb):
-                den_k = out_xipm_den[k].reshape(shape_pb)
-                _safe_div_into_device(out_xipm_num[0, k].reshape(shape_pb), den_k, xip_dev[k])
-                _safe_div_into_device(out_xipm_num[1, k].reshape(shape_pb), den_k, xim_dev[k])
-            for k in range(dd_ncomb):
-                _safe_div_into_device(
-                    out_xig_num[k].reshape(shape_pb), out_xig_den[k].reshape(shape_pb), xi_g_dev[k]
-                )
-            for k in range(ds_ncomb):
-                _safe_div_into_device(
-                    out_xit_num[k].reshape(shape_pb), out_xit_den[k].reshape(shape_pb), xi_t_dev[k]
-                )
+            # whole stacks at once: one set of launches per statistic
+            xipm_den = out_xipm_den.reshape((ss_ncomb,) + shape_pb)
+            _safe_div_into_device(
+                out_xipm_num[0].reshape((ss_ncomb,) + shape_pb), xipm_den, xip_dev
+            )
+            _safe_div_into_device(
+                out_xipm_num[1].reshape((ss_ncomb,) + shape_pb), xipm_den, xim_dev
+            )
+            _safe_div_into_device(
+                out_xig_num.reshape((dd_ncomb,) + shape_pb),
+                out_xig_den.reshape((dd_ncomb,) + shape_pb),
+                xi_g_dev,
+            )
+            _safe_div_into_device(
+                out_xit_num.reshape((ds_ncomb,) + shape_pb),
+                out_xit_den.reshape((ds_ncomb,) + shape_pb),
+                xi_t_dev,
+            )
             return M_a_dev, M_g_dev, xip_dev, xim_dev, xi_g_dev, xi_t_dev
 
         to_np = lambda arr: np.asarray(self.backend.to_numpy(arr), dtype=self.map_dtype)

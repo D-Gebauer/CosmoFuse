@@ -19,6 +19,7 @@ import warnings
 import h5py
 import healpy as hp
 import numpy as np
+import pytest
 
 from CosmoFuse.correlations import Correlation, _compute_pairs_impl
 from CosmoFuse.treecode import assign_levels, level_groups
@@ -202,6 +203,7 @@ class TestFullResolutionDefault(unittest.TestCase):
         self.assertIs(s_out, shear)
         self.assertIsNone(getattr(corr.compute_context, "degrade_ops", None))
 
+    @pytest.mark.slow
     def test_results_bitwise_equal(self):
         shear, dens, w_s, w_d = self.maps
         for name, call in (
@@ -763,6 +765,7 @@ class TestTreecodeIO(TreecodeBase):
             with self.assertRaisesRegex(ValueError, "format version 99"):
                 make_corr(self.mask, resolution_factor=2.0).load_pairs(path)
 
+    @pytest.mark.slow
     def test_full_resolution_files_stay_version_2(self):
         full = make_corr(self.mask)
         full.preprocess()
@@ -796,6 +799,7 @@ class TestTreecodeIO(TreecodeBase):
                 self.assertTrue(np.array_equal(x, y))
 
 
+@pytest.mark.slow
 class TestCoarseApertureLevel(unittest.TestCase):
     """aperture_nside: the aperture statistic of the degraded map."""
 
