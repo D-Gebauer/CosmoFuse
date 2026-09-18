@@ -2579,6 +2579,169 @@ class Correlation:
         cache[kind] = ops
         return ops
 
+    def _degrade_csr_device(self) -> Dict[str, Any]:
+        """Device CSR children of every degrade level, for the fused kernel.
+
+        The same arrays :meth:`_degrade_operators` wraps in sparse matrices,
+        uploaded raw: ``(indptr, indices, n_cells)`` per level plus the
+        appended-row range each level writes.
+        """
+        ctx = self.compute_context
+        cached = getattr(ctx, "degrade_csr", None)
+        if cached is not None:
+            return cached
+        xp = self.backend.module
+
+        def dev(indptr: Any, indices: Any) -> Tuple[Any, Any, int]:
+            return (
+                xp.asarray(np.asarray(indptr, dtype=np.int64)),
+                xp.asarray(np.asarray(indices, dtype=np.int32)),
+                int(np.asarray(indptr).size - 1),
+            )
+
+        out: Dict[str, Any] = {"aperture": None, "chain": [], "ranges": []}
+        ap_cells = self._aperture_cells()
+        if ap_cells is not None:
+            out["aperture"] = dev(ap_cells[1], ap_cells[2])
+        tree = self._treecode
+        if tree is not None:
+            lut = self._global_to_row_lut()
+            starts = tree.level_starts(first=self.n_aperture_cells)
+            for level in range(tree.n_levels):
+                indices = tree.child_indices[level]
+                if level == 0 and lut is not None:
+                    indices = lut[indices]
+                    if indices.size and int(indices.min()) < 0:
+                        raise ValueError(
+                            "Treecode cells reference pixels outside the mask."
+                        )
+                out["chain"].append(dev(tree.child_indptr[level], indices))
+                out["ranges"].append((int(starts[level]), int(starts[level + 1])))
+        ctx.degrade_csr = out
+        return out
+
+    def _use_fused_degrade(self, weights: Any) -> bool:
+        """Whether :meth:`_expand_rows_fused` applies.
+
+        Only when the backend has the kernel *and* the maps already live on
+        the device: with host inputs the sparse path keeps them on the host,
+        which is what the aperture leaves want.
+        """
+        return self.backend.degrade_rows_kernel is not None and not isinstance(
+            weights, np.ndarray
+        )
+
+    def _expand_rows_fused(
+        self, values: Sequence[Any], weights: Any, blocks: str
+    ) -> Optional[Tuple[List[Any], Any]]:
+        """One kernel per degrade level instead of the sparse chain.
+
+        The pixel rows are written into the final row buffers first, so
+        level 0 reads its children straight out of them; deeper levels
+        accumulate over an ``(n_lead, n_appended)`` scratch at the
+        accumulation dtype, exactly as the sparse chain does, and one
+        finalize pass divides by the weight sum and scatters into the row
+        buffers.  No ``(n_active, K * n_lead)`` temporary and no transpose.
+
+        Returns ``None`` when the kernel is unavailable, so the caller
+        falls back to the sparse path.
+        """
+        if not self._use_fused_degrade(weights):
+            return None
+        kern = self.backend.degrade_rows_kernel
+        n_val = len(values)
+        if n_val > 2:                      # the kernel is templated for 0..2
+            return None
+
+        xp = self.backend.module
+        n_active, n_appended = self.n_active, self.n_appended
+        n_rows = n_active + n_appended
+        lead = tuple(int(n) for n in weights.shape[:-1])
+        n_lead = int(np.prod(lead)) if lead else 1
+        acc = self.acc_dtype
+
+        w_rows = xp.empty((n_lead, n_rows), dtype=self.map_dtype)
+        w_rows[:, :n_active] = weights.reshape(n_lead, n_active)
+        if n_val:
+            v_rows = xp.empty((n_val * n_lead, n_rows), dtype=self.map_dtype)
+            for k, v in enumerate(values):
+                v_rows[k * n_lead : (k + 1) * n_lead, :n_active] = v.reshape(
+                    n_lead, n_active
+                )
+        else:
+            v_rows = w_rows                # unused, but must be a valid pointer
+
+        w_app = xp.zeros((n_lead, n_appended), dtype=acc)
+        v_app = (
+            xp.zeros((n_val * n_lead, n_appended), dtype=acc) if n_val else w_app
+        )
+
+        csr = self._degrade_csr_device()
+        filled: List[Tuple[int, int]] = []
+
+        def run(indptr: Any, indices: Any, n_cells: int, src: Tuple[Any, ...],
+                dst_base: int, weighted: bool) -> bool:
+            return bool(
+                kern.level(
+                    indptr, indices, *src,
+                    w_app, n_appended, dst_base,
+                    v_app, n_appended, dst_base,
+                    n_cells, n_lead, n_val, weighted,
+                )
+            )
+
+        pixel_src = (w_rows, n_rows, 0, v_rows, n_rows, 0)
+        if blocks in ("aperture", "all") and csr["aperture"] is not None:
+            indptr, indices, n_cells = csr["aperture"]
+            if not run(indptr, indices, n_cells, pixel_src, 0, True):
+                return None
+            filled.append((0, self.n_aperture_cells))
+        if blocks in ("pairs", "all"):
+            for level, ((start, stop), level_csr) in enumerate(
+                zip(csr["ranges"], csr["chain"])
+            ):
+                indptr, indices, n_cells = level_csr
+                if level == 0:
+                    src, weighted = pixel_src, True
+                else:
+                    prev = csr["ranges"][level - 1][0]
+                    src = (w_app, n_appended, prev, v_app, n_appended, prev)
+                    weighted = False
+                if not run(indptr, indices, n_cells, src, start, weighted):
+                    return None
+                filled.append((start, stop))
+
+        # Blocks that were not filled must read back as zero, as they do on
+        # the sparse path; when the filled ranges tile the whole appended
+        # block (the usual case inside an expansion scope) that costs
+        # nothing, and one finalize launch covers everything.
+        filled.sort()
+        contiguous = filled == [(0, n_appended)] or (
+            bool(filled)
+            and filled[0][0] == 0
+            and filled[-1][1] == n_appended
+            and all(a[1] == b[0] for a, b in zip(filled, filled[1:]))
+        )
+        if contiguous:
+            filled = [(0, n_appended)]
+        else:
+            w_rows[:, n_active:] = 0
+            if n_val:
+                v_rows[:, n_active:] = 0
+
+        for lo, hi in filled:
+            if not kern.finalize(
+                w_app, n_appended, v_app, n_appended,
+                w_rows, v_rows, n_rows, n_active, n_lead, lo, hi, n_val,
+            ):
+                return None
+
+        out = [
+            v_rows[k * n_lead : (k + 1) * n_lead].reshape(lead + (n_rows,))
+            for k in range(n_val)
+        ]
+        return out, w_rows.reshape(lead + (n_rows,))
+
     def _append_block(self, X: Any, blocks: str, use_cupy: bool) -> Any:
         """Apply the degrade operators to ``X`` ``(n_active, C)`` and return
         the virtual-row block ``(n_appended, C)`` (unfilled rows are zero)."""
@@ -2676,6 +2839,12 @@ class Correlation:
             if hit is not None:
                 return list(hit[0]), hit[1]
 
+        fused = self._expand_rows_fused(values, weights, blocks)
+        if fused is not None:
+            out, w_rows = fused
+            if memo is not None:
+                memo[key] = (out, w_rows, values, weights)
+            return list(out), w_rows
         use_cupy = not isinstance(weights, np.ndarray)
         xp = self.backend.module if use_cupy else np
         acc = self.acc_dtype

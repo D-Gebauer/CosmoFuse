@@ -231,6 +231,143 @@ def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int]:
     return arr, int(arr.strides[0] // arr.itemsize)
 
 
+def _build_cupy_degrade_rows_kernel(module: Any) -> Any:
+    """Builder for the fused treecode row-degrade kernels.
+
+    Two entry points behind one object: ``level()`` accumulates one CSR
+    level into the accumulation-dtype scratch, ``finalize()`` normalises
+    and scatters a range of appended rows into the map-dtype row buffers.
+    Both return ``False`` when no raw compiler is available, so the caller
+    can fall back to the sparse path.
+    """
+    build = _make_raw_kernel_builder(module, "degrade_rows.cu", "Treecode degrade")
+
+    def _c_type(dtype: Any) -> str:
+        return "float" if dtype == module.float32 else "double"
+
+    class _DegradeKernels:
+        available = True
+
+        @staticmethod
+        def level(
+            indptr: Any,
+            indices: Any,
+            w_src: Any,
+            w_src_stride: int,
+            w_src_base: int,
+            v_src: Any,
+            v_src_stride: int,
+            v_src_base: int,
+            w_dst: Any,
+            w_dst_stride: int,
+            w_dst_base: int,
+            v_dst: Any,
+            v_dst_stride: int,
+            v_dst_base: int,
+            n_cells: int,
+            n_lead: int,
+            n_val: int,
+            weighted: bool,
+        ) -> bool:
+            if not _has_raw_cuda_compiler(module) or n_cells <= 0:
+                return n_cells <= 0
+            src_t = _c_type(w_src.dtype)
+            acc_t = _c_type(w_dst.dtype)
+            # Lanes per cell: the next power of two at or above the mean
+            # number of children, capped at a warp.  A treecode level has
+            # 4 children per cell, so a full warp would idle 87 % of its
+            # lanes; a coarse aperture level has many more.
+            nnz = int(indices.size)
+            mean_children = max(1.0, nnz / max(1, int(n_cells)))
+            seg = 1
+            while seg < 32 and seg < mean_children:
+                seg *= 2
+            kernel = build(
+                "gpu_degrade_level",
+                (src_t, acc_t, int(n_val), "true" if weighted else "false", seg),
+            )
+            if kernel is None:
+                return False
+            # v_src/v_dst may be unused (n_val == 0) but must still be valid
+            # pointers; the caller passes the weight arrays in that case.
+            threads = 256
+            groups = threads // seg
+            total = int(n_cells) * int(n_lead)
+            blocks = (total + groups - 1) // groups
+            kernel(
+                (max(1, blocks),),
+                (threads,),
+                (
+                    indptr,
+                    indices,
+                    w_src,
+                    np.int64(w_src_stride),
+                    np.int64(w_src_base),
+                    v_src,
+                    np.int64(v_src_stride),
+                    np.int64(v_src_base),
+                    w_dst,
+                    np.int64(w_dst_stride),
+                    np.int64(w_dst_base),
+                    v_dst,
+                    np.int64(v_dst_stride),
+                    np.int64(v_dst_base),
+                    np.int32(n_cells),
+                    np.int32(n_lead),
+                ),
+            )
+            return True
+
+        @staticmethod
+        def finalize(
+            w_app: Any,
+            w_app_stride: int,
+            v_app: Any,
+            v_app_stride: int,
+            w_rows: Any,
+            v_rows: Any,
+            n_rows: int,
+            dst_base: int,
+            n_lead: int,
+            lo: int,
+            hi: int,
+            n_val: int,
+        ) -> bool:
+            if not _has_raw_cuda_compiler(module):
+                return False
+            if hi <= lo:
+                return True
+            kernel = build(
+                "gpu_degrade_finalize",
+                (_c_type(w_rows.dtype), _c_type(w_app.dtype), int(n_val)),
+            )
+            if kernel is None:
+                return False
+            threads = 256
+            total = int(hi - lo) * int(n_lead)
+            blocks = min(65535, (total + threads - 1) // threads)
+            kernel(
+                (max(1, blocks),),
+                (threads,),
+                (
+                    w_app,
+                    np.int64(w_app_stride),
+                    v_app,
+                    np.int64(v_app_stride),
+                    w_rows,
+                    v_rows,
+                    np.int64(n_rows),
+                    np.int64(dst_base),
+                    np.int32(n_lead),
+                    np.int64(lo),
+                    np.int64(hi),
+                ),
+            )
+            return True
+
+    return _DegradeKernels()
+
+
 def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
     """Builder for the GPU block-reduced tomographic aperture-mass kernel."""
     kernel_cache: dict[tuple[str, str], Any] = {}
@@ -1989,6 +2126,7 @@ class Backend:
         kernel_3x2pt_tomo_fused: Optional[Any] = None,
         kernel_3x2pt_tomo_aperture: Optional[Any] = None,
         kernel_3x2pt_tomo_pairs: Optional[Any] = None,
+        degrade_rows_kernel: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
@@ -2016,6 +2154,9 @@ class Backend:
         self.kernel_3x2pt_tomo_fused = kernel_3x2pt_tomo_fused
         self.kernel_3x2pt_tomo_aperture = kernel_3x2pt_tomo_aperture
         self.kernel_3x2pt_tomo_pairs = kernel_3x2pt_tomo_pairs
+        # Fused static-treecode row degrade (None on CPU / without a
+        # raw compiler; the sparse chain is then used instead).
+        self.degrade_rows_kernel = degrade_rows_kernel
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -2264,6 +2405,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 kernel_density_shear_tomo_packed=_build_cupy_density_shear_tomo_packed_kernel(cupy),
                 kernel_3x2pt_tomo_aperture=_build_cupy_3x2pt_tomo_aperture_kernel(cupy),
                 kernel_3x2pt_tomo_pairs=_build_cupy_3x2pt_tomo_pairs_kernel(cupy),
+                degrade_rows_kernel=_build_cupy_degrade_rows_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':

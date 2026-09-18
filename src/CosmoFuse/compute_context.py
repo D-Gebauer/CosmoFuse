@@ -41,6 +41,7 @@ class ComputeContext:
         ("row_pix_dev", None),
         ("Q_rows_flat", None),
         ("degrade_ops", None),
+        ("degrade_csr", None),
         # Row-space device copies of read-only (frozen) host map inputs
         ("frozen_map_memo", None),
     )

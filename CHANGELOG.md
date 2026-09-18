@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Performance
+- **Fused static-treecode row degrade** (idea #3). Building the virtual
+  rows was a chain of sparse matrix products over an
+  `(n_active, K * n_lead)` temporary plus two transposes. Two new CUDA
+  kernels (`cuda/degrade_rows.cu`) walk each level's CSR children directly
+  into an `(n_lead, n_appended)` accumulation-dtype scratch and then
+  normalise and scatter into the row buffers: no pair-sized temporary, no
+  transpose, no atomics. The number of lanes cooperating on one cell is
+  sized from the mean number of children - a treecode level halves nside,
+  so a cell has exactly 4 children and a full warp per cell idled 87 % of
+  its lanes (2.1x instead of 3.9x). On an A100 (nside 512, 450 patches,
+  18.3 M pairs, `resolution_factor=2.9`, 4 tomographic bins, float32 maps
+  + float64 accumulators): `_expand_rows` **1.071 -> 0.273 ms (3.9x)**,
+  `get_full_tomo_shear` 2.533 -> 1.721 ms (-32 %), `get_3x2pt_tomo`
+  6.069 -> 4.584 ms (-24 %). It is the same recursion as the sparse chain
+  and differs only in the order of summation inside a cell: the weight
+  rows come out bitwise identical at float32 and the value rows agree to
+  one ULP (5.96e-8 at float32, **2.0e-16 at float64**). The sparse chain
+  stays as the CPU path and the fallback, and `resolution_factor=None`
+  reaches neither. Validated against TreeCorr run on the degraded cells
+  themselves (`tests/test_degrade_treecorr.py`).
+
 ### Added
 - **`ZetaWriter`**: streams each map-set's i3PCFs to HDF5 from a background
   thread instead of holding every per-patch array in RAM. zeta averages over

@@ -96,6 +96,7 @@ class EmulatedCupyModule:
     ascontiguousarray = staticmethod(np.ascontiguousarray)
     asarray = staticmethod(np.asarray)
     zeros = staticmethod(np.zeros)
+    empty = staticmethod(np.empty)
 
     @staticmethod
     def RawKernel(_source, name_expression, options=None):
@@ -657,6 +658,78 @@ def _emulate_fused_aperture(params, grid, args):
     raise ValueError(f"Unknown aperture section: {section}")
 
 
+def _emulate_degrade_level(params, grid, args):
+    """degrade_rows.cu :: gpu_degrade_level<TSRC, ACC, NVAL, WEIGHTED>.
+
+    One warp per (cell, lead); the emulator does the same flat gid ->
+    (cell, lead) split and the same per-cell gather, summing with np.sum
+    instead of the shuffle tree (roundoff-level difference only).
+    """
+    n_val = int(params[2])
+    weighted = str(params[3]).lower() == "true"
+    seg = int(params[4])
+    (indptr, indices, w_src, w_src_stride, w_src_base,
+     v_src, v_src_stride, v_src_base,
+     w_dst, w_dst_stride, w_dst_base,
+     v_dst, v_dst_stride, v_dst_base, n_cells, n_lead) = args
+    n_cells, n_lead = int(n_cells), int(n_lead)
+    w_src_stride, w_src_base = int(w_src_stride), int(w_src_base)
+    v_src_stride, v_src_base = int(v_src_stride), int(v_src_base)
+    w_dst_stride, w_dst_base = int(w_dst_stride), int(w_dst_base)
+    v_dst_stride, v_dst_base = int(v_dst_stride), int(v_dst_base)
+
+    acc = w_dst.dtype
+    wf = w_src.reshape(-1)
+    vf = v_src.reshape(-1)
+    wo = w_dst.reshape(-1)
+    vo = v_dst.reshape(-1)
+
+    # the launch must cover every (cell, lead)
+    if seg not in (1, 2, 4, 8, 16, 32):
+        raise AssertionError(f"SEG must be a power of two in 1..32, got {seg}")
+    covered = int(grid[0]) * (256 // seg)
+    if covered < n_cells * n_lead:
+        raise AssertionError("degrade launch does not cover all (cell, lead)")
+
+    for cell in range(n_cells):
+        child = indices[int(indptr[cell]):int(indptr[cell + 1])].astype(np.int64)
+        for lead in range(n_lead):
+            wj = wf[lead * w_src_stride + w_src_base + child].astype(acc)
+            wo[lead * w_dst_stride + w_dst_base + cell] = np.sum(wj)
+            for k in range(n_val):
+                row = (k * n_lead + lead) * v_src_stride + v_src_base
+                vj = vf[row + child].astype(acc)
+                total = np.sum(wj * vj) if weighted else np.sum(vj)
+                vo[(k * n_lead + lead) * v_dst_stride + v_dst_base + cell] = total
+
+
+def _emulate_degrade_finalize(params, grid, args):
+    """degrade_rows.cu :: gpu_degrade_finalize<T, ACC, NVAL>."""
+    n_val = int(params[2])
+    (w_app, w_app_stride, v_app, v_app_stride, w_rows, v_rows,
+     n_rows, dst_base, n_lead, lo, hi) = args
+    w_app_stride, v_app_stride = int(w_app_stride), int(v_app_stride)
+    n_rows, dst_base = int(n_rows), int(dst_base)
+    n_lead, lo, hi = int(n_lead), int(lo), int(hi)
+
+    wa = w_app.reshape(-1)
+    va = v_app.reshape(-1)
+    wr = w_rows.reshape(-1)
+    vr = v_rows.reshape(-1)
+    out_dtype = w_rows.dtype
+
+    for lead in range(n_lead):
+        for r in range(lo, hi):
+            w = wa[lead * w_app_stride + r]
+            wr[lead * n_rows + dst_base + r] = out_dtype.type(w)
+            inv = (1.0 / w) if w != 0 else 0.0
+            for k in range(n_val):
+                sv = va[(k * n_lead + lead) * v_app_stride + r]
+                vr[(k * n_lead + lead) * n_rows + dst_base + r] = out_dtype.type(
+                    sv * inv
+                )
+
+
 _KERNEL_EMULATORS = {
     "gpu_fused_tomo_reduce_xipm": _emulate_xipm,
     "gpu_tiled_tomo_reduce_xipm": _emulate_xipm_tiled,
@@ -672,4 +745,6 @@ _KERNEL_EMULATORS = {
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,
     "gpu_aperture_density_tomo": _emulate_aperture_density_tomo,
     "gpu_3x2pt_tomo_aperture": _emulate_fused_aperture,
+    "gpu_degrade_level": _emulate_degrade_level,
+    "gpu_degrade_finalize": _emulate_degrade_finalize,
 }

@@ -16,6 +16,7 @@ the definitive check.
 """
 
 import unittest
+import types
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from CosmoFuse.backend import (
     _build_cupy_density_density_tomo_vectorized_kernel,
     _build_cupy_density_shear_tomo_packed_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
+    _build_cupy_degrade_rows_kernel,
     _build_cupy_tomo_packed_kernel,
     _build_cupy_tomo_vectorized_kernel,
 )
@@ -49,6 +51,7 @@ _BUILDERS = {
     "aperture_tomo_density_kernel": _build_cupy_aperture_tomo_density_kernel,
     "kernel_3x2pt_tomo_aperture": _build_cupy_3x2pt_tomo_aperture_kernel,
     "kernel_3x2pt_tomo_pairs": _build_cupy_3x2pt_tomo_pairs_kernel,
+    "degrade_rows_kernel": _build_cupy_degrade_rows_kernel,
 }
 _EMULATED_KERNEL_ATTRS = tuple(_BUILDERS)
 
@@ -69,8 +72,22 @@ def emulated_gpu(corr):
     calls = {name: 0 for name in _EMULATED_KERNEL_ATTRS}
 
     def _counting(name, wrapped):
+        if not isinstance(wrapped, types.FunctionType):
+            # a bundle of entry points (degrade_rows_kernel): count each
+            proxy = types.SimpleNamespace()
+            for attr in dir(wrapped):
+                if attr.startswith("_"):
+                    continue
+                value = getattr(wrapped, attr)
+                setattr(
+                    proxy,
+                    attr,
+                    _counting(f"{name}.{attr}", value) if callable(value) else value,
+                )
+            return proxy
+
         def _call(*args, **kwargs):
-            calls[name] += 1
+            calls[name] = calls.get(name, 0) + 1
             return wrapped(*args, **kwargs)
 
         return _call
