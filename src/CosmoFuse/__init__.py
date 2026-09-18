@@ -9,6 +9,8 @@ from .correlation_helpers import (
     Q_T,
     Q_crittenden,
     Q_schneider,
+    U_crittenden,
+    U_schneider,
     calculate_all_zetas,
     zeta_a_g,
     zeta_a_minus,
@@ -21,6 +23,7 @@ from .correlation_helpers import (
 )
 from .correlations import Correlation
 from .pipeline import PinnedMapPipeline, RowSpaceMapLoader
+from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 
 __version__ = "4.21.0"
@@ -29,11 +32,14 @@ __email__ = "git@gebauer.ai"
 
 __all__ = [
     "Correlation",
+    "DEFAULT_RESOLUTION_FACTOR",
     "PinnedMapPipeline",
     "RowSpaceMapLoader",
     "Q_T",
     "Q_crittenden",
     "Q_schneider",
+    "U_crittenden",
+    "U_schneider",
     "calculate_all_zetas",
     "zeta_g_plus",
     "zeta_g_minus",

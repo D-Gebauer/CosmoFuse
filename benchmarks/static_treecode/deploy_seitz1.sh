@@ -5,5 +5,5 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 rsync -az --delete --exclude .git --exclude htmlcov --exclude '__pycache__' \
       --exclude '*.egg-info' --exclude '.pytest_cache' --exclude 'coverage.xml' \
-      --exclude '.coverage' --exclude 'benchmarks/static_treecode/results' \
+      --exclude '.coverage' --exclude 'benchmarks/static_treecode/results' --exclude 'STATIC_TREECODE_GUIDE.md' \
       ./ seitz1:research/CosmoFuse-static-treecode/

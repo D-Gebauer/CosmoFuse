@@ -229,6 +229,60 @@ def _emulate_xipm_tiled(params, grid, args):
                 den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
 
 
+def _emulate_xipm_packed(params, grid, args):
+    """tomo_packed_xipm.cu :: gpu_tiled_packed_reduce_xipm<T, TOMO, ACC>."""
+    map_dtype = _SCALAR_TYPES[params[0]]
+    tomo_bins = int(params[1])
+    acc = _SCALAR_TYPES[params[2]]
+    (shear, weights, pairs, bin_offsets, row_base, out_num, out_den,
+     ncomb, nbins_total) = args
+    ncomb, nbins_total = int(ncomb), int(nbins_total)
+    assert int(grid[1]) == 1
+    if ncomb != (tomo_bins * (tomo_bins + 1)) // 2:
+        return
+    assert np.asarray(pairs).dtype == np.uint16 and np.asarray(pairs).shape[1] == 4
+    shear3 = np.asarray(shear).reshape(-1, tomo_bins, 2)
+    weights2 = np.asarray(weights).reshape(-1, tomo_bins)
+    num_flat = out_num.reshape(-1)
+    den_flat = out_den.reshape(-1)
+    angle_unit = map_dtype(9.587379924285257e-05)
+
+    for bin_flat in range(int(grid[0])):
+        if bin_flat >= nbins_total:
+            continue
+        start, stop = int(bin_offsets[bin_flat]), int(bin_offsets[bin_flat + 1])
+        p = np.asarray(pairs[start:stop])
+        base = int(row_base[bin_flat])
+        idx_a = base + p[:, 0].astype(np.int64)
+        idx_b = base + p[:, 1].astype(np.int64)
+        ang_a = p[:, 2].astype(map_dtype) * angle_unit
+        ang_b = p[:, 3].astype(map_dtype) * angle_unit
+        ea_r, ea_i = np.cos(ang_a)[:, None], np.sin(ang_a)[:, None]
+        eb_r, eb_i = np.cos(ang_b)[:, None], np.sin(ang_b)[:, None]
+        ga, gb = shear3[idx_a], shear3[idx_b]
+        a_r = ga[..., 0] * ea_r - ga[..., 1] * ea_i
+        a_i = ga[..., 0] * ea_i + ga[..., 1] * ea_r
+        b_r = gb[..., 0] * eb_r - gb[..., 1] * eb_i
+        b_i = gb[..., 0] * eb_i + gb[..., 1] * eb_r
+        w_a, w_b = weights2[idx_a], weights2[idx_b]
+        k = 0
+        for i in range(tomo_bins):
+            for j in range(i, tomo_bins):
+                for ori, (ta, tb) in enumerate(((i, j), (j, i))):
+                    if ori == 1 and i == j:
+                        continue
+                    row = 2 * k + ori
+                    w_pair = w_a[:, ta] * w_b[:, tb]
+                    rr = b_r[:, tb] * a_r[:, ta]
+                    ii = b_i[:, tb] * a_i[:, ta]
+                    out_p_idx = row * nbins_total + bin_flat
+                    out_m_idx = (2 * ncomb + row) * nbins_total + bin_flat
+                    num_flat[out_p_idx] = np.sum(w_pair * (rr + ii), dtype=acc)
+                    num_flat[out_m_idx] = np.sum(w_pair * (rr - ii), dtype=acc)
+                    den_flat[out_p_idx] = np.sum(w_pair, dtype=acc)
+                k += 1
+
+
 def _emulate_dd(params, grid, args):
     """density_density_tomo_vectorized.cu :: gpu_fused_tomo_reduce_dd<T, TOMO, I, ACC>."""
     tomo_bins = int(params[1])
@@ -586,6 +640,7 @@ def _emulate_fused_3x2pt(params, grid, args):
 _KERNEL_EMULATORS = {
     "gpu_fused_tomo_reduce_xipm": _emulate_xipm,
     "gpu_tiled_tomo_reduce_xipm": _emulate_xipm_tiled,
+    "gpu_tiled_packed_reduce_xipm": _emulate_xipm_packed,
     "gpu_fused_tomo_reduce_dd": _emulate_dd,
     "gpu_fused_tomo_reduce_ds": _emulate_ds,
     "gpu_aperture_shear_tomo": _emulate_aperture_shear_tomo,

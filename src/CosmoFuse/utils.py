@@ -41,14 +41,7 @@ def _aperture_filter_weights(
     theta: np.ndarray,
     theta_Q: float,
 ) -> np.ndarray:
-    """|filter(θ)| for the filter-weighted masking check.
-
-    The absolute value is deliberate: compensated aperture filters can be
-    negative at large radii, and signed weights would let those regions
-    cancel masked area elsewhere (and push the "fraction" outside
-    [0, 1]).  A masked pixel costs the aperture |weight| of filter
-    support regardless of the weight's sign.
-    """
+    """Signed filter(θ) values for the filter-weighted masking check."""
     if aperture_filter is None:
         values = Q_crittenden(theta, theta_Q)
     else:
@@ -56,7 +49,10 @@ def _aperture_filter_weights(
             values = aperture_filter(theta, theta_Q)
         except TypeError:
             values = aperture_filter(theta)
-    return np.abs(np.asarray(values, dtype=np.float64))
+    return np.asarray(values, dtype=np.float64)
+
+
+_FILTER_WEIGHTINGS = {"abs": "abs", "signed": "signed", "raw": "signed", "pixels": "pixels"}
 
 
 def select_patch_centers(
@@ -66,8 +62,9 @@ def select_patch_centers(
     theta_Q: Optional[float] = None,
     f_mask: float = 0.2,
     f_mask_filter: Optional[float] = None,
-    filter_weighted: bool = False,
+    filter_weighted: Optional[bool] = None,
     aperture_filter: Optional[Callable[..., np.ndarray]] = None,
+    filter_weighting: str = "abs",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Select patch centres on a coarse grid whose surroundings are
     sufficiently unmasked.
@@ -94,16 +91,32 @@ def select_patch_centers(
         f_mask: Maximum tolerated masked fraction inside the patch disc.
         f_mask_filter: Maximum tolerated masked fraction inside the
             filter support disc; defaults to ``f_mask``.
-        filter_weighted: If ``True``, the filter-disc check uses the
-            aperture-filter-weighted masked fraction
-            ``Σ_masked |Q(θ)| / Σ_all |Q(θ)|`` instead of the raw pixel
-            fraction, so masked pixels only matter in proportion to the
-            filter support they remove from the aperture mass (a hole
-            near the disc edge, where Q is negligible, no longer vetoes
-            the patch, while a hole at the filter peak counts more).
-            The magnitude ``|Q|`` is used because compensated filters
-            can be negative at large radii.  The patch-disc (2PCF)
-            check always uses the raw fraction.
+        filter_weighting: How the masking of the filter support disc is
+            measured.  The mask is always used as a *binary* mask at its
+            own resolution: a pixel contributes its whole filter value
+            (evaluated at the pixel centre) if it is unmasked and nothing
+            otherwise -- never a fraction, and never the survey weights.
+
+            ``"abs"`` (default) -- fraction of *importance* lost,
+            ``Σ_masked |Q| / Σ_all |Q| <= f_mask_filter``.  A hole near the
+            disc edge, where the filter is negligible, no longer vetoes a
+            patch, while a hole at the filter peak counts more.  Filter
+            regions of either sign count as lost support.
+
+            ``"signed"`` (alias ``"raw"``) -- *deviation of the filter
+            integral*, ``|Σ_masked Q| / Σ_all |Q| <= f_mask_filter``.  For a
+            compensated filter (``Σ_all U = 0``, e.g. ``U_crittenden``) this
+            is how far the mask pushes the aperture away from being
+            compensated: masked regions of opposite sign cancel.  For a
+            non-negative filter (``Q_crittenden``, ``Q_schneider``) it is
+            identical to ``"abs"``.
+
+            ``"pixels"`` -- unweighted masked pixel fraction (the behaviour
+            before 4.21).
+
+            The patch-disc (2PCF) check always uses the pixel fraction.
+        filter_weighted: Deprecated alias: ``True`` = ``"abs"``, ``False`` =
+            ``"pixels"``; overrides ``filter_weighting`` when given.
         aperture_filter: Filter used for the weighting; defaults to the
             built-in ``Q_crittenden`` (same convention as
             ``Correlation.preprocess``: called as
@@ -129,6 +142,14 @@ def select_patch_centers(
         raise ValueError("patch_size and theta_Q must be positive")
     if not (0 <= f_mask <= 1) or not (0 <= f_mask_filter <= 1):
         raise ValueError("f_mask and f_mask_filter must lie in [0, 1]")
+    if filter_weighted is not None:
+        filter_weighting = "abs" if filter_weighted else "pixels"
+    if filter_weighting not in _FILTER_WEIGHTINGS:
+        raise ValueError(
+            "filter_weighting must be 'abs', 'signed' (alias 'raw') or "
+            f"'pixels'; got {filter_weighting!r}"
+        )
+    weighting = _FILTER_WEIGHTINGS[filter_weighting]
 
     patch_radius = np.radians(patch_size / 60.0)
     filter_radius = 5.0 * np.radians(theta_Q / 60.0)
@@ -151,17 +172,21 @@ def select_patch_centers(
         disc = hp.query_disc(nside_mask, vecs[i], filter_radius)
         if disc.size == 0:
             continue
-        if filter_weighted:
+        if weighting != "pixels":
             pix_vec = np.asarray(hp.pix2vec(nside_mask, disc))
             cos_theta = np.clip(vecs[i] @ pix_vec, -1.0, 1.0)
             weights = _aperture_filter_weights(
                 aperture_filter, np.arccos(cos_theta), theta_Q
             )
-            total = weights.sum()
+            total = np.abs(weights).sum()
             if total <= 0:
                 # degenerate filter over this disc: cannot assess -> reject
                 continue
-            masked_fraction = weights[~unmasked[disc]].sum() / total
+            masked = weights[~unmasked[disc]]
+            if weighting == "abs":
+                masked_fraction = np.abs(masked).sum() / total
+            else:
+                masked_fraction = abs(masked.sum()) / total
         else:
             masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
         if masked_fraction > f_mask_filter:

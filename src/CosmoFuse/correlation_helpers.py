@@ -60,6 +60,34 @@ def Q_crittenden(theta: float, theta_Q: float = 90) -> float:
     return theta**2 / (4 * np.pi * theta_Q**4) * np.exp(-(theta**2) / (2 * theta_Q**2))
 
 
+def U_crittenden(theta: float, theta_Q: float = 90) -> np.ndarray:
+    """Convergence-space partner of :func:`Q_crittenden`:
+
+        U(θ) = 1/(2π θ_Q²) · (1 - θ²/(2θ_Q²)) · exp(-θ²/(2θ_Q²)).
+
+    Compensated (∫ dθ θ U(θ) = 0) and negative beyond θ = √2 θ_Q.  Not used
+    for measuring (CosmoFuse measures M_ap from the tangential shear with
+    Q); useful for mask-based patch selection, e.g.
+    ``select_patch_centers(..., aperture_filter=U_crittenden,
+    filter_weighting="signed")`` limits how far the mask may push the
+    aperture away from being compensated.
+    """
+    theta_q = np.radians(theta_Q / 60)
+    x2 = np.asarray(theta) ** 2 / (2 * theta_q**2)
+    return 1.0 / (2 * np.pi * theta_q**2) * (1.0 - x2) * np.exp(-x2)
+
+
+def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
+    """Convergence-space partner of :func:`Q_schneider`:
+
+        U(θ) = 9/(π θ_Q²) · (1 - x²)(1/3 - x²)   for x = θ/θ_Q ≤ 1, else 0.
+    """
+    theta_ap = np.radians(theta_Q / 60)
+    x2 = (np.asarray(theta) / theta_ap) ** 2
+    values = 9.0 / (np.pi * theta_ap**2) * (1.0 - x2) * (1.0 / 3.0 - x2)
+    return np.where(x2 < 1.0, values, 0.0)
+
+
 # Backwards-compatible alias.  The filter CosmoFuse has always applied is
 # the Crittenden et al. (2002) exponential filter above; it was previously
 # misattributed to Schneider et al. (1998) in the docstring.  ``Q_T``

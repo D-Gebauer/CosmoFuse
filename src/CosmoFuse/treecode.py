@@ -42,16 +42,31 @@ def is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
+# Resolution factor used when the static treecode is switched on without an
+# explicit value (``resolution_factor=True`` / ``"default"``): xi- is
+# suppressed by <= 5 %, gamma_t by <= 2.5 %, xi+/xi_g by < 1 %.
+DEFAULT_RESOLUTION_FACTOR = 4.0
+
+
 def validate_resolution_factor(resolution_factor: object) -> Optional[float]:
-    """Return the resolution factor as a float (``None`` = full resolution)."""
-    if resolution_factor is None:
+    """Return the resolution factor as a float (``None`` = full resolution).
+
+    ``None`` / ``False`` -> full resolution (the default); ``True`` /
+    ``"default"`` -> :data:`DEFAULT_RESOLUTION_FACTOR`; a positive number ->
+    that value.
+    """
+    if resolution_factor is None or resolution_factor is False:
         return None
-    if isinstance(resolution_factor, bool) or not isinstance(
-        resolution_factor, (int, float, np.integer, np.floating)
+    if resolution_factor is True or (
+        isinstance(resolution_factor, str) and resolution_factor.lower() == "default"
     ):
+        return DEFAULT_RESOLUTION_FACTOR
+    if not isinstance(resolution_factor, (int, float, np.integer, np.floating)):
         raise ValueError(
-            "resolution_factor must be None (full resolution) or a positive "
-            f"number; got {resolution_factor!r}"
+            "resolution_factor must be None/False (full resolution), "
+            "True/'default' (static treecode with the default factor "
+            f"{DEFAULT_RESOLUTION_FACTOR:g}) or a positive number; got "
+            f"{resolution_factor!r}"
         )
     k = float(resolution_factor)
     if not (k > 0.0) or np.isnan(k):

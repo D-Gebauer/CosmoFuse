@@ -221,7 +221,7 @@ class TestOptionPlumbing(TreecodeBase):
     """T1b"""
 
     def test_invalid_values_raise(self):
-        for bad in (0, -1.0, float("nan"), "2", True, {"xi_m": 4.0}):
+        for bad in (0, -1.0, float("nan"), "2", "auto", {"xi_m": 4.0}):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 make_corr(self.mask, resolution_factor=bad)
         with self.assertRaisesRegex(ValueError, "power-of-two nside"):
@@ -231,6 +231,23 @@ class TestOptionPlumbing(TreecodeBase):
                 make_corr(self.mask, aperture_nside=bad)
         with self.assertRaises(ValueError):
             make_corr(self.mask, memory_budget_gb=0)
+
+    def test_default_factor_when_switched_on(self):
+        import CosmoFuse
+
+        self.assertEqual(CosmoFuse.DEFAULT_RESOLUTION_FACTOR, 4.0)
+        for on in (True, "default", "DEFAULT"):
+            corr = make_corr(self.mask, resolution_factor=on)
+            self.assertEqual(corr.resolution_factor, 4.0)
+            self.assertEqual(
+                corr.level_nside.tolist(),
+                make_corr(self.mask, resolution_factor=4.0).level_nside.tolist(),
+            )
+        for off in (None, False):
+            corr = make_corr(self.mask, resolution_factor=off)
+            self.assertIsNone(corr.resolution_factor)
+            self.assertTrue(np.all(corr.level_nside == NSIDE))
+        self.assertIsNone(make_corr(self.mask).resolution_factor)  # default: full
 
     def test_level_table(self):
         table = self.tree.level_table

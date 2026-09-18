@@ -27,6 +27,7 @@ from .correlation_helpers import (
     zeta_g_plus as _zeta_g_plus_helper,
     zeta_g_t as _zeta_g_t_helper,
 )
+from .packing import decode_angles, pack_patch
 from .pair_finder import PairFinder
 from .treecode import (
     TreecodeGeometry,
@@ -329,10 +330,11 @@ class Correlation:
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
         accumulation_precision: str = "same",
-        resolution_factor: Optional[float] = None,
+        resolution_factor: Union[None, bool, str, float] = None,
         aperture_nside: Optional[int] = None,
         memory_budget_gb: Optional[float] = None,
         pair_search_precision: str = "auto",
+        pack_pairs: bool = False,
     ) -> None:
         """Initialize the Correlation class with validation.
 
@@ -356,8 +358,11 @@ class Correlation:
                 map_precision="float32": per-pair products are computed at
                 float32 but summed without float32 cancellation error).
             resolution_factor: ``None`` (default) measures every angular
-                bin on the full-resolution map.  A positive number ``k``
-                switches on the *static treecode*: bin ``b`` is measured on
+                bin on the full-resolution map.  ``True`` (or
+                ``"default"``) switches on the *static treecode* with the
+                default factor ``k = 4``
+                (:data:`CosmoFuse.DEFAULT_RESOLUTION_FACTOR`); a positive
+                number sets ``k`` explicitly.  Bin ``b`` is then measured on
                 the coarsest HEALPix level whose pixel size is
                 ``<= theta_lo(b) / k`` (per-patch cells, weighted means at
                 their centroids).  This cuts the number of pairs by orders
@@ -372,6 +377,18 @@ class Correlation:
                 before pair finding.  ``None`` uses the free device memory
                 on GPU backends (no check on CPU); ``float("inf")``
                 disables the check.
+            pack_pairs: Store the device pair geometry in 8 instead of 24
+                bytes per pair (uint16 rotation angles + uint16 patch-local
+                row indices; the map rows of every patch are gathered into
+                contiguous blocks once per map).  Three times more pairs fit
+                on the device -- a higher ``resolution_factor`` or more
+                patches.  Not bit-identical to the unpacked geometry: the
+                angle quantisation (<= 4.8e-5 rad) perturbs every estimate
+                by ~1e-5 of its statistical error and does not bias it.
+                Pair files and host arrays stay exact.  On GPU backends the
+                packed geometry currently serves the shear path
+                (``vectorized_shear_shear``, ``get_full_tomo_shear``) and
+                the aperture statistics.
             pair_search_precision: Precision of the pair *search*
                 (separations, binning, position angles); the stored
                 rotation factors always use ``rotation_precision``.
@@ -449,6 +466,7 @@ class Correlation:
                 f"'float64'; got {pair_search_precision!r}"
             )
         self.pair_search_precision = pair_search_precision
+        self.pack_pairs = bool(pack_pairs)
         self._pair_finder = self._make_pair_finder()
         if self._pair_finder.search_dtype == np.dtype(np.float32):
             jitter = 6e-8 / self.theta_min**2
@@ -516,8 +534,9 @@ class Correlation:
         theta_Q: float = 90,
         f_mask: float = 0.2,
         f_mask_filter: Optional[float] = None,
-        filter_weighted: bool = False,
+        filter_weighted: Optional[bool] = None,
         aperture_filter: Optional[Callable[..., Any]] = None,
+        filter_weighting: str = "abs",
         **kwargs: Any,
     ) -> "Correlation":
         """Construct a Correlation with patch centres selected from a mask.
@@ -542,9 +561,13 @@ class Correlation:
             f_mask: Maximum tolerated masked fraction inside the patch disc.
             f_mask_filter: Maximum tolerated masked fraction inside the
                 filter support disc; defaults to ``f_mask``.
-            filter_weighted: If ``True``, weight the filter-disc masking
-                check by ``|aperture_filter(θ)|`` instead of counting
-                pixels (see :func:`CosmoFuse.utils.select_patch_centers`).
+            filter_weighting: ``"abs"`` (default: masked fraction of
+                ``|filter|`` weight), ``"signed"``/``"raw"`` (deviation of
+                the filter integral, ``|Σ_masked Q| / Σ|Q|``) or ``"pixels"``
+                (unweighted pixel fraction); always from the binary mask,
+                see :func:`CosmoFuse.utils.select_patch_centers`.
+            filter_weighted: Deprecated alias (``True`` = ``"abs"``,
+                ``False`` = ``"pixels"``).
             aperture_filter: Filter for the weighted check; defaults to
                 the built-in ``Q_crittenden``.  Selection only — pass the
                 same filter to :meth:`preprocess` for consistency.
@@ -567,6 +590,7 @@ class Correlation:
             f_mask_filter=f_mask_filter,
             filter_weighted=filter_weighted,
             aperture_filter=aperture_filter,
+            filter_weighting=filter_weighting,
         )
         if phi_center.size == 0:
             raise ValueError(
@@ -647,6 +671,8 @@ class Correlation:
         self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
         if "pair_search_precision" not in self.__dict__:
             self.pair_search_precision = "rotation"  # historical behaviour
+        if "pack_pairs" not in self.__dict__:
+            self.pack_pairs = False
         self._pair_finder = self._make_pair_finder()
         self.compute_context = ComputeContext()
         legacy_context_fields = (
@@ -1513,8 +1539,10 @@ class Correlation:
         )
         if not host_pairs_available:
             if (
-                self.inds_dev is not None
-                and self.exp2phi_dev is not None
+                (
+                    (self.inds_dev is not None and self.exp2phi_dev is not None)
+                    or self.compute_context.packed_pairs_dev is not None
+                )
                 and self.bins_dev is not None
                 and self.tot_bins_reduceat_dev is not None
             ):
@@ -1535,11 +1563,25 @@ class Correlation:
             ninds.append(patchsize)
 
         first_patch_ind = np.append(0, np.cumsum(ninds)).astype(int)
+        # Payload packing (8 B per pair).  On GPU backends the unpacked
+        # 24 B geometry is then not built at all; the CPU kernels keep using
+        # unpacked arrays, but with the *same* quantised rotation factors,
+        # so both backends measure the same estimator.
+        pack = bool(self.pack_pairs)
+        keep_unpacked = not (pack and self.backend.name == "cupy")
         # np.empty: every element is written in the loop below
-        temp_inds = np.empty((2, int(size)), dtype=self.index_dtype)
-        temp_exp2phi = np.empty((2, int(size)), dtype=self.rotation_complex_dtype)
+        if keep_unpacked:
+            temp_inds = np.empty((2, int(size)), dtype=self.index_dtype)
+            temp_exp2phi = np.empty((2, int(size)), dtype=self.rotation_complex_dtype)
+        if pack:
+            groups = level_groups(self.level_nside)
+            packed = np.empty((int(size), 4), dtype=np.uint16)
+            packed_row_base = np.zeros(self.n_patches * self.nbins, dtype=np.int64)
+            packed_blocks: List[np.ndarray] = []
+            n_packed_rows = 0
         temp_bins = np.empty((self.n_patches * self.nbins), dtype=self.index_dtype)
-        temp_bins_tot = np.empty((self.n_patches * self.nbins + 1), dtype=self.index_dtype)
+        # int64: the cumulative pair offsets exceed int32 beyond 2^31 pairs
+        temp_bins_tot = np.empty((self.n_patches * self.nbins + 1), dtype=np.int64)
         temp_bins_tot[0] = 0
 
         # Device pair indices address the compact row space (host pair_inds
@@ -1547,39 +1589,75 @@ class Correlation:
         # is needed.
         lut = self._global_to_row_lut()
         for i in range(self.n_patches):
-            temp_inds[:, first_patch_ind[i] : first_patch_ind[i + 1]] = (
-                self._global_ids_to_rows(self.pair_inds[i], lut)
-            )
-            temp_exp2phi[:, first_patch_ind[i] : first_patch_ind[i + 1]] = (
-                self.pair_exp2phi[i]
-            )
+            lo, hi = first_patch_ind[i], first_patch_ind[i + 1]
+            rows_i = self._global_ids_to_rows(self.pair_inds[i], lut)
+            if lut is not None and rows_i.size > 0 and int(rows_i.min()) < 0:
+                raise ValueError(
+                    "Pair indices reference pixels outside the mask (map_inds); "
+                    "the pair geometry does not belong to this mask."
+                )
+            exp_i = self.pair_exp2phi[i]
+            if pack:
+                packed_i, blocks, block_of_bin = pack_patch(
+                    np.asarray(rows_i), exp_i, self.bins[i], groups
+                )
+                packed[lo:hi] = packed_i
+                sizes = np.array([blk.size for blk in blocks], dtype=np.int64)
+                starts = n_packed_rows + np.concatenate(([0], np.cumsum(sizes)))[:-1]
+                packed_row_base[i * self.nbins : (i + 1) * self.nbins] = starts[
+                    block_of_bin
+                ]
+                packed_blocks.extend(blocks)
+                n_packed_rows += int(sizes.sum())
+                if keep_unpacked:
+                    exp_i = decode_angles(packed_i[:, 2:].T, self.rotation_complex_dtype)
+            if keep_unpacked:
+                temp_inds[:, lo:hi] = rows_i
+                temp_exp2phi[:, lo:hi] = exp_i
             temp_bins[i * self.nbins : (i + 1) * self.nbins] = self.bins[i]
             temp_bins_tot[1 + i * self.nbins : 1 + (i + 1) * self.nbins] = (
-                first_patch_ind[i] + self.bins[i].cumsum()
-            )
-
-        if lut is not None and size > 0 and int(temp_inds.min()) < 0:
-            raise ValueError(
-                "Pair indices reference pixels outside the mask (map_inds); "
-                "the pair geometry does not belong to this mask."
+                first_patch_ind[i] + np.cumsum(self.bins[i], dtype=np.int64)
             )
         del lut
 
-        self.inds_dev = self.backend.to_device(temp_inds)
         module = self.backend.module
-        _index_device_dtype = getattr(module, self.index_dtype.name)
-        self.compute_context.inds_i_dev = module.ascontiguousarray(
-            self.inds_dev[0].astype(_index_device_dtype, copy=False)
-        )
-        self.compute_context.inds_j_dev = module.ascontiguousarray(
-            self.inds_dev[1].astype(_index_device_dtype, copy=False)
-        )
-        self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
+        ctx = self.compute_context
+        if keep_unpacked:
+            self.inds_dev = self.backend.to_device(temp_inds)
+            _index_device_dtype = getattr(module, self.index_dtype.name)
+            ctx.inds_i_dev = module.ascontiguousarray(
+                self.inds_dev[0].astype(_index_device_dtype, copy=False)
+            )
+            ctx.inds_j_dev = module.ascontiguousarray(
+                self.inds_dev[1].astype(_index_device_dtype, copy=False)
+            )
+            self.exp2phi_dev = self.backend.to_device(temp_exp2phi)
+        else:
+            self.inds_dev = None
+            self.exp2phi_dev = None
+            ctx.inds_i_dev = None
+            ctx.inds_j_dev = None
+        if pack:
+            ctx.packed_pairs_dev = self.backend.to_device(packed)
+            ctx.packed_row_base_dev = self.backend.to_device(packed_row_base)
+            ctx.packed_perm_dev = self.backend.to_device(
+                np.concatenate(packed_blocks).astype(np.int64)
+                if packed_blocks
+                else np.zeros(0, dtype=np.int64)
+            )
+            del packed, packed_blocks
+        else:
+            ctx.packed_pairs_dev = None
+            ctx.packed_row_base_dev = None
+            ctx.packed_perm_dev = None
         self.bins_dev = self.backend.to_device(temp_bins)
-        self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
-        self.tot_bins_reduceat_dev = self.backend.to_device(
-            temp_bins_tot.astype(np.int64, copy=False)
-        )
+        if size <= np.iinfo(self.index_dtype).max:
+            self.tot_bins_dev = self.backend.to_device(
+                temp_bins_tot.astype(self.index_dtype)
+            )
+        else:
+            self.tot_bins_dev = self.backend.to_device(temp_bins_tot)
+        self.tot_bins_reduceat_dev = self.backend.to_device(temp_bins_tot)
         self._prepare_aperture_device_buffers()
         self.ntotpairs = size
         self.compute_context.prepare_version += 1
@@ -1587,6 +1665,19 @@ class Correlation:
             self.pair_inds = None
             self.pair_exp2phi = None
             self.bins = None
+
+    def _ensure_prepared(self) -> None:
+        if self.inds_dev is None and self.compute_context.packed_pairs_dev is None:
+            self.prepare()
+
+    def _require_unpacked_pairs(self, what: str) -> None:
+        """Paths without a packed kernel need the 24 B device geometry."""
+        if self.inds_dev is None:
+            raise NotImplementedError(
+                f"{what} is not available with pack_pairs=True on a GPU backend "
+                "(only the packed shear path and the aperture statistics are); "
+                "construct the Correlation with pack_pairs=False."
+            )
 
     def compute_shear_shear(
         self,
@@ -1604,8 +1695,8 @@ class Correlation:
         If ``sumofweights`` is provided explicitly, weight fingerprint/cache
         checks are bypassed.
         """
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("compute_shear_shear")
         return_numpy = not (return_device and self.backend.name == "cupy")
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
             return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy)
@@ -1632,8 +1723,8 @@ class Correlation:
         return_device: bool = True,
     ) -> Tuple[np.ndarray]:
         """Compute scalar density-density 2PCF (w(theta)) for one map pair."""
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("compute_density_density")
 
         density1_dev = self._map_to_device(density1)
         density2_dev = self._map_to_device(density2)
@@ -1728,8 +1819,8 @@ class Correlation:
         return_device: bool = True,
     ) -> Tuple[np.ndarray]:
         """Compute scalar-shear 2PCF (gamma_t) for one lens/source map pair."""
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("compute_density_shear")
 
         density_lens_dev = self._map_to_device(density_lens)
         g1_source_dev = self._map_to_device(g1_source)
@@ -2801,8 +2892,8 @@ class Correlation:
         return reduced
 
     def _compute_xipm_sumofweights(self, w1_dev: Any, w2_dev: Any) -> Any:
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("Precomputing sums of weights")
 
         product = w1_dev[self.inds_dev[0]] * w2_dev[self.inds_dev[1]]
         return self._reduce_pairs(product.astype(self.acc_dtype, copy=False))
@@ -2868,8 +2959,8 @@ class Correlation:
     def _compute_tomo_sumofweights(
         self, w_dev: Any, nzbins: int, nzbin_combs: int
     ) -> Any:
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("Precomputing sums of weights")
 
         if int(w_dev.shape[-1]) == self.n_active:
             _, w_dev = self._expand_rows((), w_dev, "pairs")
@@ -2947,16 +3038,21 @@ class Correlation:
             )
         shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_scaled, w_dev)
 
-        inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
-        inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
-        exp_i = module.ascontiguousarray(self.exp2phi_dev[0])
-        exp_j = module.ascontiguousarray(self.exp2phi_dev[1])
         bin_offsets = module.ascontiguousarray(
             self.tot_bins_reduceat_dev.astype(module.int64, copy=False)
         )
         comb_i, comb_j, auto_comb = self._get_tomo_combination_indices(
             nzbins, nzbin_combs
         )
+        ctx = self.compute_context
+        packed_kernel = getattr(self.backend, "xipm_tomo_packed_kernel", None)
+        use_packed = ctx.packed_pairs_dev is not None and packed_kernel is not None
+        if not use_packed:
+            self._require_unpacked_pairs("The unpacked shear kernel")
+            inds_i = module.ascontiguousarray(self.inds_dev[0].astype(self._index_device_dtype, copy=False))
+            inds_j = module.ascontiguousarray(self.inds_dev[1].astype(self._index_device_dtype, copy=False))
+            exp_i = module.ascontiguousarray(self.exp2phi_dev[0])
+            exp_j = module.ascontiguousarray(self.exp2phi_dev[1])
 
         map_backend_dtype = getattr(module, self.map_dtype.name)
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
@@ -2971,19 +3067,36 @@ class Correlation:
             (2 * nzbin_combs, nbins_total), dtype=acc_backend_dtype
         )
 
-        launched = tomo_kernel(
-            shear_aos,
-            weights_aos,
-            inds_i,
-            inds_j,
-            exp_i,
-            exp_j,
-            bin_offsets,
-            comb_i,
-            comb_j,
-            out_num,
-            out_den,
-        )
+        if use_packed:
+            # Gather every patch's rows into its contiguous block.
+            perm = ctx.packed_perm_dev
+            launched = packed_kernel(
+                module.ascontiguousarray(shear_aos[perm]),
+                module.ascontiguousarray(weights_aos[perm]),
+                ctx.packed_pairs_dev,
+                bin_offsets,
+                ctx.packed_row_base_dev,
+                comb_i,
+                comb_j,
+                out_num,
+                out_den,
+            )
+            if not launched:
+                raise RuntimeError("Backend declined the packed shear kernel launch.")
+        else:
+            launched = tomo_kernel(
+                shear_aos,
+                weights_aos,
+                inds_i,
+                inds_j,
+                exp_i,
+                exp_j,
+                bin_offsets,
+                comb_i,
+                comb_j,
+                out_num,
+                out_den,
+            )
         if not launched:
             return None
 
@@ -3109,8 +3222,7 @@ class Correlation:
         return_device: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute tomographic shear 2PCFs xi+/xi-."""
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
 
         nzbins = shear_maps.shape[0]
         nzbin_combs = int(binom(nzbins + 1, 2))
@@ -3476,8 +3588,8 @@ class Correlation:
         nzbins: int,
         gc_auto_correlations_only: bool = False,
     ) -> Any:
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("vectorized_density_density")
 
         tomo_kernel = getattr(self.backend, "kernel_density_density_tomo_vectorized", None)
         if tomo_kernel is None:
@@ -3602,8 +3714,8 @@ class Correlation:
         nsource_bins: int,
         ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
     ) -> Any:
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("vectorized_density_shear")
 
         tomo_kernel = getattr(self.backend, "kernel_density_shear_tomo_vectorized", None)
         if tomo_kernel is None:
@@ -3957,8 +4069,8 @@ class Correlation:
             if flip_g2:
                 shear_np[:, 1] *= -1
 
-        if self.inds_dev is None:
-            self.prepare()
+        self._ensure_prepared()
+        self._require_unpacked_pairs("get_3x2pt_tomo")
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
         module = self.backend.module

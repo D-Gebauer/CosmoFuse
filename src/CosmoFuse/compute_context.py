@@ -31,6 +31,11 @@ class ComputeContext:
         ("tot_bins_dev", None),
         ("tot_bins_reduceat_dev", None),
         ("ntotpairs", 0),
+        # Packed pair geometry (pack_pairs=True): (npairs, 4) uint16, first
+        # packed row of every bin block, packed row -> device row gather
+        ("packed_pairs_dev", None),
+        ("packed_row_base_dev", None),
+        ("packed_perm_dev", None),
         # Row space: device copy of row_pix, host aperture row indices and
         # the (backend-specific) degrade operators of the virtual rows
         ("row_pix_dev", None),

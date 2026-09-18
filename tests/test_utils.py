@@ -214,7 +214,9 @@ class TestFilterWeightedSelection(unittest.TestCase):
         )
 
     def test_edge_hole_rejected_raw_but_accepted_weighted(self):
-        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_raw = select_patch_centers(
+            self.mask, filter_weighting="pixels", **self.kwargs
+        )
         _, t_wgt = select_patch_centers(
             self.mask, filter_weighted=True, **self.kwargs
         )
@@ -226,7 +228,9 @@ class TestFilterWeightedSelection(unittest.TestCase):
         self.assertGreater(t_wgt.size, t_raw.size)
 
     def test_hole_at_filter_peak_rejected_in_both_modes(self):
-        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_raw = select_patch_centers(
+            self.mask, filter_weighting="pixels", **self.kwargs
+        )
         _, t_wgt = select_patch_centers(
             self.mask, filter_weighted=True, **self.kwargs
         )
@@ -238,7 +242,9 @@ class TestFilterWeightedSelection(unittest.TestCase):
     def test_constant_filter_reproduces_raw_fraction(self):
         """Uniform weights make the weighted fraction identical to the raw
         pixel fraction, so the accepted sets must match exactly."""
-        p_raw, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        p_raw, t_raw = select_patch_centers(
+            self.mask, filter_weighting="pixels", **self.kwargs
+        )
         p_wgt, t_wgt = select_patch_centers(
             self.mask, filter_weighted=True,
             aperture_filter=lambda theta: np.ones_like(theta),
@@ -278,11 +284,72 @@ class TestFilterWeightedSelection(unittest.TestCase):
         )
         self.assertEqual(seen["theta_Q"], self.kwargs["theta_Q"])
 
+    def test_default_is_absolute_filter_weight(self):
+        """No argument = |Q|-weighted unmasked fraction (binary mask)."""
+        default = select_patch_centers(self.mask, **self.kwargs)
+        for same in (
+            dict(filter_weighting="abs"),
+            dict(filter_weighted=True),                       # deprecated alias
+            dict(filter_weighted=True, filter_weighting="pixels"),  # alias wins
+        ):
+            got = select_patch_centers(self.mask, **same, **self.kwargs)
+            np.testing.assert_array_equal(default[0], got[0])
+            np.testing.assert_array_equal(default[1], got[1])
+        pixels = select_patch_centers(self.mask, filter_weighting="pixels", **self.kwargs)
+        legacy = select_patch_centers(self.mask, filter_weighted=False, **self.kwargs)
+        np.testing.assert_array_equal(pixels[1], legacy[1])
+        self.assertGreater(default[1].size, pixels[1].size)
+        with self.assertRaisesRegex(ValueError, "filter_weighting"):
+            select_patch_centers(self.mask, filter_weighting="weights", **self.kwargs)
+
+    def test_signed_mode_equals_abs_for_non_negative_filters(self):
+        for flt in (None, Q_schneider):
+            a = select_patch_centers(
+                self.mask, filter_weighting="abs", aperture_filter=flt, **self.kwargs)
+            for mode in ("signed", "raw"):
+                s = select_patch_centers(
+                    self.mask, filter_weighting=mode, aperture_filter=flt, **self.kwargs)
+                np.testing.assert_array_equal(a[1], s[1])
+
+    def test_signed_mode_measures_deviation_from_compensation(self):
+        """With a compensated filter the signed mode asks how far the mask
+        pushes the aperture away from being compensated: masked regions of
+        opposite sign cancel, which the importance ("abs") mode never allows."""
+        from CosmoFuse import U_crittenden
+
+        # the filter integrates to ~0 over the support disc
+        theta = np.radians(np.linspace(0, 450, 200001) / 60)
+        integral = np.trapezoid(U_crittenden(theta, 90.0) * theta, theta)
+        peak = np.trapezoid(np.abs(U_crittenden(theta, 90.0)) * theta, theta)
+        self.assertLess(abs(integral) / peak, 1e-4)
+
+        kwargs = dict(self.kwargs, f_mask_filter=0.02)
+        abs_sel = select_patch_centers(
+            self.mask, filter_weighting="abs", aperture_filter=U_crittenden, **kwargs)
+        sgn_sel = select_patch_centers(
+            self.mask, filter_weighting="signed", aperture_filter=U_crittenden, **kwargs)
+        # |sum| <= sum|.|: everything accepted by "abs" is accepted by "signed"
+        self.assertTrue(set(map(tuple, np.c_[abs_sel])) <= set(map(tuple, np.c_[sgn_sel])))
+
+        # explicit check of both criteria for one candidate that sees the hole
+        nside = self.NSIDE_MASK
+        vec = hp.ang2vec(np.radians(19.0), 0.3)
+        disc = hp.query_disc(nside, vec, 5 * np.radians(90.0 / 60))
+        cosang = np.clip(vec @ np.asarray(hp.pix2vec(nside, disc)), -1, 1)
+        u = U_crittenden(np.arccos(cosang), 90.0)
+        masked = self.mask[disc] == 0
+        self.assertGreater(masked.sum(), 0)
+        frac_abs = np.abs(u[masked]).sum() / np.abs(u).sum()
+        frac_signed = abs(u[masked].sum()) / np.abs(u).sum()
+        self.assertLessEqual(frac_signed, frac_abs)
+
     def test_schneider_filter_ignores_holes_beyond_its_support(self):
         """The Schneider et al. (1998) filter has compact support (theta_Q),
         so a hole at ~4.5 theta_Q contributes exactly zero weight and the
         weighted check must accept the affected candidates."""
-        _, t_raw = select_patch_centers(self.mask, **self.kwargs)
+        _, t_raw = select_patch_centers(
+            self.mask, filter_weighting="pixels", **self.kwargs
+        )
         _, t_sch = select_patch_centers(
             self.mask, filter_weighted=True, aperture_filter=Q_schneider,
             **self.kwargs,

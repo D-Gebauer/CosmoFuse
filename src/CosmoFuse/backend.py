@@ -1275,6 +1275,72 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     return _cupy_tomo_vectorized_kernel
 
 
+def _build_cupy_tomo_packed_kernel(module: Any) -> Any:
+    """Builder for the combination-tiled ξ+/ξ- kernel on packed pairs
+    (8 bytes per pair, see ``cuda/tomo_packed_xipm.cu``)."""
+    kernel_cache: dict[tuple[str, int, str], Any] = {}
+
+    def _get_or_build_raw_kernel(map_c_type: str, nzbins: int, acc_c_type: str) -> Optional[Any]:
+        key = (map_c_type, nzbins, acc_c_type)
+        cached = kernel_cache.get(key, _KERNEL_CACHE_MISS)
+        if cached is not _KERNEL_CACHE_MISS:
+            return cached
+        name_expression = (
+            f"gpu_tiled_packed_reduce_xipm<{map_c_type}, {nzbins}, {acc_c_type}>"
+        )
+        source = _prepare_cuda_source("tomo_packed_xipm.cu")
+        try:
+            kernel = _compile_raw_cuda_kernel(module, source, name_expression)
+        except Exception as exc:
+            logger.warning("Packed ξ± RawKernel compilation failed: %s", exc)
+            kernel_cache[key] = None
+            return None
+        kernel_cache[key] = kernel
+        return kernel
+
+    def _cupy_tomo_packed_kernel(
+        shear_map: Any,
+        weights: Any,
+        pairs: Any,
+        bin_offsets: Any,
+        row_base: Any,
+        comb_i: Any,
+        comb_j: Any,
+        out_num: Any,
+        out_den: Any,
+    ) -> bool:
+        nzbins = int(shear_map.shape[1])
+        if nzbins > _MAX_VECTOR_TOMO_BINS or not _has_raw_cuda_compiler(module):
+            return False
+        if not _is_upper_triangle(comb_i, comb_j, nzbins):
+            return False
+        map_c_type = "float" if weights.dtype == module.float32 else "double"
+        acc_c_type = "float" if out_num.dtype == module.float32 else "double"
+        raw_kernel = _get_or_build_raw_kernel(map_c_type, nzbins, acc_c_type)
+        if raw_kernel is None:
+            return False
+        nbins_total = int(bin_offsets.shape[0] - 1)
+        ncomb = int(comb_i.shape[0])
+        raw_kernel(
+            (max(1, nbins_total), 1, 1),
+            (256,),
+            (
+                shear_map,
+                weights,
+                pairs,
+                bin_offsets,
+                row_base,
+                out_num,
+                out_den,
+                np.int32(ncomb),
+                np.int64(nbins_total),
+            ),
+        )
+        return True
+
+    return _cupy_tomo_packed_kernel
+
+
 # ── Fused 3×2pt CPU kernel ────────────────────────────────────────────────
 # CPU equivalent of the fused CUDA kernel in tomo_fused_3x2pt.cu.
 # Computes all six 3×2pt outputs (M_ap, M_g, ξ+, ξ-, ξ_g, ξ_t) in
@@ -1785,6 +1851,7 @@ class Backend:
         xipm_cross_corr_kernel: Optional[Any] = None,
         xipm_auto_corr_kernel: Optional[Any] = None,
         xipm_tomo_vectorized_kernel: Optional[Any] = None,
+        xipm_tomo_packed_kernel: Optional[Any] = None,
         aperture_density_kernel: Optional[Any] = None,
         aperture_shear_kernel: Optional[Any] = None,
         aperture_tomo_shear_kernel: Optional[Any] = None,
@@ -1801,6 +1868,7 @@ class Backend:
         self.xipm_cross_corr_kernel = xipm_cross_corr_kernel
         self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
         self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
+        self.xipm_tomo_packed_kernel = xipm_tomo_packed_kernel
         self.aperture_density_kernel = aperture_density_kernel
         self.aperture_shear_kernel = aperture_shear_kernel
         self.aperture_tomo_shear_kernel = aperture_tomo_shear_kernel
@@ -2049,6 +2117,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 xipm_cross_corr_kernel=_build_cupy_xipm_cross_corr_kernel(cupy),
                 xipm_auto_corr_kernel=_build_cupy_xipm_auto_corr_kernel(cupy),
                 xipm_tomo_vectorized_kernel=_build_cupy_tomo_vectorized_kernel(cupy),
+                xipm_tomo_packed_kernel=_build_cupy_tomo_packed_kernel(cupy),
                 aperture_density_kernel=_build_cupy_aperture_density_kernel(cupy),
                 aperture_shear_kernel=_build_cupy_aperture_shear_kernel(cupy),
                 aperture_tomo_shear_kernel=_build_cupy_aperture_tomo_shear_kernel(cupy),

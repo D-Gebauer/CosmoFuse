@@ -88,9 +88,10 @@ First create a Correlation object:
         map_precision="float32",            # float32 / float64
         rotation_precision="float32",       # float32 / float64
         accumulation_precision="float64",   # "same" / "float64"
-        resolution_factor=None,             # None = full resolution (default); e.g. 2.9 / 4 = static treecode
+        resolution_factor=None,             # None = full resolution (default); True = static treecode with k=4; or a number k
         aperture_nside=None,                # None = map resolution; e.g. 512 = aperture statistics on the degraded map
         pair_search_precision="auto",       # "float64" recommended for theta_min < ~10'
+        pack_pairs=False,                   # True: 8 instead of 24 bytes per pair on the GPU
     )
 
 For GPU runs the recommended precision configuration is
@@ -127,7 +128,13 @@ or, in one step:
         nbins=10, theta_min=10, theta_max=170,
     )
 
-With `filter_weighted=True` the aperture-mass disc check weights each pixel by the compensated filter instead of counting pixels — the masked fraction becomes $\sum_{\rm masked} |Q(\theta)| \,/\, \sum_{\rm all} |Q(\theta)|$ — so holes near the edge of the disc (where the filter carries almost no weight) no longer veto a patch, while holes at the filter peak count more. The magnitude $|Q|$ is used because compensated filters can be negative at large radii. A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the raw pixel fraction.
+The masking of the filter support disc (radius $5\,\theta_Q$) is judged with `filter_weighting`, always from the **binary** mask at its own resolution — a pixel contributes its whole filter value if it is unmasked and nothing otherwise; survey weights are never used:
+
+- `"abs"` (default): fraction of *importance* lost, $\sum_{\rm masked} |Q| \,/\, \sum_{\rm all} |Q| \le$ `f_mask_filter`. Holes near the edge of the disc (negligible filter weight) no longer veto a patch, holes at the filter peak count more.
+- `"signed"` (alias `"raw"`): deviation of the filter integral, $|\sum_{\rm masked} Q| \,/\, \sum_{\rm all} |Q|$. With a compensated filter such as `U_crittenden` / `U_schneider` (the convergence-space partners of the shipped $Q$ filters) this is how far the mask pushes the aperture away from being compensated; for the non-negative $Q$ filters it equals `"abs"`.
+- `"pixels"`: unweighted masked pixel fraction (the default before 4.21; `filter_weighted=True/False` still works as an alias for `"abs"`/`"pixels"`).
+
+A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the pixel fraction.
 
 Then Calculate pairs:
 
@@ -164,7 +171,7 @@ Pair files are written in a consolidated layout (format version 2) that loads wi
 
 **The default is full resolution** (`resolution_factor=None`): every bin is measured on the map's own pixels, exactly as in previous versions (bit-for-bit). Explicit pair geometry grows as nside⁴, though: a 110′ patch holds 0.33 M pairs at nside 512 but 81 M at nside 2048 — ~2 TB for 1000 patches.
 
-With `resolution_factor=k` bin $b$ is measured on the coarsest HEALPix level whose pixel size $p$ satisfies $p \le \theta_{\rm lo}(b)/k$. Coarse cells are built **per patch** from the unmasked map pixels inside the patch disc (the patch window stays an exact top-hat), carry the weighted mean of their members and the sum of their weights, and sit at the centroid of their members. Because $W_I W_J \gamma_I \gamma_J = \sum_{i\in I}\sum_{j\in J} w_i w_j \gamma_i \gamma_j$, no pair is dropped and no noise is added — but every fine pair is binned and rotated with the geometry of its parent cells. **This is a different (windowed) estimator; use the same `resolution_factor` for data, simulations and covariances, and never mix it with full-resolution measurements** (the two agree in the mean to the numbers below, but their per-patch noise realisations differ, since pairs move between neighbouring bins).
+`resolution_factor=True` switches the static treecode on with the default factor $k=4$ (`CosmoFuse.DEFAULT_RESOLUTION_FACTOR`); a number sets $k$ explicitly. With `resolution_factor=k` bin $b$ is measured on the coarsest HEALPix level whose pixel size $p$ satisfies $p \le \theta_{\rm lo}(b)/k$. Coarse cells are built **per patch** from the unmasked map pixels inside the patch disc (the patch window stays an exact top-hat), carry the weighted mean of their members and the sum of their weights, and sit at the centroid of their members. Because $W_I W_J \gamma_I \gamma_J = \sum_{i\in I}\sum_{j\in J} w_i w_j \gamma_i \gamma_j$, no pair is dropped and no noise is added — but every fine pair is binned and rotated with the geometry of its parent cells. **This is a different (windowed) estimator; use the same `resolution_factor` for data, simulations and covariances, and never mix it with full-resolution measurements** (the two agree in the mean to the numbers below, but their per-patch noise realisations differ, since pairs move between neighbouring bins).
 
 Measured on nside-2048 maps with the DES Y3 mask (5′–250′, 11 bins, 110′ patches; signal ratio to full resolution as a function of the effective $k_{\rm eff}=\theta_{\rm lo}/p \in [k, 2k)$):
 
@@ -194,6 +201,8 @@ With $\sqrt 2$-spaced bin edges (e.g. `theta_min=5`, `theta_max=5*2**5.5`, `nbin
     corr.level_table        # nside and k_eff per bin -- store it with every data vector
 
 Before pair finding a **preflight check** projects the pair memory from the mask and raises a `MemoryError` that names a `resolution_factor` that fits (budget: free device memory, or `memory_budget_gb=`), instead of failing with an out-of-memory error an hour into preprocessing. `load_pairs` adopts the resolution stored in the pair file and raises if the constructor explicitly asked for a different one.
+
+**Pair packing (`pack_pairs=True`).** On the device a pair normally costs 24 bytes (two int32 rows + two complex64 rotation factors). Packed it costs 8: the rotation factors have unit modulus, so only their angle is kept (uint16, resolution $2\pi/65536$), and the row indices become uint16 indices local to the row block of their patch and resolution level (the map rows of every patch are gathered into contiguous blocks once per map). Three times more pairs fit on the GPU — a higher `resolution_factor` or a denser patch grid — at unchanged speed (A100: 14.5 → 5.2 GB for nside 2048, 917 patches, $k=2.9$). It is not bit-identical: on real DES Y3 maps every per-patch estimate moves by $3\times10^{-5}$ (rms; max $2\times10^{-4}$) of its own patch-to-patch scatter, with no bias (mean shift $<10^{-7}\sigma$), and the same holds for patch averages and the i3PCFs — the error is a fixed tiny fraction of the statistical error at every level of averaging. Pair files and host arrays stay exact; the CPU backend uses the same quantised rotations, so both backends measure the same estimator. On GPU backends the packed geometry currently serves the shear path (`vectorized_shear_shear`, `get_full_tomo_shear`) and the aperture statistics; the other methods raise.
 
 At small scales also set `pair_search_precision="float64"` (automatic with `resolution_factor`): a float32 pair search resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin. The stored rotation factors stay at `rotation_precision`, so this costs no memory.
 

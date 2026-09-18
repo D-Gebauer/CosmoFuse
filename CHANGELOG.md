@@ -7,7 +7,9 @@ returns bit-for-bit the results of 4.20.0 (verified on CPU, and on an A100
 against 4.20.0 on the DES Y3 production geometry with real maps).
 
 ### Added
-- **Static treecode** (`Correlation(..., resolution_factor=k)`, opt-in). Every
+- **Static treecode** (`Correlation(..., resolution_factor=True)` for the
+  default `k = 4`, or `resolution_factor=k`; opt-in, default `None` = full
+  resolution). Every
   angular bin is measured on the coarsest HEALPix level whose pixel size is
   `<= theta_lo / k`; coarse cells are built per patch (exact top-hat patch
   window), carry weighted means / weight sums, and sit at the binary-mask
@@ -30,6 +32,13 @@ against 4.20.0 on the DES Y3 production geometry with real maps).
 - **Combination-tiled GPU xi+- kernel** (default; `kernel.tiled = False`
   restores the per-row kernel): one pass over the pairs for all tomographic
   combinations, bit-identical results, 4.2–4.5x faster on an A100.
+- **Payload packing** (`pack_pairs=True`, opt-in): 8 instead of 24 bytes per
+  pair on the device (uint16 rotation angles + uint16 patch-local row indices,
+  per-patch contiguous row blocks; kernel `gpu_tiled_packed_reduce_xipm`).
+  A100: pair memory 6.6 → 2.3 GB (nside 512 production), 14.5 → 5.2 GB
+  (nside 2048, k = 2.9), speed unchanged; GPU vs CPU 5e-15. Not bit-identical
+  to unpacked: estimates move by 3e-5 (rms) of their patch scatter, unbiased.
+  Shear path + aperture statistics only on GPU for now.
 - `RowSpaceMapLoader`: reader threads + ring of pinned buffers + upload
   stream; results identical to the serial loop, GPU idle < 5 %.
 - `pair_search_precision=`: precision of the pair search, decoupled from the
@@ -39,6 +48,12 @@ against 4.20.0 on the DES Y3 production geometry with real maps).
   logged when that exceeds 1 % at `theta_min`.
 
 ### Changed
+- **Patch selection default** (`select_patch_centers`, `Correlation.from_mask`):
+  the filter-support masking check now uses the |filter|-weighted masked
+  fraction by default (`filter_weighting="abs"`); `"signed"`/`"raw"` measures
+  the deviation of the filter integral instead, `"pixels"` restores the old
+  default. Always from the binary mask. New `U_crittenden`, `U_schneider`.
+  Explicitly passed patch centres and existing pair files are unaffected.
 - Map arrays whose last axis is neither `npix` nor `n_active` now raise a
   `ValueError` (previously undefined behaviour / out-of-bounds gathers on GPU).
 - Pair file format: files **with virtual rows** are written as
@@ -50,6 +65,8 @@ against 4.20.0 on the DES Y3 production geometry with real maps).
   now rejected.
 
 ### Fixed
+- Cumulative pair offsets were built as int32 and overflowed beyond 2^31
+  pairs; now int64.
 - `PinnedMapPipeline`: (i) a pinned host slot could be refilled while its
   previous asynchronous copy was still queued, and (ii) the upload stream did
   not wait for queued kernels that still read the device slot it overwrites.

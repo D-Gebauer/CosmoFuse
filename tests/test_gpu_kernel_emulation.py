@@ -28,6 +28,7 @@ from CosmoFuse.backend import (
     _build_cupy_aperture_tomo_shear_kernel,
     _build_cupy_density_density_tomo_vectorized_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
+    _build_cupy_tomo_packed_kernel,
     _build_cupy_tomo_vectorized_kernel,
 )
 from CosmoFuse.correlations import Correlation
@@ -36,6 +37,7 @@ from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 
 _EMULATED_KERNEL_ATTRS = (
     "xipm_tomo_vectorized_kernel",
+    "xipm_tomo_packed_kernel",
     "kernel_density_density_tomo_vectorized",
     "kernel_density_shear_tomo_vectorized",
     "aperture_tomo_shear_kernel",
@@ -45,6 +47,7 @@ _EMULATED_KERNEL_ATTRS = (
 
 _BUILDERS = {
     "xipm_tomo_vectorized_kernel": _build_cupy_tomo_vectorized_kernel,
+    "xipm_tomo_packed_kernel": _build_cupy_tomo_packed_kernel,
     "kernel_density_density_tomo_vectorized": _build_cupy_density_density_tomo_vectorized_kernel,
     "kernel_density_shear_tomo_vectorized": _build_cupy_density_shear_tomo_vectorized_kernel,
     "aperture_tomo_shear_kernel": _build_cupy_aperture_tomo_shear_kernel,
