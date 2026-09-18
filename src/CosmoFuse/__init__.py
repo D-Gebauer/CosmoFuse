@@ -26,7 +26,7 @@ from .pipeline import PinnedMapPipeline, RowSpaceMapLoader
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 
-__version__ = "4.21.0"
+__version__ = "5.0.0"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 

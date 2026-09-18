@@ -1,12 +1,27 @@
 # Changelog
 
-## 4.21.0 (unreleased)
+## 5.0.0 (2026-09-18)
 
-With default arguments the auto-combination results of every public method
-are bit-for-bit those of 4.20.0 (verified on CPU, and on an A100 against
-4.20.0 on the DES Y3 production geometry with real maps). Two deliberate
-default changes: the cross-bin xi+- estimator (ratio of the orientation sums,
-see *Changed*) and the pair search precision (float64).
+Major release: static treecode, compact row space, combination-tiled and
+packed GPU kernels for every pair statistic, ring-buffer map loader.
+
+**Breaking / result-changing (hence 5.0):**
+- cross-bin xi+- is now the ratio of the summed orientations (was the mean of
+  the two orientation ratios) — see *Changed*;
+- the pair search runs at float64 by default (`pair_search_precision`);
+- `select_patch_centers` / `Correlation.from_mask` select patches by
+  |filter|-weighted masked fraction by default;
+- map arrays of the wrong length raise; pair files with virtual rows use
+  format version 3 (unreadable by <= 4.20 by design);
+- internal kernel contracts changed (one output row per combination; the
+  GPU `kernel_3x2pt_tomo_fused` wrapper became `kernel_3x2pt_tomo_aperture` +
+  `kernel_3x2pt_tomo_pairs`).
+
+Unchanged: with explicit patch centres and `pair_search_precision="rotation"`
+the auto-combination results of every public method are bit-for-bit those of
+4.20.0 (verified on CPU, and on an A100 against 4.20.0 on the DES Y3
+production geometry with real maps); existing full-resolution pair files
+load as before.
 
 ### Added
 - **Static treecode** (`Correlation(..., resolution_factor=True)` for the
@@ -104,9 +119,13 @@ see *Changed*) and the pair search precision (float64).
   the GPU. Covered by a CUDA stream simulator test (`tests/cuda_stream_sim.py`).
 
 ### Performance (A100 80 GB, DES Y3, 917 patches, 4 source bins, float32 maps + float64 accumulators)
-| workload | 4.20.0 | 4.21.0 |
+| workload | 4.20.0 | 5.0.0 |
 |---|---|---|
 | nside 512, 15'–176', full resolution, real maps from disk (bit-identical results) | 157 ms / map-set | 26 ms |
 | same, `resolution_factor=4` | — | 11.5 ms |
 | same, `resolution_factor=2.9` | — | 9.1 ms |
 | nside 2048, 5'–175', `resolution_factor=2.9`, `aperture_nside=512` | impossible (~1.7 TB) | 78 ms (17.7 GB) |
+| `get_full_tomo_density`, nside 512, 4 lens bins, row-space host input (4.20 column: its per-row kernels) | 31.5 ms | 8.4 ms |
+| `get_full_tomo_ggl`, 4 lens x 4 source bins | 96.4 ms | 23.6 ms |
+| `get_3x2pt_tomo`, 4 + 4 bins | 203 ms | 38.7 ms |
+| `get_3x2pt_tomo`, nside 2048, `resolution_factor=2.9`, packed | impossible | 266 ms |

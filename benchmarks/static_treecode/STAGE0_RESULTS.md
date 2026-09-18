@@ -121,7 +121,7 @@ shapes (§8.4), tiling of the fused-3x2pt / ds / dd kernels, coverage chunking
 
 `stage7_gpu_tiles.py`, A100 (idle), DES Y3 Q110 (917 patches), 4 source + 4
 lens bins, float32 maps + float64 accumulators, host input, synchronised
-wall time per map-set (median of 8). "per-row" = the 4.21 kernels before
+wall time per map-set (median of 8). "per-row" = the 5.0 kernels before
 this stage for ξ_g / ξ_t / 3x2pt (one block per bin × combination ×
 orientation); "tiled" = one block per bin, every pair once
 (`cuda/pair_tiles.cuh`); the fused 3x2pt path now launches the same three

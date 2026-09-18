@@ -90,7 +90,7 @@ First create a Correlation object:
         accumulation_precision="float64",   # "same" / "float64"
         resolution_factor=None,             # None = full resolution (default); True = static treecode with k=4; or a number k
         aperture_nside=None,                # None = map resolution; e.g. 512 = aperture statistics on the degraded map
-        pair_search_precision="float64",    # pair search precision ("rotation" = pre-4.21 float32)
+        pair_search_precision="float64",    # pair search precision ("rotation" = pre-5.0 float32)
         pack_pairs=False,                   # True: 8 instead of 24 bytes per pair on the GPU
     )
 
@@ -132,7 +132,7 @@ The masking of the filter support disc (radius $5\,\theta_Q$) is judged with `fi
 
 - `"abs"` (default): fraction of *importance* lost, $\sum_{\rm masked} |Q| \,/\, \sum_{\rm all} |Q| \le$ `f_mask_filter`. Holes near the edge of the disc (negligible filter weight) no longer veto a patch, holes at the filter peak count more.
 - `"signed"` (alias `"raw"`): deviation of the filter integral, $|\sum_{\rm masked} Q| \,/\, \sum_{\rm all} |Q|$. With a compensated filter such as `U_crittenden` / `U_schneider` (the convergence-space partners of the shipped $Q$ filters) this is how far the mask pushes the aperture away from being compensated; for the non-negative $Q$ filters it equals `"abs"`.
-- `"pixels"`: unweighted masked pixel fraction (the default before 4.21; `filter_weighted=True/False` still works as an alias for `"abs"`/`"pixels"`).
+- `"pixels"`: unweighted masked pixel fraction (the default before 5.0; `filter_weighted=True/False` still works as an alias for `"abs"`/`"pixels"`).
 
 A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the pixel fraction.
 
@@ -169,7 +169,7 @@ Pair files are written in a consolidated layout (format version 2) that loads wi
 
 ### Choosing the resolution (`resolution_factor`)
 
-**The default is full resolution** (`resolution_factor=None`): every bin is measured on the map's own pixels, exactly as in previous versions (bit-for-bit). Explicit pair geometry grows as nside⁴, though: a 110′ patch holds 0.33 M pairs at nside 512 but 81 M at nside 2048 — ~2 TB for 1000 patches.
+**The default is full resolution** (`resolution_factor=None`): every bin is measured on the map's own pixels, exactly as in previous versions (auto-combinations bit-for-bit; 5.0 changed the cross-bin $\xi_\pm$ estimator and the pair-search precision, see the changelog). Explicit pair geometry grows as nside⁴, though: a 110′ patch holds 0.33 M pairs at nside 512 but 81 M at nside 2048 — ~2 TB for 1000 patches.
 
 `resolution_factor=True` switches the static treecode on with the default factor $k=4$ (`CosmoFuse.DEFAULT_RESOLUTION_FACTOR`); a number sets $k$ explicitly. With `resolution_factor=k` bin $b$ is measured on the coarsest HEALPix level whose pixel size $p$ satisfies $p \le \theta_{\rm lo}(b)/k$. Coarse cells are built **per patch** from the unmasked map pixels inside the patch disc (the patch window stays an exact top-hat), carry the weighted mean of their members and the sum of their weights, and sit at the centroid of their members. Because $W_I W_J \gamma_I \gamma_J = \sum_{i\in I}\sum_{j\in J} w_i w_j \gamma_i \gamma_j$, no pair is dropped and no noise is added — but every fine pair is binned and rotated with the geometry of its parent cells. **This is a different (windowed) estimator; use the same `resolution_factor` for data, simulations and covariances, and never mix it with full-resolution measurements** (the two agree in the mean to the numbers below, but their per-patch noise realisations differ, since pairs move between neighbouring bins).
 
@@ -204,7 +204,7 @@ Before pair finding a **preflight check** projects the pair memory from the mask
 
 **Pair packing (`pack_pairs=True`).** On the device a pair normally costs 24 bytes (two int32 rows + two complex64 rotation factors). Packed it costs 8: the rotation factors have unit modulus, so only their angle is kept (uint16, resolution $2\pi/65536$), and the row indices become uint16 indices local to the row block of their patch and resolution level (the map rows of every patch are gathered into contiguous blocks once per map). Three times more pairs fit on the GPU — a higher `resolution_factor` or a denser patch grid — at unchanged speed (A100: 14.5 → 5.2 GB for nside 2048, 917 patches, $k=2.9$). It is not bit-identical: on real DES Y3 maps every per-patch estimate moves by $3\times10^{-5}$ (rms; max $2\times10^{-4}$) of its own patch-to-patch scatter, with no bias (mean shift $<10^{-7}\sigma$), and the same holds for patch averages and the i3PCFs — the error is a fixed tiny fraction of the statistical error at every level of averaging. Pair files and host arrays stay exact; the CPU backend uses the same quantised rotations, so both backends measure the same estimator. On GPU backends the packed geometry serves every tomographic method (`vectorized_shear_shear`, `vectorized_density_density`, `vectorized_density_shear`, `get_full_tomo_*`, `get_3x2pt_tomo`) and the aperture statistics; only the single-map `compute_*` methods need `pack_pairs=False`.
 
-The pair search runs at float64 by default (`pair_search_precision="float64"`, no memory cost: the stored rotation factors stay at `rotation_precision`). The pre-4.21 search at rotation precision (`"rotation"`, float32 by default) resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin; even at nside 512 / 15′ it moves per-patch estimates by 0.05 σ (rms, up to 0.9 σ) against the exact result.
+The pair search runs at float64 by default (`pair_search_precision="float64"`, no memory cost: the stored rotation factors stay at `rotation_precision`). The pre-5.0 search at rotation precision (`"rotation"`, float32 by default) resolves separations only to $\delta\theta/\theta \approx 6\times10^{-8}/\theta^2$ — 0.3 % at 15′ but 3 % at 5′, where it puts ~4 % of the pairs into the wrong bin; even at nside 512 / 15′ it moves per-patch estimates by 0.05 σ (rms, up to 0.9 σ) against the exact result.
 
 ### Aperture filters
 
@@ -276,7 +276,7 @@ xi_t, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_le
 
 Calculate all correlations for all requested tomographic bin combinations at once.
 
-For a cross combination $(i, j)$, $i \ne j$, every pixel pair contributes in both orientations (bin $i$ at pixel $a$ and bin $j$ at pixel $b$, and vice versa); the estimator is the ratio of the summed orientations, $\xi_{ij} = (N_{ab} + N_{ba}) / (W_{ab} + W_{ba})$, for $\xi_\pm$, $w(\theta)$ and $\gamma_t$ alike — the standard weighted estimator and TreeCorr's definition (before 4.21 $\xi_\pm$ averaged the two orientation ratios instead). On the GPU every tomographic method walks the pairs once per statistic (combination-tiled kernels) and works on packed pairs.
+For a cross combination $(i, j)$, $i \ne j$, every pixel pair contributes in both orientations (bin $i$ at pixel $a$ and bin $j$ at pixel $b$, and vice versa); the estimator is the ratio of the summed orientations, $\xi_{ij} = (N_{ab} + N_{ba}) / (W_{ab} + W_{ba})$, for $\xi_\pm$, $w(\theta)$ and $\gamma_t$ alike — the standard weighted estimator and TreeCorr's definition (before 5.0 $\xi_\pm$ averaged the two orientation ratios instead). On the GPU every tomographic method walks the pairs once per statistic (combination-tiled kernels) and works on packed pairs.
 
 **Specific Probes**:
 
@@ -335,6 +335,8 @@ M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
     weights={"shear": shear_w, "density": density_w},
 )
 ```
+
+On the GPU this call uploads and degrades the maps once and walks the pairs **once** for $\xi_\pm$, $w(\theta)$ and $\gamma_t$ together (A100, DES Y3, 917 patches, 4 source + 4 lens bins: 39 ms per map-set at nside 512, against 203 ms in 4.20; 266 ms at nside 2048 with `resolution_factor=2.9`). Beyond ~120 accumulators per GPU thread (e.g. more than 4 source × 6 lens bins with all clustering cross-combinations) it falls back to one pass per statistic.
 
 **Measuring many maps (GPU)**:
 

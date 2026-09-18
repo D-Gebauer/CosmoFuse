@@ -112,7 +112,7 @@ def select_patch_centers(
             identical to ``"abs"``.
 
             ``"pixels"`` -- unweighted masked pixel fraction (the behaviour
-            before 4.21).
+            before 5.0).
 
             The patch-disc (2PCF) check always uses the pixel fraction.
         filter_weighted: Deprecated alias: ``True`` = ``"abs"``, ``False`` =

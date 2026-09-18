@@ -6,7 +6,7 @@ density maps, 4 + 4 tomographic bins):
   * parity: tiled vs per-row kernels (unpacked), packed vs unpacked, and
     GPU float64 vs CPU float64 on a 24-patch subset (packed and unpacked);
   * per-map-set wall time of get_full_tomo_shear / density / ggl and
-    get_3x2pt_tomo for per-row (4.21 before this stage), tiled, tiled+packed.
+    get_3x2pt_tomo for per-row (5.0 before this stage), tiled, tiled+packed.
 
 Part B (nside 2048, k = 2.9 pair file from stage 4, packed): the same
 timings, plus device memory.

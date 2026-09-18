@@ -394,7 +394,7 @@ class Correlation:
                 (separations, binning, position angles); the stored
                 rotation factors always use ``rotation_precision``.
                 ``"float64"`` (default) searches at double precision at no
-                memory cost.  ``"rotation"`` is the historical (< 4.21)
+                memory cost.  ``"rotation"`` is the historical (< 5.0)
                 behaviour, a search at rotation precision, i.e. float32 by
                 default: on the DES nside-512 production geometry it
                 mis-bins pairs at the 0.05 sigma (rms) / 0.9 sigma (max)
