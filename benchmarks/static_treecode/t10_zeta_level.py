@@ -38,7 +38,7 @@ MASK_FILE = "~/research/lfi/local/DESY3_Mask.fits"
 NSIDE = 512
 
 
-def build_correlation(args, resolution_factor):
+def build_correlation(args, resolution_factor, aperture_nside=None):
     from CosmoFuse import Correlation
 
     mask = hp.ud_grade(hp.read_map(os.path.expanduser(MASK_FILE)), NSIDE)
@@ -64,15 +64,18 @@ def build_correlation(args, resolution_factor):
         map_precision="float32",
         accumulation_precision="float64",
         resolution_factor=resolution_factor,
+        aperture_nside=aperture_nside,
     )
     return corr, map_inds, edges
 
 
 def measure(args):
     tag = "fine" if args.k is None else f"k{args.k:g}"
+    if args.aperture_nside is not None:
+        tag += f"_ap{args.aperture_nside}"
     if args.f16:
         tag += "_f16"
-    corr, map_inds, edges = build_correlation(args, args.k)
+    corr, map_inds, edges = build_correlation(args, args.k, args.aperture_nside)
     print(f"[{tag}] {corr.n_patches} patches, {corr.nbins} bins "
           f"{edges[0]:.1f}-{edges[-1]:.1f}'", flush=True)
     if getattr(corr, "level_table", None) is not None:
@@ -156,7 +159,11 @@ def zeta_per_patch(M, xi):
 
 def analyse(args):
     tag_a = args.a or "fine"
-    tag_b = args.b or f"k{args.k:g}"
+    tag_b = args.b
+    if tag_b is None:
+        tag_b = "fine" if args.k is None else f"k{args.k:g}"
+        if args.aperture_nside is not None:
+            tag_b += f"_ap{args.aperture_nside}"
     fine = np.load(os.path.join(args.outdir, f"t10_{tag_a}.npz"))
     coarse = np.load(os.path.join(args.outdir, f"t10_{tag_b}.npz"))
     edges = fine["edges"]
@@ -172,6 +179,10 @@ def analyse(args):
     W(f"Timing: {float(fine['ms_per_mapset']):.1f} ms/map-set for `{tag_a}`, "
       f"{float(coarse['ms_per_mapset']):.1f} ms for `{tag_b}` (whole host "
       f"loop: slicing + cast + upload + M_ap + xi+-).")
+    for name, npz in ((tag_a, fine), (tag_b, coarse)):
+        ap_n = json.loads(str(npz["level_table"])).get("aperture_nside")
+        W(f"`{name}`: aperture_nside = "
+          f"{ap_n if ap_n else 'full resolution'}.")
     lt = json.loads(str(coarse["level_table"]))
     if lt:
         W(f"Level table: nside per bin {lt.get('nside')}, "
@@ -251,6 +262,9 @@ def main():
     ap.add_argument("--analyse", action="store_true")
     ap.add_argument("--k", type=float, default=None,
                     help="resolution_factor (omit for full resolution)")
+    ap.add_argument("--aperture-nside", type=int, default=None,
+                    help="evaluate M_ap on the map degraded to this nside "
+                         "(T12; omit for the full-resolution aperture)")
     ap.add_argument("--radius", type=int, default=110)
     ap.add_argument("--theta-min", type=float, default=15.0)
     ap.add_argument("--theta-max", type=float, default=250.0)

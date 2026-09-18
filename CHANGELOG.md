@@ -1,6 +1,32 @@
 # Changelog
 
-## Unreleased
+## 6.1.0 (2026-09-18)
+
+### Measured (no library change)
+- **The aperture pass: both of its levers, quantified.** `gpu_aperture_shear_tomo`
+  is the largest non-pair item in `get_full_tomo_shear` (0.450 ms of 1.796 ms at
+  nside 512) and the only one the treecode does not shrink. Two benchmarks
+  settle what can be done about it; results in
+  `benchmarks/static_treecode/APERTURE_RESULTS.md`.
+  - `benchmarks/static_treecode/aperture_reuse_probe.py` (new) answers whether
+    the kernel really pays for re-reading the disc geometry once per tomographic
+    bin. `ncu` cannot say -- performance counters need root on the A100 node
+    (`ERR_NVGPUCTRPERM`) -- so it compiles probe kernels and measures the end
+    state instead. It does pay: one block per patch instead of one per
+    (patch, bin) is **1.75x** at nside 512 (0.451 -> 0.258 ms) and **2.08x** at
+    nside 2048, exactly the 112 -> 64 B/pixel traffic ratio, and **bitwise
+    identical** to the shipped kernel in every configuration. AoS wins only at
+    nside-2048-sized discs, so the scope-chosen layout stays as it is. The
+    kernel itself is NOT changed here.
+  - `t10_zeta_level.py` gained `--aperture-nside`, so the zeta price of a coarse
+    aperture can be measured the way T10 measured the price of a coarse pair
+    level. With `resolution_factor=None` only M_ap moves: base 512 -> aperture
+    128 costs **0.07 sigma_patch** (aperture 256: 0.04), against the 0.27
+    sigma_patch at which treecode k = 2.9 was accepted. That run is 4x more
+    aggressive in pixel/theta_Q than pinning the aperture to 512 at base nside
+    2048, which is therefore safe by a wide margin -- and worth **20x** on that
+    pass (9.10 -> 0.455 ms). Unlike `resolution_factor` the effect is flat in
+    theta, so the two knobs are not interchangeable.
 
 ### Performance
 - **The row expansion writes the kernels' layout, and carries the sign
