@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Topic :: Scientific/Engineering :: Physics",
 ]
@@ -31,13 +32,12 @@ dependencies = [
     "numba>=0.50.0",
     "healpy>=1.10.0",
     "h5py>=3.0.0",
-    "matplotlib>=3.5.0",
     "tqdm",
 ]
 
 [project.optional-dependencies]
 gpu = [
-    "cupy>=10.0.0",
+    "cupy>=13.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
