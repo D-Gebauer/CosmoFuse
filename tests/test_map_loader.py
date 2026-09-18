@@ -176,29 +176,6 @@ class TestMapFileLoader(unittest.TestCase):
         with self.assertRaises(ValueError):
             MapFileLoader(self.corr, {}, sources=[], read_fn=None, n_slots=1)
 
-    def test_deprecated_aliases_still_work(self):
-        """The 5.0 names keep working, with a DeprecationWarning."""
-        from types import SimpleNamespace
-
-        from CosmoFuse import (
-            MapFileLoader as NewFile,
-            MapLoader as New,
-            PinnedMapPipeline,
-            RowSpaceMapLoader,
-        )
-
-        self.assertTrue(issubclass(PinnedMapPipeline, New))
-        self.assertTrue(issubclass(RowSpaceMapLoader, NewFile))
-        corr = SimpleNamespace(
-            backend=self.corr.backend, map_dtype=np.dtype(np.float64)
-        )
-        with self.assertWarnsRegex(DeprecationWarning, "PinnedMapPipeline"):
-            PinnedMapPipeline(corr, {"m": (3, 20)})
-        with self.assertWarnsRegex(DeprecationWarning, "RowSpaceMapLoader"):
-            RowSpaceMapLoader(
-                self.corr, {"m": (3, 20)}, sources=[], read_fn=lambda s, o: None
-            )
-
     def test_to_row_space(self):
         full = np.zeros((2, 2, NPIX))
         full[..., self.corr.row_pix] = self.archive[0]

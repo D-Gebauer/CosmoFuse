@@ -276,27 +276,3 @@ class MapFileLoader:
                 t.join()
             if self._gpu:
                 self.backend.module.cuda.get_current_stream().synchronize()
-
-
-# Names used up to 5.0.  Kept so existing scripts keep running; they warn
-# once and will be removed in a future release.
-def _deprecated_alias(new: Any, old_name: str) -> Any:
-    import warnings
-
-    class _Alias(new):  # type: ignore[misc, valid-type]
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            warnings.warn(
-                f"{old_name} was renamed to {new.__name__}; "
-                f"the old name will be removed in a future release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            super().__init__(*args, **kwargs)
-
-    _Alias.__name__ = old_name
-    _Alias.__qualname__ = old_name
-    return _Alias
-
-
-PinnedMapPipeline = _deprecated_alias(MapLoader, "PinnedMapPipeline")
-RowSpaceMapLoader = _deprecated_alias(MapFileLoader, "RowSpaceMapLoader")

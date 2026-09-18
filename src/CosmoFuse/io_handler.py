@@ -16,8 +16,9 @@ class PairIOHandler:
 
     Format version 2 (written by :meth:`save_pairs`) stores consolidated
     flat datasets with per-patch offset arrays, so loading is a handful
-    of bulk reads instead of ~8 small datasets per patch.  Files written
-    by older versions (one group per patch) are still readable.
+    of bulk reads instead of ~8 small datasets per patch.  It is the
+    oldest version this CosmoFuse reads; version 1 (one HDF5 group per
+    patch) was dropped in 6.0.
 
     Format version 3 is written only when virtual rows exist (static
     treecode and/or a coarse aperture level).  Its index datasets use
@@ -36,6 +37,7 @@ class PairIOHandler:
     """
 
     FORMAT_VERSION = 4
+    MIN_FORMAT_VERSION = 2
     PACKED_FORMAT_VERSION = 4
     TREECODE_FORMAT_VERSION = 3
     FULL_RESOLUTION_FORMAT_VERSION = 2
@@ -230,6 +232,13 @@ class PairIOHandler:
                     f"CosmoFuse reads versions <= {PairIOHandler.FORMAT_VERSION}. "
                     "Update CosmoFuse."
                 )
+            if version < PairIOHandler.MIN_FORMAT_VERSION:
+                raise ValueError(
+                    f"{filepath} has pair-file format version {version} (one "
+                    "HDF5 group per patch), which CosmoFuse dropped in 6.0. "
+                    "Recompute the pairs, or convert the file with CosmoFuse "
+                    "5.x (load_pairs followed by save_pairs)."
+                )
             if stop_ind is None:
                 stop_ind = fp.attrs["n_patches"]
             owner.nside = fp.attrs["nside"]
@@ -250,10 +259,7 @@ class PairIOHandler:
             owner.theta_center = fp["theta_center"][start_ind:stop_ind]
 
             PairIOHandler._load_resolution(owner, fp, filepath)
-            if version >= 2:
-                PairIOHandler._load_pairs_v2(owner, fp, start_ind, stop_ind)
-            else:
-                PairIOHandler._load_pairs_legacy(owner, fp, start_ind, stop_ind)
+            PairIOHandler._load_pairs_v2(owner, fp, start_ind, stop_ind)
         owner.prepare(release_host_pairs=release_host_pairs)
 
     @staticmethod
@@ -346,8 +352,7 @@ class PairIOHandler:
             owner.rotation_dtype, copy=False
         )
 
-        # Per-patch host lists are zero-copy views into the flat arrays,
-        # keeping the same object model as the legacy path.
+        # Per-patch host lists are zero-copy views into the flat arrays.
         if packed:
             owner.pair_inds = None
             owner.pair_exp2phi = None
@@ -461,32 +466,3 @@ class PairIOHandler:
         shift = new_starts[level] - old_starts[level] - full.cell_offsets[level, start_ind]
         out[virtual] = a + shift + npix
         return out.astype(owner.index_dtype, copy=False)
-
-    @staticmethod
-    def _load_pairs_legacy(
-        owner: "Correlation", fp: "h5py.File", start_ind: int, stop_ind: int
-    ) -> None:
-        owner.pair_inds = []
-        owner.pair_exp2phi = []
-        owner.bins = []
-        owner.Q_inds = []
-        owner.Q_cos = []
-        owner.Q_sin = []
-        owner.Q_val = []
-        owner.Q_patch_area = []
-
-        for i in range(start_ind, stop_ind):
-            gp = fp[f"patch_{i:02d}"]
-            owner.pair_inds.append(
-                gp["pair_inds"][:].astype(owner.index_dtype, copy=False)
-            )
-            owner.pair_exp2phi.append(
-                gp["pair_exp2phi"][:].astype(owner.rotation_complex_dtype, copy=False)
-            )
-            owner.bins.append(gp["bins"][:].astype(owner.index_dtype, copy=False))
-            owner.Q_inds.append(gp["Q_inds"][:].astype(owner.index_dtype, copy=False))
-            owner.Q_cos.append(gp["Q_cos"][:].astype(owner.rotation_dtype, copy=False))
-            owner.Q_sin.append(gp["Q_sin"][:].astype(owner.rotation_dtype, copy=False))
-            owner.Q_val.append(gp["Q_val"][:].astype(owner.rotation_dtype, copy=False))
-            owner.Q_patch_area.append(owner.rotation_dtype.type(gp["Q_patch_area"][()]))
-        owner._prepare_aperture_flat()

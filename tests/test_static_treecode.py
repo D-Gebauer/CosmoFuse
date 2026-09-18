@@ -287,17 +287,6 @@ class TestOptionPlumbing(TreecodeBase):
         for x, y in zip(a, b):
             self.assertTrue(np.array_equal(x, y))
 
-    def test_old_pickle_state_defaults_to_full_resolution(self):
-        state = make_corr(self.mask).__getstate__()
-        for key in ("resolution_factor", "level_nside", "aperture_nside",
-                    "memory_budget_gb", "_treecode"):
-            state.pop(key)
-        old = Correlation.__new__(Correlation)
-        old.__setstate__(state)
-        self.assertIsNone(old.resolution_factor)
-        self.assertTrue(np.all(old.level_nside == NSIDE))
-        self.assertEqual(old.n_appended, 0)
-
     def test_preflight_fires_before_pair_finding(self):
         from CosmoFuse.pair_geometry import PairGeometry
 
@@ -334,16 +323,14 @@ class TestPairSearchPrecision(unittest.TestCase):
         mask = make_mask()
         default = make_corr(mask, rotation_precision="float32")
         self.assertEqual(default._pair_finder.search_dtype, np.float64)  # default
-        legacy = make_corr(mask, rotation_precision="float32", pair_search_precision="rotation")
-        self.assertEqual(legacy._pair_finder.search_dtype, np.float32)  # historical
-        self.assertEqual(
-            make_corr(mask, rotation_precision="float32", pair_search_precision="auto")
-            ._pair_finder.search_dtype, np.float32)  # auto = historical at full resolution
-        tree32 = make_corr(mask, resolution_factor=2.0, rotation_precision="float32",
-                           pair_search_precision="auto")
-        self.assertEqual(tree32._pair_finder.search_dtype, np.float64)  # auto + treecode
-        with self.assertRaisesRegex(ValueError, "pair_search_precision"):
-            make_corr(mask, pair_search_precision="float16")
+        coarse = make_corr(mask, rotation_precision="float32",
+                           pair_search_precision="float32")
+        self.assertEqual(coarse._pair_finder.search_dtype, np.float32)
+        tree32 = make_corr(mask, resolution_factor=2.0, rotation_precision="float32")
+        self.assertEqual(tree32._pair_finder.search_dtype, np.float64)
+        for bad in ("float16", "rotation", "auto"):
+            with self.assertRaisesRegex(ValueError, "pair_search_precision"):
+                make_corr(mask, pair_search_precision=bad)
 
         # float64 search + float32 storage: same pairs as the float64 geometry,
         # rotation factors rounded to float32
@@ -362,11 +349,11 @@ class TestPairSearchPrecision(unittest.TestCase):
     def test_small_scale_float32_search_warns(self):
         with self.assertLogs("CosmoFuse.correlations", level="WARNING") as logs:
             Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu",
-                        pair_search_precision="rotation")
+                        pair_search_precision="float32")
         self.assertIn("pair_search_precision='float64'", logs.output[0])
         with self.assertNoLogs("CosmoFuse.correlations", level="WARNING"):
             Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=15, theta_max=50, device="cpu",
-                        pair_search_precision="rotation")
+                        pair_search_precision="float32")
             Correlation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu")
 
 

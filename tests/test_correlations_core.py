@@ -699,3 +699,85 @@ class TestCorrelation(unittest.TestCase):
         self.assertEqual(calls["native_input_to_device"], 0)
         self.assertEqual(shear_out.shape, (corr.Q_patch_area_flat.shape[0],))
         self.assertEqual(density_out.shape, (corr.Q_patch_area_flat.shape[0],))
+
+
+class TestCrossOrientationEstimator(unittest.TestCase):
+    """One xi+- estimator in the package (6.0).
+
+    A cross-bin pair contributes in both orientations.  CosmoFuse takes the
+    ratio of the summed orientations, (N_ab + N_ba) / (W_ab + W_ba) -- the
+    standard weighted estimator, TreeCorr's definition.  The single-map
+    ``compute_shear_shear`` used to average the two orientation *ratios*
+    instead; both paths must now agree exactly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import healpy as hp
+
+        nside = 16
+        npix = hp.nside2npix(nside)
+        theta_pix, _ = hp.pix2ang(nside, np.arange(npix))
+        mask = theta_pix < 1.3
+        cls.corr = Correlation(
+            nside,
+            np.array([0.4, 0.9]),
+            np.array([0.9, 1.0]),
+            nbins=3,
+            theta_min=150,
+            theta_max=500,
+            patch_size=300,
+            theta_Q=300,
+            mask=mask,
+            device="cpu",
+            map_precision="float64",
+            rotation_precision="float64",
+        )
+        cls.corr.preprocess()
+        rng = np.random.default_rng(17)
+        n = cls.corr.n_active
+        cls.shear = rng.normal(size=(2, 2, n))
+        # deliberately different per-bin weights: this is where the two
+        # estimators disagree
+        cls.w = np.stack([rng.uniform(0.1, 1.0, n), rng.uniform(1.0, 5.0, n)])
+
+    def test_single_map_matches_the_tomographic_wrapper(self):
+        c, g, w = self.corr, self.shear, self.w
+        xip_t, xim_t = c.vectorized_shear_shear(g, w, return_device=False)
+        xip_s, xim_s = c.compute_shear_shear(
+            g[0, 0], g[0, 1], g[1, 0], g[1, 1], w[0], w[1], return_device=False
+        )
+        # combination order is (0,0), (0,1), (1,1) -> the cross entry is 1
+        np.testing.assert_allclose(xip_s, xip_t[1], rtol=0, atol=1e-14)
+        np.testing.assert_allclose(xim_s, xim_t[1], rtol=0, atol=1e-14)
+
+    def test_symmetric_under_swapping_the_two_fields(self):
+        c, g, w = self.corr, self.shear, self.w
+        xip, xim = c.compute_shear_shear(
+            g[0, 0], g[0, 1], g[1, 0], g[1, 1], w[0], w[1], return_device=False
+        )
+        swapped = c.compute_shear_shear(
+            g[1, 0], g[1, 1], g[0, 0], g[0, 1], w[1], w[0], return_device=False
+        )
+        np.testing.assert_allclose(xip, swapped[0], rtol=0, atol=1e-14)
+        np.testing.assert_allclose(xim, swapped[1], rtol=0, atol=1e-14)
+
+    def test_the_two_orientations_are_not_degenerate_here(self):
+        """The old average-of-ratios form coincides with the ratio of sums
+        when both orientations carry the same weight.  Show that they do
+        not, so the test above is not passing for a trivial reason."""
+        c, w = self.corr, self.w
+        rows = c._pair_ids_to_rows(c.pair_inds[0], c._global_to_row_lut())
+        edges = np.concatenate(([0], np.cumsum(c.bins[0], dtype=np.int64)))
+        differ = 0
+        for b in range(c.nbins):
+            i, j = rows[:, edges[b] : edges[b + 1]]
+            w_ab = float(np.sum(w[0][i] * w[1][j]))
+            w_ba = float(np.sum(w[1][i] * w[0][j]))
+            if abs(w_ab - w_ba) > 1e-3 * max(w_ab, w_ba):
+                differ += 1
+        self.assertGreater(differ, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

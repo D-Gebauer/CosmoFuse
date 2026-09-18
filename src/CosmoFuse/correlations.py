@@ -14,7 +14,6 @@ from .compute_context import ComputeContext
 from .io_handler import PairIOHandler
 from .pair_geometry import PairGeometry
 from .correlation_helpers import (
-    Q_T,
     Q_crittenden,
     Q_schneider,
     calculate_all_zetas as _calculate_all_zetas_helper,
@@ -435,16 +434,11 @@ class Correlation:
                 (separations, binning, position angles); the stored
                 rotation factors always use ``rotation_precision``.
                 ``"float64"`` (default) searches at double precision at no
-                memory cost.  ``"rotation"`` is the historical (< 5.0)
-                behaviour, a search at rotation precision, i.e. float32 by
-                default: on the DES nside-512 production geometry it
-                mis-bins pairs at the 0.05 sigma (rms) / 0.9 sigma (max)
-                level per patch.  ``"auto"`` keeps that behaviour at full
-                resolution and uses float64 with the static treecode.
-                float32 resolves
-                separations only to ``d(theta)/theta ~ 6e-8 / theta^2``
-                (0.3 % at 15', 3 % at 5'): use ``"float64"`` for
-                ``theta_min`` below ~10'.
+                memory cost.  ``"float32"`` resolves separations only to
+                ``d(theta)/theta ~ 6e-8 / theta^2`` (0.3 % at 15', 3 % at
+                5') and mis-bins pairs at the 0.05 sigma (rms) / 0.9 sigma
+                (max) per-patch level on the DES nside-512 production
+                geometry, so it is only useful for throwaway runs.
             pack_host_pairs: Apply the same packing already at pair-finding
                 time, so the *host* arrays and the pair file hold 8 instead
                 of 24 bytes per pair as well (``pair_inds`` /
@@ -516,10 +510,10 @@ class Correlation:
         self.radius_filter = 5 * self.theta_Q
 
         self.resolution_factor = validate_resolution_factor(resolution_factor)
-        if pair_search_precision not in ("auto", "rotation", "float32", "float64"):
+        if pair_search_precision not in ("float32", "float64"):
             raise ValueError(
-                "pair_search_precision must be 'auto', 'rotation', 'float32' or "
-                f"'float64'; got {pair_search_precision!r}"
+                "pair_search_precision must be 'float32' or 'float64'; got "
+                f"{pair_search_precision!r}"
             )
         self.pair_search_precision = pair_search_precision
         self.pack_pairs = bool(pack_pairs)
@@ -588,7 +582,7 @@ class Correlation:
         self.packed_block_ids: Optional[List[np.ndarray]] = None
         self.packed_block_sizes: Optional[List[np.ndarray]] = None
         self.compute_context.initialize_runtime_state()
-        self._aperture_filter_active_key = "Q_T"
+        self._aperture_filter_active_key = "Q_crittenden"
 
     @classmethod
     def from_mask(
@@ -600,7 +594,6 @@ class Correlation:
         theta_Q: float = 90,
         f_mask: float = 0.2,
         f_mask_filter: Optional[float] = None,
-        filter_weighted: Optional[bool] = None,
         aperture_filter: Optional[Callable[..., Any]] = None,
         filter_weighting: str = "abs",
         **kwargs: Any,
@@ -628,12 +621,10 @@ class Correlation:
             f_mask_filter: Maximum tolerated masked fraction inside the
                 filter support disc; defaults to ``f_mask``.
             filter_weighting: ``"abs"`` (default: masked fraction of
-                ``|filter|`` weight), ``"signed"``/``"raw"`` (deviation of
-                the filter integral, ``|Σ_masked Q| / Σ|Q|``) or ``"pixels"``
-                (unweighted pixel fraction); always from the binary mask,
-                see :func:`CosmoFuse.utils.select_patch_centers`.
-            filter_weighted: Deprecated alias (``True`` = ``"abs"``,
-                ``False`` = ``"pixels"``).
+                ``|filter|`` weight) or ``"signed"`` (deviation of the
+                filter integral, ``|Σ_masked Q| / Σ|Q|``); always from the
+                binary mask, see
+                :func:`CosmoFuse.utils.select_patch_centers`.
             aperture_filter: Filter for the weighted check; defaults to
                 the built-in ``Q_crittenden``.  Selection only — pass the
                 same filter to :meth:`preprocess` for consistency.
@@ -654,7 +645,6 @@ class Correlation:
             theta_Q=theta_Q,
             f_mask=f_mask,
             f_mask_filter=f_mask_filter,
-            filter_weighted=filter_weighted,
             aperture_filter=aperture_filter,
             filter_weighting=filter_weighting,
         )
@@ -679,10 +669,7 @@ class Correlation:
         )
 
     def _make_pair_finder(self) -> PairFinder:
-        mode = self.pair_search_precision
-        if mode == "auto":
-            mode = "rotation" if self.resolution_factor is None else "float64"
-        search_dtype = self.rotation_dtype if mode == "rotation" else np.dtype(mode)
+        search_dtype = np.dtype(self.pair_search_precision)
         return PairFinder(
             nbins=self.nbins,
             binedges=self.binedges,
@@ -709,73 +696,25 @@ class Correlation:
             del state['compute_context']
         if '_compute_context' in state:
             del state['_compute_context']
-        if '_tomo_combination_cache' in state:
-            state['_tomo_combination_cache'] = {}
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore a pickled instance and rebuild the unpicklable state.
+
+        Device buffers, the backend, the Numba kernels and the pair finder
+        are never pickled; the prepared state is rebuilt by
+        :meth:`prepare`.
+        """
         self.__dict__.update(state)
-        if "map_mask" not in self.__dict__:
-            self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
-            self.map_mask[self.map_inds] = True
-        if "accumulation_precision" not in self.__dict__:
-            # Pickles from before the accumulation_precision kwarg existed.
-            self.accumulation_precision = "same"
-            self.acc_dtype = self.map_dtype
-        if "resolution_factor" not in self.__dict__:
-            # Pickles from before the static treecode: full resolution.
-            self.resolution_factor = None
-            self.level_nside = assign_levels(self.binedges, self.nside, None)
-            self.aperture_nside = None
-            self.memory_budget_gb = None
-            self._treecode = None
+        self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
+        self.map_mask[self.map_inds] = True
         self.backend = get_backend(self.device)
-        if "aperture_shear_all_patches" not in self.__dict__:
-            self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
-                _compute_aperture_shear_all_patches
-            )
+        self.aperture_shear_all_patches = njit(fastmath=self.fastmath, cache=True)(
+            _compute_aperture_shear_all_patches
+        )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(self.fastmath)
-        if "pair_search_precision" not in self.__dict__:
-            self.pair_search_precision = "rotation"  # historical behaviour
-        if "pack_pairs" not in self.__dict__:
-            self.pack_pairs = False
-        if "pack_host_pairs" not in self.__dict__:
-            self.pack_host_pairs = False
-            self.packed_pairs = None
-            self.packed_block_ids = None
-            self.packed_block_sizes = None
         self._pair_finder = self._make_pair_finder()
         self.compute_context = ComputeContext()
-        legacy_context_fields = (
-            "inds_dev",
-            "exp2phi_dev",
-            "bins_dev",
-            "tot_bins_dev",
-            "tot_bins_reduceat_dev",
-            "ntotpairs",
-            "_tomo_sumofweights_cache",
-            "_tomo_sumofweights_cache_w_fingerprint",
-            "_tomo_sumofweights_cache_prepare_version",
-            "_xipm_sumofweights_cache",
-            "_xipm_sumofweights_cache_w_fingerprint",
-            "_xipm_sumofweights_cache_prepare_version",
-            "Q_inds_flat",
-            "Q_cos_flat",
-            "Q_sin_flat",
-            "Q_val_flat",
-            "Q_offsets",
-            "Q_patch_area_flat",
-        )
-        for field_name in legacy_context_fields:
-            if field_name in self.__dict__:
-                setattr(self.compute_context, field_name, self.__dict__.pop(field_name))
-        if "_prepare_version" in self.__dict__:
-            self.compute_context.prepare_version = self.__dict__.pop("_prepare_version")
-        if "_tomo_combination_cache" in self.__dict__:
-            self.compute_context.tomo_combination_cache = self.__dict__.pop("_tomo_combination_cache")
-        self.compute_context.ensure_runtime_state()
-        if "_aperture_filter_active_key" not in self.__dict__:
-            self._aperture_filter_active_key = "Q_T"
 
     def _invalidate_prepared_state(self) -> None:
         """Clears prepared backend buffers and cached tomographic weights."""
@@ -1376,17 +1315,6 @@ class Correlation:
             self.prepare(release_host_pairs=True)
         else:
             self.prepare()
-
-    def precompute(
-        self,
-        aperture_filter: Optional[Callable[..., Any]] = None,
-        release_host_pairs: bool = False,
-    ) -> None:
-        """Backward-compatible alias for preprocess()."""
-        self.preprocess(
-            aperture_filter=aperture_filter,
-            release_host_pairs=release_host_pairs,
-        )
 
     def save_pairs(self, filepath: str) -> None:
         PairIOHandler.save_pairs(self, filepath)
@@ -2064,15 +1992,8 @@ class Correlation:
                 out_m,
                 out_w,
             )
-            # Preserve the historical output dtype, which follows the
-            # rotation precision (float32 rotations -> float32 xi±).
-            real_dtype = (
-                np.float32
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else np.float64
-            )
-            xip_num = out_p.astype(real_dtype, copy=False)
-            xim_num = out_m.astype(real_dtype, copy=False)
+            xip_num = out_p
+            xim_num = out_m
             if sumofweights_dev is None:
                 sumofweights_dev = out_w
         else:
@@ -2080,9 +2001,8 @@ class Correlation:
                 sumofweights_dev = self._get_xipm_sumofweights(
                     w_in, w_in, w_dev, w_dev
                 )
-            # The kernel computes at map precision and emits the real parts
-            # directly; only the reduced numerators are cast to the
-            # historical rotation-precision output dtype (as on CPU).
+            # The kernel computes at map precision and emits the real
+            # parts directly.
             out_p, out_m = self._get_pair_scratch(self.acc_dtype, 2)
 
             xipm_auto_corr_kernel(
@@ -2100,13 +2020,8 @@ class Correlation:
                 out_m,
             )
 
-            real_dtype = (
-                np.float32
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else np.float64
-            )
-            xip_num = self._reduce_pairs(out_p).astype(real_dtype, copy=False)
-            xim_num = self._reduce_pairs(out_m).astype(real_dtype, copy=False)
+            xip_num = self._reduce_pairs(out_p)
+            xim_num = self._reduce_pairs(out_m)
         xip_dev, xim_dev = self._normalize_xipm_pairs(xip_num, xim_num, sumofweights_dev)
 
         if return_numpy:
@@ -2184,17 +2099,10 @@ class Correlation:
                 out_ba_w,
             )
 
-            # Preserve the historical output dtype, which follows the
-            # rotation precision (float32 rotations -> float32 xi±).
-            real_dtype = (
-                np.float32
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else np.float64
-            )
-            xip_ab_num = out_ab_p.astype(real_dtype, copy=False)
-            xim_ab_num = out_ab_m.astype(real_dtype, copy=False)
-            xip_ba_num = out_ba_p.astype(real_dtype, copy=False)
-            xim_ba_num = out_ba_m.astype(real_dtype, copy=False)
+            xip_ab_num = out_ab_p
+            xim_ab_num = out_ab_m
+            xip_ba_num = out_ba_p
+            xim_ba_num = out_ba_m
             if sum_ab is None:
                 sum_ab = out_ab_w
             if sum_ba is None:
@@ -2204,9 +2112,8 @@ class Correlation:
                 sum_ab = self._get_xipm_sumofweights(w1_in, w2_in, w1_dev, w2_dev)
             if sum_ba is None:
                 sum_ba = self._get_xipm_sumofweights(w2_in, w1_in, w2_dev, w1_dev)
-            # The kernel computes at map precision and emits the real parts
-            # directly; only the reduced numerators are cast to the
-            # historical rotation-precision output dtype (as on CPU).
+            # The kernel computes at map precision and emits the real
+            # parts directly.
             out_ab_p, out_ab_m, out_ba_p, out_ba_m = self._get_pair_scratch(
                 self.acc_dtype, 4
             )
@@ -2228,25 +2135,19 @@ class Correlation:
                 out_ba_m,
             )
 
-            real_dtype = (
-                np.float32
-                if self.rotation_complex_dtype == np.dtype(np.complex64)
-                else np.float64
-            )
-            xip_ab_num = self._reduce_pairs(out_ab_p).astype(real_dtype, copy=False)
-            xim_ab_num = self._reduce_pairs(out_ab_m).astype(real_dtype, copy=False)
-            xip_ba_num = self._reduce_pairs(out_ba_p).astype(real_dtype, copy=False)
-            xim_ba_num = self._reduce_pairs(out_ba_m).astype(real_dtype, copy=False)
+            xip_ab_num = self._reduce_pairs(out_ab_p)
+            xim_ab_num = self._reduce_pairs(out_ab_m)
+            xip_ba_num = self._reduce_pairs(out_ba_p)
+            xim_ba_num = self._reduce_pairs(out_ba_m)
 
-        xip_ab_dev, xim_ab_dev = self._normalize_xipm_pairs(
-            xip_ab_num, xim_ab_num, sum_ab
+        # Ratio of the summed orientations, the same weighted estimator the
+        # tomographic wrappers use.  With one explicit sumofweights for both
+        # orientations this is identical to normalising them separately.
+        xip_dev, xim_dev = self._normalize_xipm_pairs(
+            xip_ab_num + xip_ba_num,
+            xim_ab_num + xim_ba_num,
+            sum_ab + sum_ba,
         )
-        xip_ba_dev, xim_ba_dev = self._normalize_xipm_pairs(
-            xip_ba_num, xim_ba_num, sum_ba
-        )
-
-        xip_dev = (xip_ab_dev + xip_ba_dev) / 2
-        xim_dev = (xim_ab_dev + xim_ba_dev) / 2
 
         if return_numpy:
             return (
@@ -2700,7 +2601,7 @@ class Correlation:
         ``get_full_tomo_shear``).  Inside the scope every expansion fills
         *all* blocks once and is memoised on the identity of its inputs;
         the memo is dropped on exit, so reused device buffers (e.g.
-        ``PinnedMapPipeline`` slots) can never produce a stale hit."""
+        ``MapLoader`` slots) can never produce a stale hit."""
         owner = self
 
         class _Scope:

@@ -1,6 +1,55 @@
 # Changelog
 
-## Unreleased
+## 6.0.0 (2026-09-18)
+
+Compatibility cleanup: everything that existed only to keep pre-5.0 code,
+pickles and files working is gone. No measurement path was rewritten —
+except the one estimator inconsistency listed first.
+
+### Removed / breaking
+
+- **`compute_shear_shear` now uses the same cross-bin estimator as
+  everything else.** For a cross pair it took the mean of the two
+  orientation *ratios*, `(N_ab/W_ab + N_ba/W_ba) / 2`, while every
+  tomographic method moved to the ratio of the summed orientations,
+  `(N_ab + N_ba) / (W_ab + W_ba)`, in 5.0. It now does the same, so the
+  package measures one ξ± estimator. Auto combinations, and cross
+  combinations with an explicit `sumofweights`, are unchanged; with
+  different per-bin weights the estimate moves (~3 % of max|ξ+| per patch
+  on DES Y3, 0.02 σ). Gated by
+  `tests/test_correlations_core.py::TestCrossOrientationEstimator`.
+- **ξ± no longer follows the rotation precision.** The reduced numerators
+  were cast back to float32 whenever `rotation_precision="float32"`; the
+  returned estimates now carry the accumulation dtype, like every other
+  statistic. Values are unchanged where the cast was lossless.
+- Deprecated names removed: `PinnedMapPipeline` (use `MapLoader`),
+  `RowSpaceMapLoader` (`MapFileLoader`), `Correlation.precompute()`
+  (`preprocess()`), `Q_T` (`Q_crittenden`).
+- `select_patch_centers` / `Correlation.from_mask`: the `filter_weighted`
+  argument is gone (use `filter_weighting`), as are the values `"raw"`
+  (use `"signed"`) and `"pixels"`. A constant `aperture_filter` reproduces
+  the plain pixel fraction exactly if you want it.
+- `pair_search_precision` accepts only `"float32"` and `"float64"`;
+  `"rotation"` and `"auto"` are gone. `"float64"` remains the default.
+- Pair files: **format version 1** (one HDF5 group per patch) is no longer
+  read; `load_pairs` raises and says to convert with 5.x. Versions 2-4 are
+  unaffected.
+- `Correlation.__setstate__` no longer migrates pickles written by older
+  versions; it only rebuilds what `__getstate__` drops. Re-pickle with 5.x
+  first if you hold old pickles. `ComputeContext.ensure_runtime_state()`
+  was removed with it.
+- The aperture-filter cache key for the default filter is `"Q_crittenden"`
+  instead of `"Q_T"` (internal, visible in pickled state).
+
+### Kept deliberately
+
+Full-sky map inputs (they are a convenience, not a compatibility shim),
+the per-(bin, row) GPU kernels and `kernel.tiled = False` (they are the
+fallback beyond the tile's accumulator budget), the ElementwiseKernel and
+CPU fallbacks (they cover missing hardware, not old versions), and the
+bit-for-bit guarantee of `resolution_factor=None`.
+
+## 5.1.0
 
 ### Added
 - **Multi-GPU by patch range.** `Correlation(..., device=[0, 1, ...])` returns a

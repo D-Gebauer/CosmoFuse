@@ -110,50 +110,38 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_array_equal(corr.phi_center, unpickled_corr.phi_center)
         np.testing.assert_array_equal(corr.theta_center, unpickled_corr.theta_center)
 
-    def test_setstate_rebuilds_missing_fields(self):
-        """Ensure __setstate__ restores optional cached attributes."""
+    def test_setstate_rebuilds_unpicklable_state(self):
+        """__setstate__ restores everything __getstate__ drops."""
         corr = Correlation(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
         )
         state = corr.__getstate__()
-        for key in [
-            "aperture_shear_all_patches",
-            "_prepare_version",
-            "_tomo_sumofweights_cache",
-            "_tomo_sumofweights_cache_w_fingerprint",
-            "_tomo_sumofweights_cache_prepare_version",
-            "_xipm_sumofweights_cache",
-            "_xipm_sumofweights_cache_w_fingerprint",
-            "_xipm_sumofweights_cache_prepare_version",
-            "_tomo_combination_cache",
-            "Q_inds_flat",
-            "Q_cos_flat",
-            "Q_sin_flat",
-            "Q_val_flat",
-            "Q_offsets",
-            "Q_patch_area_flat",
-            "_aperture_filter_active_key",
-        ]:
-            state.pop(key, None)
+        for dropped in ("backend", "compute_context", "map_mask", "_pair_finder"):
+            self.assertNotIn(dropped, state)
 
         restored = Correlation.__new__(Correlation)
         restored.__setstate__(state)
 
+        self.assertIsNotNone(restored.backend)
         self.assertIsNotNone(restored.aperture_shear_all_patches)
+        self.assertIsNotNone(restored._pair_finder)
+        np.testing.assert_array_equal(restored.map_mask, corr.map_mask)
         self.assertEqual(restored.compute_context.prepare_version, 0)
         self.assertIsNone(restored.compute_context._tomo_sumofweights_cache)
         self.assertIsNone(restored.compute_context._xipm_sumofweights_cache)
         self.assertEqual(restored.compute_context.tomo_combination_cache, {})
-        self.assertEqual(restored._aperture_filter_active_key, "Q_T")
         self.assertIsNone(restored.Q_inds_flat)
         self.assertIsNone(restored.Q_offsets)
 
     def test_aperture_filter_helpers_and_ensure_pairs_branches(self):
         corr = self._make_small_cpu_corr()
 
-        self.assertEqual(corr._aperture_filter_key(correlations_module.Q_T), "Q_T")
+        self.assertEqual(
+            corr._aperture_filter_key(correlations_module.Q_crittenden),
+            "Q_crittenden",
+        )
 
         def custom_filter(theta):
             return np.full_like(theta, 2.0)
@@ -1513,16 +1501,6 @@ class TestCorrelationCoverage(unittest.TestCase):
         spy_2pcf.assert_called_once()
         spy_prepare.assert_called_once_with(release_host_pairs=True)
 
-    def test_precompute_forwards_release_host_pairs(self):
-        corr = self._make_small_cpu_corr()
-        with patch.object(corr, "preprocess") as spy_preprocess:
-            corr.precompute(release_host_pairs=True)
-
-        spy_preprocess.assert_called_once_with(
-            aperture_filter=None,
-            release_host_pairs=True,
-        )
-
     def test_get_3x2pt_tomo_both_maps_weights_variants(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
@@ -2698,7 +2676,7 @@ class TestCorrelationCoverage(unittest.TestCase):
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_M_a')
     @patch('CosmoFuse.correlations.Correlation.calculate_pairs_2PCF')
     @patch('CosmoFuse.correlations.Correlation.prepare')
-    def test_preprocess_and_precompute_forwarding(
+    def test_preprocess_forwarding(
         self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
     ):
         def custom_filter(theta, theta_q):
@@ -2716,12 +2694,6 @@ class TestCorrelationCoverage(unittest.TestCase):
                 "method": "preprocess",
                 "kwargs": {"aperture_filter": custom_filter},
                 "expected_filter": custom_filter,
-            },
-            {
-                "name": "precompute-default",
-                "method": "precompute",
-                "kwargs": {},
-                "expected_filter": None,
             },
         ]
 
@@ -2883,9 +2855,11 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
 
+        # The rotation precision drives the kernel's complex dtype; the
+        # returned estimates follow the accumulation precision.
         self.assertEqual(corr.rotation_complex_dtype, np.dtype(np.complex64))
-        self.assertEqual(xip.dtype, np.float32)
-        self.assertEqual(xim.dtype, np.float32)
+        self.assertEqual(xip.dtype, corr.acc_dtype)
+        self.assertEqual(xim.dtype, corr.acc_dtype)
 
     def test_load_pairs_downcasts_to_instance_precisions(self):
         """Loading high-precision pairs into low-precision instance should cast dtypes."""

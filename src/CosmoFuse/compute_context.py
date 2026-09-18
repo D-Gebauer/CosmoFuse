@@ -110,22 +110,6 @@ class ComputeContext:
             setattr(self, name, value)
         self.prepare_version = 0
 
-    def ensure_runtime_state(self) -> None:
-        for name, value in (
-            self._PREPARED_DEFAULTS
-            + self._WEIGHT_CACHE_DEFAULTS
-            + self._APERTURE_DEFAULTS
-            + self._APERTURE_DEVICE_DEFAULTS
-            + self._FUSED_INPUT_BUFFER_DEFAULTS
-            + self._FUSED_OUTPUT_BUFFER_DEFAULTS
-        ):
-            if name not in self.__dict__:
-                setattr(self, name, value)
-        if "prepare_version" not in self.__dict__:
-            self.prepare_version = 0
-        if "tomo_combination_cache" not in self.__dict__:
-            self.tomo_combination_cache = {}
-
     def invalidate_prepared_state(self) -> None:
         for name, value in (
             self._PREPARED_DEFAULTS

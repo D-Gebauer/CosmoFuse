@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 from CosmoFuse.correlation_helpers import (
-    Q_T,
     Q_crittenden,
     Q_schneider,
     _get_pair_index,
@@ -221,13 +220,6 @@ def test_zeta_t_validation_raises_on_patch_count_mismatch():
 # ---------------------------------------------------------------------------
 # Aperture filter functions
 # ---------------------------------------------------------------------------
-
-def test_Q_T_is_crittenden_alias():
-    """The historical default Q_T is the Crittenden et al. (2002) filter
-    (previously misattributed to Schneider et al. 1998); the alias keeps
-    the default filter object identical."""
-    assert Q_T is Q_crittenden
-
 
 def test_Q_crittenden_formula():
     theta_Q_arcmin = 90.0

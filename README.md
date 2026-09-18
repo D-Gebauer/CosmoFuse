@@ -88,7 +88,7 @@ First create a Correlation object:
         resolution_factor=None,             # None = full resolution; True (k=4) or a number k: static treecode
         aperture_nside=None,                # coarser nside for the aperture statistics (None = nside)
         memory_budget_gb=None,              # pair-memory budget of the preflight check (None = free device memory)
-        pair_search_precision="float64",    # "float64" / "rotation" / "auto"
+        pair_search_precision="float64",    # "float64" / "float32"
         pack_pairs=False,                   # 8-byte pairs on the device (tomographic methods only)
         pack_host_pairs=False,              # 8-byte pairs in host RAM and in the pair file too
     )
@@ -116,7 +116,7 @@ Instead of providing patch centers manually, they can be selected automatically 
         patch_size=90,           # patch radius (arcminutes)
         theta_Q=90,              # compensated filter scale (arcminutes)
         f_mask=0.2,              # max masked fraction in the patch disc
-        filter_weighting="abs",  # "abs" / "signed" / "pixels"
+        filter_weighting="abs",  # "abs" / "signed"
     )
     correlation = Correlation(nside, phi_center, theta_center, mask=mask, ...)
 
@@ -128,7 +128,7 @@ or, in one step:
         nbins=10, theta_min=10, theta_max=170,
     )
 
-With `filter_weighting="abs"` (default) the aperture-mass disc check weights each pixel by the compensated filter instead of counting pixels — the masked fraction becomes $\sum_{\rm masked} |Q(\theta)| \,/\, \sum_{\rm all} |Q(\theta)|$ — so holes near the edge of the disc (where the filter carries almost no weight) no longer veto a patch, while holes at the filter peak count more. The magnitude $|Q|$ is used because compensated filters can be negative at large radii; `"signed"` uses $|\sum_{\rm masked} Q|$ instead, and `"pixels"` counts pixels (the default before 5.0). A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the raw pixel fraction.
+With `filter_weighting="abs"` (default) the aperture-mass disc check weights each pixel by the compensated filter instead of counting pixels — the masked fraction becomes $\sum_{\rm masked} |Q(\theta)| \,/\, \sum_{\rm all} |Q(\theta)|$ — so holes near the edge of the disc (where the filter carries almost no weight) no longer veto a patch, while holes at the filter peak count more. The magnitude $|Q|$ is used because compensated filters can be negative at large radii; `"signed"` uses $|\sum_{\rm masked} Q|$ instead. A custom `aperture_filter` can be supplied for the weighting (same calling convention as `preprocess`, see [Aperture filters](#aperture-filters)); the 2PCF patch-disc check always uses the raw pixel fraction.
 
 Then Calculate pairs:
 
@@ -343,7 +343,7 @@ compiled on the first measurement call, so make one throwaway call before
 timing a loop.
 
 (Up to 5.0 these classes were called `PinnedMapPipeline` and
-`RowSpaceMapLoader`; the old names still work but warn.)
+`RowSpaceMapLoader`.)
 
 **Several GPUs**:
 

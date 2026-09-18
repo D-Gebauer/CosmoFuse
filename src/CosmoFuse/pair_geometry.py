@@ -44,9 +44,7 @@ class PairGeometry:
     @staticmethod
     def aperture_filter_key(aperture_filter: Callable[..., Any]) -> Any:
         if aperture_filter is Q_crittenden:
-            # Legacy key kept for pickle/state compatibility (Q_T is the
-            # backwards-compatible alias of Q_crittenden).
-            return "Q_T"
+            return "Q_crittenden"
         return id(aperture_filter)
 
     @staticmethod

@@ -52,7 +52,7 @@ def _aperture_filter_weights(
     return np.asarray(values, dtype=np.float64)
 
 
-_FILTER_WEIGHTINGS = {"abs": "abs", "signed": "signed", "raw": "signed", "pixels": "pixels"}
+_FILTER_WEIGHTINGS = ("abs", "signed")
 
 
 def select_patch_centers(
@@ -62,7 +62,6 @@ def select_patch_centers(
     theta_Q: Optional[float] = None,
     f_mask: float = 0.2,
     f_mask_filter: Optional[float] = None,
-    filter_weighted: Optional[bool] = None,
     aperture_filter: Optional[Callable[..., np.ndarray]] = None,
     filter_weighting: str = "abs",
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -103,7 +102,7 @@ def select_patch_centers(
             patch, while a hole at the filter peak counts more.  Filter
             regions of either sign count as lost support.
 
-            ``"signed"`` (alias ``"raw"``) -- *deviation of the filter
+            ``"signed"`` -- *deviation of the filter
             integral*, ``|Σ_masked Q| / Σ_all |Q| <= f_mask_filter``.  For a
             compensated filter (``Σ_all U = 0``, e.g. ``U_crittenden``) this
             is how far the mask pushes the aperture away from being
@@ -111,12 +110,7 @@ def select_patch_centers(
             non-negative filter (``Q_crittenden``, ``Q_schneider``) it is
             identical to ``"abs"``.
 
-            ``"pixels"`` -- unweighted masked pixel fraction (the behaviour
-            before 5.0).
-
             The patch-disc (2PCF) check always uses the pixel fraction.
-        filter_weighted: Deprecated alias: ``True`` = ``"abs"``, ``False`` =
-            ``"pixels"``; overrides ``filter_weighting`` when given.
         aperture_filter: Filter used for the weighting; defaults to the
             built-in ``Q_crittenden`` (same convention as
             ``Correlation.preprocess``: called as
@@ -142,14 +136,11 @@ def select_patch_centers(
         raise ValueError("patch_size and theta_Q must be positive")
     if not (0 <= f_mask <= 1) or not (0 <= f_mask_filter <= 1):
         raise ValueError("f_mask and f_mask_filter must lie in [0, 1]")
-    if filter_weighted is not None:
-        filter_weighting = "abs" if filter_weighted else "pixels"
     if filter_weighting not in _FILTER_WEIGHTINGS:
         raise ValueError(
-            "filter_weighting must be 'abs', 'signed' (alias 'raw') or "
-            f"'pixels'; got {filter_weighting!r}"
+            f"filter_weighting must be 'abs' or 'signed'; got {filter_weighting!r}"
         )
-    weighting = _FILTER_WEIGHTINGS[filter_weighting]
+    weighting = filter_weighting
 
     patch_radius = np.radians(patch_size / 60.0)
     filter_radius = 5.0 * np.radians(theta_Q / 60.0)
@@ -172,23 +163,20 @@ def select_patch_centers(
         disc = hp.query_disc(nside_mask, vecs[i], filter_radius)
         if disc.size == 0:
             continue
-        if weighting != "pixels":
-            pix_vec = np.asarray(hp.pix2vec(nside_mask, disc))
-            cos_theta = np.clip(vecs[i] @ pix_vec, -1.0, 1.0)
-            weights = _aperture_filter_weights(
-                aperture_filter, np.arccos(cos_theta), theta_Q
-            )
-            total = np.abs(weights).sum()
-            if total <= 0:
-                # degenerate filter over this disc: cannot assess -> reject
-                continue
-            masked = weights[~unmasked[disc]]
-            if weighting == "abs":
-                masked_fraction = np.abs(masked).sum() / total
-            else:
-                masked_fraction = abs(masked.sum()) / total
+        pix_vec = np.asarray(hp.pix2vec(nside_mask, disc))
+        cos_theta = np.clip(vecs[i] @ pix_vec, -1.0, 1.0)
+        weights = _aperture_filter_weights(
+            aperture_filter, np.arccos(cos_theta), theta_Q
+        )
+        total = np.abs(weights).sum()
+        if total <= 0:
+            # degenerate filter over this disc: cannot assess -> reject
+            continue
+        masked = weights[~unmasked[disc]]
+        if weighting == "abs":
+            masked_fraction = np.abs(masked).sum() / total
         else:
-            masked_fraction = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
+            masked_fraction = abs(masked.sum()) / total
         if masked_fraction > f_mask_filter:
             continue
         disc = hp.query_disc(nside_mask, vecs[i], patch_radius)

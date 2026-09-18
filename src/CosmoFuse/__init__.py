@@ -6,7 +6,6 @@ on GPU/CPU, with support for shear measurements and aperture mass calculations.
 """
 
 from .correlation_helpers import (
-    Q_T,
     Q_crittenden,
     Q_schneider,
     U_crittenden,
@@ -23,16 +22,11 @@ from .correlation_helpers import (
 )
 from .correlations import Correlation
 from .multi_device import MultiDeviceCorrelation
-from .pipeline import (
-    MapFileLoader,
-    MapLoader,
-    PinnedMapPipeline,
-    RowSpaceMapLoader,
-)
+from .pipeline import MapFileLoader, MapLoader
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 
-__version__ = "5.0.0"
+__version__ = "6.0.0"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 
@@ -42,9 +36,6 @@ __all__ = [
     "MapLoader",
     "MapFileLoader",
     "MultiDeviceCorrelation",
-    "PinnedMapPipeline",   # deprecated alias of MapLoader
-    "RowSpaceMapLoader",   # deprecated alias of MapFileLoader
-    "Q_T",
     "Q_crittenden",
     "Q_schneider",
     "U_crittenden",

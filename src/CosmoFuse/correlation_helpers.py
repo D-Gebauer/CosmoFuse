@@ -88,13 +88,6 @@ def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
     return np.where(x2 < 1.0, values, 0.0)
 
 
-# Backwards-compatible alias.  The filter CosmoFuse has always applied is
-# the Crittenden et al. (2002) exponential filter above; it was previously
-# misattributed to Schneider et al. (1998) in the docstring.  ``Q_T``
-# remains the default aperture filter.
-Q_T = Q_crittenden
-
-
 def Q_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
     """Polynomial compensated aperture filter of Schneider et al. (1998).
 
