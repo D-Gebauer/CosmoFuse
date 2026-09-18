@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`ZetaWriter`**: streams each map-set's i3PCFs to HDF5 from a background
+  thread instead of holding every per-patch array in RAM. zeta averages over
+  patches, not over maps, so map-set *k* can be reduced as soon as it is
+  measured. At the DES Y3 production geometry that is 9 kB per map-set
+  instead of 1.06 MB (90 MB instead of 10.6 GB for 10,000 realisations);
+  `reduce="none"` keeps the per-patch arrays, from which zeta, a jackknife
+  or a different binning can still be derived. On a GPU the reduction runs
+  on the device before the copy, so only the data vector crosses PCIe; with
+  a `MultiDeviceCorrelation` (host arrays) it runs on the CPU in the writer
+  thread. The file carries `n_flushed` plus `level_table` / `row_pix_hash`
+  provenance, and `resume=True` continues after a crash. `swmr=True` is
+  available but off by default — it trades a worse crash story (stale write
+  lock, needs `h5clear -s`) for a live view of the file.
+- The zeta reduction in `correlation_helpers` now dispatches on the array
+  module, so it runs on cupy arrays without a host round-trip.
+
 ## 6.0.0 (2026-09-18)
 
 Compatibility cleanup: everything that existed only to keep pre-5.0 code,

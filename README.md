@@ -362,6 +362,48 @@ M_a, xi_p, xi_m = correlation.get_full_tomo_shear(shear_maps, weights)
 Write pair files from a single-device instance; a multi-device group only
 reads them.
 
+### Streaming zetas to a file
+
+For long runs, `ZetaWriter` reduces each map-set to its i3PCFs and appends them to
+HDF5 from a background thread, instead of holding every per-patch array in RAM until
+the end:
+
+    from CosmoFuse import ZetaWriter
+
+    with ZetaWriter("zetas.h5", correlation, flush_every=50) as out:
+        for shear, w in map_sets:
+            out.submit_shear(correlation.get_full_tomo_shear(shear, w))
+
+`submit_3x2pt()` takes a `get_3x2pt_tomo()` result, and `submit(M_a=..., xi_p=...)`
+any subset of the six fields. `submit()` blocks once `depth` map-sets are queued, so
+memory stays bounded and a writer that falls behind cannot go unnoticed.
+
+This works because zeta averages over *patches*, not over maps: map-set *k* can be
+reduced the moment it is measured. At the DES Y3 production geometry one map-set is
+1.06 MB of per-patch arrays but only 9 kB of zetas — 118x smaller, 90 MB instead of
+10.6 GB for 10,000 realisations. Pass `reduce="none"` to store the per-patch arrays
+instead; zeta, a leave-one-patch-out jackknife or a different binning can all still
+be derived from those.
+
+On a GPU the reduction runs on the device before the copy, so only the 9 kB data
+vector crosses PCIe and the writer thread does nothing but I/O. With a
+`MultiDeviceCorrelation` the group returns host arrays, so the reduction runs on the
+CPU in the writer thread — still off the measurement's critical path, and nothing
+about the group changes.
+
+The file records `n_flushed`, the number of map-sets guaranteed to be on disk, and
+enough provenance (`level_table`, `row_pix_hash`, nside, bins, `resolution_factor`)
+that a data vector can never be silently combined with one measured under a
+different estimator. After a crash, reopen with `resume=True`: anything written past
+the last flush is discarded and appending continues.
+
+`swmr=True` lets another process follow the file as it grows, but it is **not free**
+and is off by default: it forces `libver="latest"` (needs HDF5 >= 1.10 to read),
+readers must pass `swmr=True`, HDF5 documents it as unreliable on NFS, and after a
+crash the file keeps a stale write lock — an ordinary `h5py.File(path, "r")` then
+fails until someone runs `h5clear -s`. A non-SWMR file survives the same crash and
+opens normally.
+
 ## Calculating i3PCFs
 
 The 8 i3PCFs can be computed with `CosmoFuse.correlation_helpers`:

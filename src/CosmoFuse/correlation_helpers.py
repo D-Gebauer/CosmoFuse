@@ -24,6 +24,22 @@ from typing import Tuple, Dict, Optional
 import numpy as np
 
 
+def _xp(*arrays: object) -> object:
+    """The array module owning ``arrays`` -- numpy, or cupy on a GPU.
+
+    The zeta reduction is a handful of means over the patch axis, so it can
+    run wherever the measurement left its output.  Reducing on the device
+    first shrinks a ~1 MB per-patch result to a ~9 kB data vector before it
+    ever crosses PCIe (see :class:`CosmoFuse.zeta_writer.ZetaWriter`).
+    """
+    for a in arrays:
+        if type(a).__module__.split(".")[0] == "cupy":
+            import cupy
+
+            return cupy
+    return np
+
+
 def Q_crittenden(theta: float, theta_Q: float = 90) -> float:
     """Exponential compensated aperture filter of Crittenden et al. (2002).
 
@@ -153,8 +169,9 @@ def _validate_and_cast_fields(
     central_field: np.ndarray,
     annulus_field: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    central = np.asarray(central_field)
-    annulus = np.asarray(annulus_field)
+    xp = _xp(central_field, annulus_field)
+    central = xp.asarray(central_field)
+    annulus = xp.asarray(annulus_field)
 
     if central.ndim != 3:
         raise ValueError(
@@ -205,20 +222,21 @@ def _zeta_from_fields(
     2PCF (ξ+, ξ-, ξ_g) evaluated in angular bins.
     """
     central, annulus = _validate_and_cast_fields(central_field, annulus_field)
+    xp = _xp(central, annulus)
     nmaps, nzbins, _ = central.shape
     nbins = annulus.shape[3]
     # All unique triplets of tomo bins (z_center, z2, z3) with z2 ≤ z3
     zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
 
-    out = np.zeros(
+    out = xp.zeros(
         (nmaps, len(zeta_combs), nbins),
-        dtype=np.result_type(central.dtype, annulus.dtype),
+        dtype=xp.result_type(central.dtype, annulus.dtype),
     )
 
     # Hoist the per-center and per-annulus means out of the triplet loop:
     # there are only nzbins distinct centers and ncomb distinct annuli.
-    all_center_means = np.mean(central, axis=2)
-    all_annulus_means = np.mean(annulus, axis=2)
+    all_center_means = xp.mean(central, axis=2)
+    all_annulus_means = xp.mean(annulus, axis=2)
 
     for k, (z_center, z2, z3) in enumerate(zeta_combs):
         pair_idx = _get_pair_index(nzbins, z2, z3)
@@ -227,7 +245,7 @@ def _zeta_from_fields(
 
         mean_center = all_center_means[:, z_center]
         mean_annulus = all_annulus_means[:, pair_idx]
-        mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+        mean_product = xp.mean(center_vals[:, :, None] * annulus_vals, axis=1)
 
         out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
 
@@ -251,8 +269,9 @@ def _zeta_from_cross_fields(
     - Otherwise, treats annulus combinations as generic entries and returns all
       ``(z_center, annulus_combination)`` covariances.
     """
-    central = np.asarray(central_field)
-    annulus = np.asarray(annulus_field)
+    xp = _xp(central_field, annulus_field)
+    central = xp.asarray(central_field)
+    annulus = xp.asarray(annulus_field)
 
     if central.ndim != 3:
         raise ValueError(
@@ -280,13 +299,13 @@ def _zeta_from_cross_fields(
     nbins = annulus.shape[3]
 
     triangular_pairs = nzbins * (nzbins + 1) // 2
-    dtype = np.result_type(central.dtype, annulus.dtype)
+    dtype = xp.result_type(central.dtype, annulus.dtype)
 
     if n_correlations == triangular_pairs:
         zeta_combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
-        out = np.zeros((nmaps, len(zeta_combs), nbins), dtype=dtype)
-        all_center_means = np.mean(central, axis=2)
-        all_annulus_means = np.mean(annulus, axis=2)
+        out = xp.zeros((nmaps, len(zeta_combs), nbins), dtype=dtype)
+        all_center_means = xp.mean(central, axis=2)
+        all_annulus_means = xp.mean(annulus, axis=2)
         for k, (z_center, z2, z3) in enumerate(zeta_combs):
             pair_idx = _get_pair_index(nzbins, z2, z3)
             center_vals = central[:, z_center, :]
@@ -294,20 +313,20 @@ def _zeta_from_cross_fields(
 
             mean_center = all_center_means[:, z_center]
             mean_annulus = all_annulus_means[:, pair_idx]
-            mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+            mean_product = xp.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
         return out
 
-    out = np.zeros((nmaps, nzbins * n_correlations, nbins), dtype=dtype)
-    all_annulus_means = np.mean(annulus, axis=2)
+    out = xp.zeros((nmaps, nzbins * n_correlations, nbins), dtype=dtype)
+    all_annulus_means = xp.mean(annulus, axis=2)
     k = 0
     for z_center in range(nzbins):
         center_vals = central[:, z_center, :]
-        mean_center = np.mean(center_vals, axis=1)
+        mean_center = xp.mean(center_vals, axis=1)
         for pair_idx in range(n_correlations):
             annulus_vals = annulus[:, pair_idx, :, :]
             mean_annulus = all_annulus_means[:, pair_idx]
-            mean_product = np.mean(center_vals[:, :, None] * annulus_vals, axis=1)
+            mean_product = xp.mean(center_vals[:, :, None] * annulus_vals, axis=1)
             out[:, k, :] = mean_product - mean_center[:, None] * mean_annulus
             k += 1
     return out
