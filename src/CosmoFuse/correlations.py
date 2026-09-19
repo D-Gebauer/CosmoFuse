@@ -1,5 +1,7 @@
 import hashlib
 import logging
+import weakref
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
@@ -9,7 +11,7 @@ from numba import njit, prange
 from scipy.special import binom
 from tqdm import trange
 
-from .backend import get_backend
+from .backend import get_backend, safe_divide
 from .compute_context import ComputeContext
 from .io_handler import PairIOHandler
 from .pair_geometry import PairGeometry
@@ -178,7 +180,6 @@ def _compute_pairs_impl(
 
     inds_a = np.empty(total, dtype=patch_inds.dtype)
     inds_b = np.empty(total, dtype=patch_inds.dtype)
-    bin_indices = np.empty(total, dtype=np.int64)
     exp2phi1_real = np.empty(total, dtype=ra.dtype)
     exp2phi1_imag = np.empty(total, dtype=ra.dtype)
     exp2phi2_real = np.empty(total, dtype=ra.dtype)
@@ -260,16 +261,18 @@ def _compute_pairs_impl(
 
             inds_a[out_idx] = patch_inds[i]
             inds_b[out_idx] = patch_inds[j]
-            bin_indices[out_idx] = bin_idx
             exp2phi1_real[out_idx] = c1
             exp2phi1_imag[out_idx] = s1
             exp2phi2_real[out_idx] = c2
             exp2phi2_imag[out_idx] = s2
 
+    # No per-pair bin index is returned: ``bin_counts`` already describes
+    # the grouping (the kernel writes the pairs grouped by bin), and the
+    # array it replaces was 8 B/pair of host memory written once per pair
+    # and never read -- only its ``.size``, which is ``inds_a.size``.
     return (
         inds_a,
         inds_b,
-        bin_indices,
         exp2phi1_real,
         exp2phi1_imag,
         exp2phi2_real,
@@ -2093,13 +2096,10 @@ class Correlation:
 
         Uses only device-side operations and array metadata — no
         device→host transfer or synchronization (``den`` may be a scalar
-        or an array on either backend).
+        or an array on either backend).  On a GPU this is one fused launch
+        rather than five: see :meth:`Backend.safe_divide`.
         """
-        module = self.backend.module
-        mask = den != 0
-        safe_den = module.where(mask, den, 1)
-        out = (num / safe_den) * mask
-        return out.astype(num.dtype, copy=False)
+        return safe_divide(self.backend.module, num, den)
 
     @staticmethod
     def _align_denominator(num: Any, den: Any) -> Any:
@@ -3979,42 +3979,54 @@ class Correlation:
         density_w_dev = self._to_backend_array(density_w_arr, dtype=self.map_dtype)
         shear_w_dev = self._to_backend_array(shear_w_arr, dtype=self.map_dtype)
 
-        xi_t = self.vectorized_density_shear(
-            density_dev,
-            shear_dev,
-            density_w_dev,
-            shear_w_dev,
-            sumofweights=sumofweights,
-            ggl_bin_combinations=ggl_bin_combinations,
-            flip_g1=flip_g1,
-            flip_g2=flip_g2,
-            return_device=return_device,
+        # Share one row expansion between the passes, as the other
+        # ``get_full_tomo_*`` methods do.  Without this the density and shear
+        # rows are degraded once for the pair pass and again for each
+        # aperture pass -- four expansions where two suffice.  The scope is
+        # taken only when an aperture output is requested, because it is the
+        # ``aperture_tomo.cu`` leaf that fixes the layout at ``"soa"``; a
+        # xi_t-only call keeps its direct AoS write.
+        want_aperture = return_N_ap or return_M_ap
+        scope = (
+            self._expansion_scope(layout="soa") if want_aperture else nullcontext()
         )
-
-        if not return_N_ap and not return_M_ap:
-            return xi_t
-
-        outputs: List[Any] = [xi_t]
-        if return_N_ap:
-            outputs.append(
-                self._compute_tomo_aperture_density(
-                    density_dev,
-                    density_w_dev,
-                    aperture_filter=aperture_filter,
-                    return_device=return_device,
-                )
+        with scope:
+            xi_t = self.vectorized_density_shear(
+                density_dev,
+                shear_dev,
+                density_w_dev,
+                shear_w_dev,
+                sumofweights=sumofweights,
+                ggl_bin_combinations=ggl_bin_combinations,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=return_device,
             )
-        if return_M_ap:
-            outputs.append(
-                self._compute_tomo_aperture_shear(
-                    shear_dev,
-                    shear_w_dev,
-                    aperture_filter=aperture_filter,
-                    flip_g1=flip_g1,
-                    flip_g2=flip_g2,
-                    return_device=return_device,
+
+            if not want_aperture:
+                return xi_t
+
+            outputs: List[Any] = [xi_t]
+            if return_N_ap:
+                outputs.append(
+                    self._compute_tomo_aperture_density(
+                        density_dev,
+                        density_w_dev,
+                        aperture_filter=aperture_filter,
+                        return_device=return_device,
+                    )
                 )
-            )
+            if return_M_ap:
+                outputs.append(
+                    self._compute_tomo_aperture_shear(
+                        shear_dev,
+                        shear_w_dev,
+                        aperture_filter=aperture_filter,
+                        flip_g1=flip_g1,
+                        flip_g2=flip_g2,
+                        return_device=return_device,
+                    )
+                )
 
         return tuple(outputs)
 

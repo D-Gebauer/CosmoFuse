@@ -120,9 +120,16 @@ def brute_force_reference(corr, shear, dens, w_s, w_d):
             else:
                 index, ra, dec, _ = parents_and_centroids(pix, nside_b)
             ids = np.arange(ra.size, dtype=np.int64)
-            I, J, bins, c1, s1, c2, s2, _ = _compute_pairs_impl(
+            I, J, c1, s1, c2, s2, bin_counts = _compute_pairs_impl(
                 ids, ra, dec, edges[b0 : b1 + 1]
             )
+            # The kernel writes the pairs grouped by angular bin, bins in
+            # order, so the per-pair bin index is exactly the run-length
+            # expansion of the counts -- which is also the invariant the
+            # measurement kernels rely on (they index by bin offsets and
+            # never look at a per-pair bin).
+            bins = np.repeat(np.arange(bin_counts.size), bin_counts)
+            assert bins.size == I.size
             members = [pix[index == c] for c in range(ra.size)]
             for a, b, bb, e1, e2 in zip(I, J, bins + b0, c1 + 1j * s1, c2 + 1j * s2):
                 pa, pb = members[a], members[b]

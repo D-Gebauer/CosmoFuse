@@ -79,6 +79,9 @@ def fake_cupy():
     mod.zeros = lambda *a, **k: _wrap(np.zeros(*a, **k))
     mod.mean = lambda *a, **k: _wrap(np.mean(*a, **k))
     mod.result_type = np.result_type
+    # the reduction concatenates the centres and the annuli once so that all
+    # eight estimators share one gather
+    mod.concatenate = lambda arrays, **kw: _wrap(np.concatenate(arrays, **kw))
     mod.asnumpy = lambda a: np.asarray(a).view(np.ndarray).copy()
     return mod, _DeviceArray
 

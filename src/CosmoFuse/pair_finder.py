@@ -73,7 +73,6 @@ class PairFinder:
         (
             inds_a,
             inds_b,
-            bin_indices,
             exp2phi1_real,
             exp2phi1_imag,
             exp2phi2_real,
@@ -86,7 +85,7 @@ class PairFinder:
             binedges_local,
         )
 
-        npairs = bin_indices.size
+        npairs = inds_a.size
         if npairs == 0:
             all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
             return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
@@ -168,7 +167,6 @@ class PairFinder:
         (
             inds_a,
             inds_b,
-            bin_indices,
             exp2phi1_real,
             exp2phi1_imag,
             exp2phi2_real,
@@ -181,7 +179,7 @@ class PairFinder:
             binedges_local,
         )
 
-        npairs = bin_indices.size
+        npairs = inds_a.size
         if npairs == 0:
             return (
                 np.empty((2, 0), dtype=self.index_dtype),

@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 import pytest
 from CosmoFuse.correlation_helpers import (
@@ -266,3 +268,179 @@ def test_filters_share_unit_normalisation(filter_fn):
     trapezoid = getattr(np, "trapezoid", None) or np.trapz
     integral = 2 * np.pi * trapezoid(q * theta, theta)
     np.testing.assert_allclose(integral, 1.0, rtol=1e-5)
+
+
+def _loop_zeta_cross_generic(center, annulus):
+    """The per-(z_center, combination) loop the generic γ_t branch replaced."""
+    nmaps, nzbins, _ = center.shape
+    n_correlations, nbins = annulus.shape[1], annulus.shape[3]
+    out = np.zeros((nmaps, nzbins * n_correlations, nbins))
+    k = 0
+    for z_center in range(nzbins):
+        c = center[:, z_center, :]
+        mean_c = np.mean(c, axis=1)
+        for pair_idx in range(n_correlations):
+            a = annulus[:, pair_idx, :, :]
+            out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - mean_c[
+                :, None
+            ] * np.mean(a, axis=1)
+            k += 1
+    return out
+
+
+@pytest.mark.parametrize(
+    "nmaps, nzbins, npatches, nbins", [(1, 4, 450, 4), (3, 5, 97, 8), (2, 1, 13, 3)]
+)
+def test_vectorised_reduction_is_bitwise_the_per_triplet_loop(
+    nmaps, nzbins, npatches, nbins
+):
+    """The triplet loop is the definition; vectorising it must not move a bit.
+
+    ζ is a difference of two nearly equal means, so a reordered summation
+    shows up in the low bits of a cancelling quantity.  On numpy the gathered
+    form reduces the same axis in the same order, so the gate is exact rather
+    than a tolerance.
+    """
+    rng = np.random.default_rng(11)
+    npairs = nzbins * (nzbins + 1) // 2
+    center = rng.normal(size=(nmaps, nzbins, npatches))
+    annulus = rng.normal(size=(nmaps, npairs, npatches, nbins))
+
+    np.testing.assert_array_equal(
+        zeta_g_plus(center, annulus), _reference_zeta(center, annulus)
+    )
+    # the upper-triangular branch of the γ_t path must agree with it exactly
+    np.testing.assert_array_equal(
+        zeta_g_t(center, annulus), _reference_zeta(center, annulus)
+    )
+
+    generic = rng.normal(size=(nmaps, npairs + 3, npatches, nbins))
+    np.testing.assert_array_equal(
+        zeta_g_t(center, generic), _loop_zeta_cross_generic(center, generic)
+    )
+
+
+def test_reduction_does_not_depend_on_how_many_map_sets_are_stacked():
+    """``ZetaWriter`` reduces one map-set at a time on the device route and a
+    stacked batch on the host route; both must land on the same numbers."""
+    nmaps, nzbins, npatches, nbins = 5, 4, 200, 4
+    npairs = nzbins * (nzbins + 1) // 2
+    rng = np.random.default_rng(12)
+    center = rng.normal(size=(nmaps, nzbins, npatches))
+    annulus = rng.normal(size=(nmaps, npairs, npatches, nbins))
+
+    batched = calculate_all_zetas(M_a=center, xi_p=annulus)
+    one_at_a_time = {
+        key: np.concatenate(
+            [
+                calculate_all_zetas(
+                    M_a=center[i : i + 1], xi_p=annulus[i : i + 1]
+                )[key]
+                for i in range(nmaps)
+            ]
+        )
+        for key in batched
+    }
+    for key, expected in batched.items():
+        np.testing.assert_array_equal(one_at_a_time[key], expected, err_msg=key)
+
+
+def test_triplet_indices_follow_combinations_with_replacement():
+    """The output row order is API: it is what ``ZetaWriter`` stores and what
+    a stored data vector is indexed by."""
+    from CosmoFuse.correlation_helpers import _triplet_indices
+
+    for nzbins in (1, 2, 4, 5):
+        indices = _triplet_indices(nzbins)
+        combs = list(itertools.combinations_with_replacement(range(nzbins), 3))
+        assert len(indices.centers) == len(combs)
+        for k, (z_center, z2, z3) in enumerate(combs):
+            assert indices.centers[k] == z_center
+            assert indices.pairs[k] == _get_pair_index(nzbins, z2, z3)
+
+
+def _per_estimator(**fields):
+    """What ``calculate_all_zetas`` does one estimator at a time."""
+    symmetric = fields.pop("xi_t_symmetric", None)
+    M_g, M_a = fields.get("M_g"), fields.get("M_a")
+    xi_p, xi_m = fields.get("xi_p"), fields.get("xi_m")
+    xi_g, xi_t = fields.get("xi_g"), fields.get("xi_t")
+    out = {}
+    if M_g is not None and xi_p is not None:
+        out["zeta_g_plus"] = zeta_g_plus(M_g, xi_p)
+    if M_g is not None and xi_m is not None:
+        out["zeta_g_minus"] = zeta_g_minus(M_g, xi_m)
+    if M_a is not None and xi_p is not None:
+        out["zeta_a_plus"] = zeta_a_plus(M_a, xi_p)
+    if M_a is not None and xi_m is not None:
+        out["zeta_a_minus"] = zeta_a_minus(M_a, xi_m)
+    if M_g is not None and xi_g is not None:
+        out["zeta_g_g"] = zeta_g_g(M_g, xi_g)
+    if M_a is not None and xi_g is not None:
+        out["zeta_a_g"] = zeta_a_g(M_a, xi_g)
+    if M_g is not None and xi_t is not None:
+        out["zeta_g_t"] = zeta_g_t(M_g, xi_t, symmetric=symmetric)
+    if M_a is not None and xi_t is not None:
+        out["zeta_a_t"] = zeta_a_t(M_a, xi_t, symmetric=symmetric)
+    return out
+
+
+@pytest.mark.parametrize(
+    "nzbins, npatches, nbins, n_xi_t",
+    [(4, 40, 10, 16), (4, 40, 10, 10), (3, 17, 5, 9), (2, 11, 4, 6), (1, 7, 3, 1)],
+)
+def test_batched_reduction_equals_one_call_per_estimator(
+    nzbins, npatches, nbins, n_xi_t
+):
+    """All eight estimators share one gather; that must not move a bit.
+
+    ``n_xi_t == nz(nz+1)/2`` is the case where the γ_t layout is inferred as
+    the symmetric triangle, so it exercises both index plans in one batch.
+    """
+    rng = np.random.default_rng(23)
+    npairs = nzbins * (nzbins + 1) // 2
+    fields = dict(
+        M_g=rng.normal(size=(1, nzbins, npatches)),
+        M_a=rng.normal(size=(1, nzbins, npatches)),
+        xi_p=rng.normal(size=(1, npairs, npatches, nbins)),
+        xi_m=rng.normal(size=(1, npairs, npatches, nbins)),
+        xi_g=rng.normal(size=(1, npairs, npatches, nbins)),
+        xi_t=rng.normal(size=(1, n_xi_t, npatches, nbins)),
+    )
+    batched = calculate_all_zetas(**fields)
+    expected = _per_estimator(**fields)
+    assert set(batched) == set(expected)
+    for key, want in expected.items():
+        assert batched[key].shape == want.shape, key
+        np.testing.assert_array_equal(batched[key], want, err_msg=key)
+
+
+def test_batching_falls_back_rather_than_promoting_a_dtype():
+    """Concatenating mixed dtypes would silently raise an output's precision.
+
+    ``zeta_g_plus`` is float32 x float32; batching it with a float64 ``xi_m``
+    would make it float64.  The batch is skipped instead.
+    """
+    fields = dict(
+        M_g=np.zeros((1, 2, 7), dtype=np.float32),
+        M_a=np.zeros((1, 2, 7), dtype=np.float32),
+        xi_p=np.zeros((1, 3, 7, 2), dtype=np.float32),
+        xi_m=np.zeros((1, 3, 7, 2), dtype=np.float64),
+    )
+    mixed = calculate_all_zetas(**fields)
+    assert mixed["zeta_g_plus"].dtype == zeta_g_plus(
+        fields["M_g"], fields["xi_p"]
+    ).dtype
+
+    fields["xi_m"] = fields["xi_m"].astype(np.float32)
+    uniform = calculate_all_zetas(**fields)
+    assert uniform["zeta_g_plus"].dtype == np.float32
+
+
+def test_a_single_estimator_still_works():
+    rng = np.random.default_rng(24)
+    M_g = rng.normal(size=(1, 2, 9))
+    xi_p = rng.normal(size=(1, 3, 9, 4))
+    only = calculate_all_zetas(M_g=M_g, xi_p=xi_p)
+    assert set(only) == {"zeta_g_plus"}
+    np.testing.assert_array_equal(only["zeta_g_plus"], zeta_g_plus(M_g, xi_p))

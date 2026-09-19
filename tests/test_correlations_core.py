@@ -233,7 +233,6 @@ class TestCorrelation(unittest.TestCase):
         empty_out = (
             np.array([], dtype=np.uint32),
             np.array([], dtype=np.uint32),
-            np.array([], dtype=np.int64),
             np.array([], dtype=np.float64),
             np.array([], dtype=np.float64),
             np.array([], dtype=np.float64),
@@ -264,7 +263,6 @@ class TestCorrelation(unittest.TestCase):
         (
             inds_a,
             inds_b,
-            bin_indices,
             exp2phi1_real,
             exp2phi1_imag,
             exp2phi2_real,
@@ -279,7 +277,6 @@ class TestCorrelation(unittest.TestCase):
 
         self.assertEqual(inds_a.size, 0)
         self.assertEqual(inds_b.size, 0)
-        self.assertEqual(bin_indices.size, 0)
         self.assertEqual(exp2phi1_real.size, 0)
         self.assertEqual(exp2phi1_imag.size, 0)
         self.assertEqual(exp2phi2_real.size, 0)
@@ -301,14 +298,19 @@ class TestCorrelation(unittest.TestCase):
             return original_cos(x)
 
         with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            outputs = kernel_fn(
+            inds_a, inds_b, *_rest, bin_counts = kernel_fn(
                 patch_inds,
                 ra,
                 dec,
                 binedges,
             )
 
-        self.assertEqual(len(outputs), 8)
+        # cos(theta) forced above 1 is outside every bin, so the pair is
+        # dropped -- asserting the arity of the return tuple, as this used
+        # to, is something no input can falsify.
+        self.assertEqual(inds_a.size, 0)
+        self.assertEqual(inds_b.size, 0)
+        self.assertEqual(int(bin_counts.sum()), 0)
 
     def test_compute_pairs_numba_pyfunc_clamps_lower(self):
         """Test py_func lower clamp branch for cos(theta) < -1."""
@@ -326,14 +328,16 @@ class TestCorrelation(unittest.TestCase):
             return original_cos(x)
 
         with patch.object(correlations_module.np, "cos", side_effect=fake_cos):
-            outputs = kernel_fn(
+            inds_a, inds_b, *_rest, bin_counts = kernel_fn(
                 patch_inds,
                 ra,
                 dec,
                 binedges,
             )
 
-        self.assertEqual(len(outputs), 8)
+        self.assertEqual(inds_a.size, 0)
+        self.assertEqual(inds_b.size, 0)
+        self.assertEqual(int(bin_counts.sum()), 0)
 
     def test_compute_pairs_numba_pyfunc_r2_c1_zero_fallback(self):
         """Trigger fallback branch where R2_C1 == 0 and default exp(2i phi1) is used."""
@@ -357,7 +361,6 @@ class TestCorrelation(unittest.TestCase):
             (
                 inds_a,
                 inds_b,
-                _bin_indices,
                 exp2phi1_real,
                 exp2phi1_imag,
                 _exp2phi2_real,
@@ -397,7 +400,6 @@ class TestCorrelation(unittest.TestCase):
             (
                 inds_a,
                 inds_b,
-                _bin_indices,
                 _exp2phi1_real,
                 _exp2phi1_imag,
                 exp2phi2_real,
