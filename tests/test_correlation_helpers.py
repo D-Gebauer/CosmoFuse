@@ -150,11 +150,21 @@ def test_shape_validation_raises_on_patch_count_mismatch():
         zeta_g_plus(M_g, annulus)
 
 
-def test_shape_validation_raises_on_pair_count_mismatch():
+def test_a_non_triangular_annulus_is_a_cross_layout_not_an_error():
+    """M_g against xi_p is two different samples, so any count is legal.
+
+    Before 6.4.0 this raised: the triangle rule was applied to every
+    estimator, including the ones whose centre and annulus carry independent
+    tomographies.  The rule survives where it means something -- same-sample
+    estimators, and anything the caller declares symmetric.
+    """
     M_g = np.zeros((2, 2, 4))
     annulus = np.zeros((2, 4, 4, 2))
+    assert zeta_g_plus(M_g, annulus).shape[1] == 2 * 4
     with pytest.raises(ValueError):
-        zeta_g_plus(M_g, annulus)
+        zeta_g_plus(M_g, annulus, symmetric=True)
+    with pytest.raises(ValueError):
+        zeta_a_plus(np.zeros((2, 2, 4)), annulus)
 
 
 def test_zeta_t_accepts_arbitrary_cross_combination_count():
@@ -444,3 +454,154 @@ def test_a_single_estimator_still_works():
     only = calculate_all_zetas(M_g=M_g, xi_p=xi_p)
     assert set(only) == {"zeta_g_plus"}
     np.testing.assert_array_equal(only["zeta_g_plus"], zeta_g_plus(M_g, xi_p))
+
+
+# --- mixed weak-lensing / galaxy-clustering tomography (6.4.0) --------------
+
+
+def _reference_cross_zeta(center, annulus):
+    """The definition, one (centre bin, annulus combination) at a time."""
+    nmaps, ncen, _ = center.shape
+    ncomb, nbins = annulus.shape[1], annulus.shape[3]
+    out = np.zeros((nmaps, ncen * ncomb, nbins))
+    k = 0
+    for z1 in range(ncen):
+        for comb in range(ncomb):
+            c = center[:, z1, :]
+            a = annulus[:, comb, :, :]
+            out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(
+                c, axis=1
+            )[:, None] * np.mean(a, axis=1)
+            k += 1
+    return out
+
+
+def _mixed_fields(n_source=4, n_lens=5, nmaps=3, npatches=37, nbins=6, seed=11):
+    rng = np.random.default_rng(seed)
+    ss = n_source * (n_source + 1) // 2
+    ll = n_lens * (n_lens + 1) // 2
+    return dict(
+        M_a=rng.normal(size=(nmaps, n_source, npatches)),
+        M_g=rng.normal(size=(nmaps, n_lens, npatches)),
+        xi_p=rng.normal(size=(nmaps, ss, npatches, nbins)),
+        xi_m=rng.normal(size=(nmaps, ss, npatches, nbins)),
+        xi_g=rng.normal(size=(nmaps, ll, npatches, nbins)),
+        xi_t=rng.normal(size=(nmaps, n_lens * n_source, npatches, nbins)),
+    )
+
+
+def test_all_eight_zetas_with_four_source_and_five_lens_bins():
+    """The 6x2pt case: M_ap over 4 source bins, M_g over 5 lens bins."""
+    f = _mixed_fields()
+    out = calculate_all_zetas(**f)
+    assert set(out) == {
+        "zeta_a_plus", "zeta_a_minus", "zeta_g_g",
+        "zeta_g_plus", "zeta_g_minus", "zeta_a_g", "zeta_g_t", "zeta_a_t",
+    }
+    # same-sample estimators keep the upper-triangle layout
+    assert out["zeta_a_plus"].shape[1] == 4 * 5 * 6 // 6      # C(4+2, 3) = 20
+    assert out["zeta_a_minus"].shape[1] == 20
+    assert out["zeta_g_g"].shape[1] == 5 * 6 * 7 // 6         # C(5+2, 3) = 35
+    # cross-sample estimators are centre-major, centre x annulus
+    assert out["zeta_g_plus"].shape[1] == 5 * 10
+    assert out["zeta_g_minus"].shape[1] == 5 * 10
+    assert out["zeta_a_g"].shape[1] == 4 * 15
+    assert out["zeta_g_t"].shape[1] == 5 * 20
+    assert out["zeta_a_t"].shape[1] == 4 * 20
+    assert sum(v.shape[1] for v in out.values()) == 415
+
+
+def test_mixed_tomography_matches_the_definition():
+    f = _mixed_fields()
+    out = calculate_all_zetas(**f)
+    for name, centre, annulus in (
+        ("zeta_g_plus", "M_g", "xi_p"),
+        ("zeta_g_minus", "M_g", "xi_m"),
+        ("zeta_a_g", "M_a", "xi_g"),
+        ("zeta_g_t", "M_g", "xi_t"),
+        ("zeta_a_t", "M_a", "xi_t"),
+    ):
+        np.testing.assert_allclose(
+            out[name], _reference_cross_zeta(f[centre], f[annulus]),
+            rtol=0, atol=1e-14, err_msg=name,
+        )
+    for name, centre, annulus in (
+        ("zeta_a_plus", "M_a", "xi_p"),
+        ("zeta_a_minus", "M_a", "xi_m"),
+        ("zeta_g_g", "M_g", "xi_g"),
+    ):
+        np.testing.assert_allclose(
+            out[name], _reference_zeta(f[centre], f[annulus]),
+            rtol=0, atol=1e-14, err_msg=name,
+        )
+
+
+def test_mixed_tomography_batches_and_matches_the_single_calls():
+    """Differing centre bin counts must not fall out of the batched path."""
+    f = _mixed_fields()
+    out = calculate_all_zetas(**f)
+    singles = {
+        "zeta_a_plus": zeta_a_plus(f["M_a"], f["xi_p"]),
+        "zeta_a_minus": zeta_a_minus(f["M_a"], f["xi_m"]),
+        "zeta_g_g": zeta_g_g(f["M_g"], f["xi_g"]),
+        "zeta_g_plus": zeta_g_plus(f["M_g"], f["xi_p"]),
+        "zeta_g_minus": zeta_g_minus(f["M_g"], f["xi_m"]),
+        "zeta_a_g": zeta_a_g(f["M_a"], f["xi_g"]),
+        "zeta_g_t": zeta_g_t(f["M_g"], f["xi_t"]),
+        "zeta_a_t": zeta_a_t(f["M_a"], f["xi_t"]),
+    }
+    for name, value in singles.items():
+        np.testing.assert_array_equal(out[name], value, err_msg=name)
+
+
+def test_equal_source_and_lens_counts_keep_the_old_layout_by_default():
+    """The one ambiguous case: 4 lens bins against 4 source bins.
+
+    ``xi_p`` then holds 10 combinations, which is also the triangle of 4, so
+    inference cannot tell the two apart and keeps the historical reading.
+    ``symmetric=False`` is the only way to say the other thing was meant.
+    """
+    f = _mixed_fields(n_source=4, n_lens=4)
+    out = calculate_all_zetas(**f)
+    assert out["zeta_g_plus"].shape[1] == 20           # upper triangle, as before
+    assert out["zeta_a_g"].shape[1] == 20
+
+    forced = calculate_all_zetas(
+        **f, symmetric={"zeta_g_plus": False, "zeta_a_g": False}
+    )
+    assert forced["zeta_g_plus"].shape[1] == 4 * 10
+    np.testing.assert_allclose(
+        forced["zeta_g_plus"], _reference_cross_zeta(f["M_g"], f["xi_p"]),
+        rtol=0, atol=1e-14,
+    )
+    # the same-sample estimators are untouched by the override
+    np.testing.assert_array_equal(forced["zeta_a_plus"], out["zeta_a_plus"])
+
+
+def test_symmetric_override_rejects_an_unknown_estimator_name():
+    f = _mixed_fields()
+    with pytest.raises(ValueError, match="unknown estimator"):
+        calculate_all_zetas(**f, symmetric={"zeta_a_plus_typo": False})
+
+
+def test_symmetric_override_beats_xi_t_symmetric():
+    f = _mixed_fields(n_source=4, n_lens=4)
+    out = calculate_all_zetas(
+        M_a=f["M_a"], xi_t=f["xi_p"],          # 10 combinations = triangle of 4
+        xi_t_symmetric=True, symmetric={"zeta_a_t": False},
+    )
+    assert out["zeta_a_t"].shape[1] == 4 * 10
+
+
+def test_zeta_cross_triplets_is_the_row_order():
+    from CosmoFuse.correlation_helpers import _cross_indices
+    from CosmoFuse.correlations import Correlation
+
+    for n_centre, n_comb in ((5, 10), (4, 15), (5, 20), (4, 20), (1, 1)):
+        indices = _cross_indices(n_centre, n_comb)
+        assert list(
+            zip(indices.centers.tolist(), indices.pairs.tolist())
+        ) == Correlation.zeta_cross_triplets(n_centre, n_comb)
+    assert Correlation.zeta_cross_triplets(2, 3) == [
+        (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)
+    ]

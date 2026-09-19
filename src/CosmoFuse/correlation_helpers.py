@@ -19,7 +19,7 @@ The eight estimators are:
 """
 
 import itertools
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -168,7 +168,16 @@ def _get_pair_index(nbins: int, i: int, j: int) -> int:
 def _validate_and_cast_fields(
     central_field: np.ndarray,
     annulus_field: np.ndarray,
+    require_triangle: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Shape checks shared by every estimator.
+
+    ``require_triangle`` asserts that the annulus holds the upper triangle of
+    the centre's tomographic bins.  That is right when the centre and the
+    annulus are built from the *same* sample (M_ap with xi_pm, M_g with xi_g)
+    and wrong when they are not (M_g with xi_pm, M_a with xi_g, anything with
+    xi_t), where the two carry independent binnings.
+    """
     xp = _xp(central_field, annulus_field)
     central = xp.asarray(central_field)
     annulus = xp.asarray(annulus_field)
@@ -195,13 +204,15 @@ def _validate_and_cast_fields(
             f"got {central.shape[2]} and {annulus.shape[2]}"
         )
 
-    nzbins = central.shape[1]
-    expected_pairs = nzbins * (nzbins + 1) // 2
-    if annulus.shape[1] != expected_pairs:
-        raise ValueError(
-            "annulus_field has incompatible number of tomographic pairs; "
-            f"expected {expected_pairs} for {nzbins} bins, got {annulus.shape[1]}"
-        )
+    if require_triangle:
+        nzbins = central.shape[1]
+        expected_pairs = nzbins * (nzbins + 1) // 2
+        if annulus.shape[1] != expected_pairs:
+            raise ValueError(
+                "annulus_field has incompatible number of tomographic pairs; "
+                f"expected {expected_pairs} for {nzbins} bins, "
+                f"got {annulus.shape[1]}"
+            )
 
     return central, annulus
 
@@ -313,23 +324,57 @@ def _zeta_covariance(
     return mean_product - mean_center[:, :, None] * mean_annulus
 
 
+def _layout_indices(
+    nzbins: int, n_correlations: int, symmetric: Optional[bool]
+) -> _ZetaIndices:
+    """Pick the row layout of a (centre, annulus) combination.
+
+    ``symmetric=None`` infers it from the counts, which is only safe when the
+    two fields cannot be confused -- see :func:`_zeta_from_fields`.
+    """
+    if symmetric is None:
+        symmetric = n_correlations == nzbins * (nzbins + 1) // 2
+    if symmetric:
+        return _triplet_indices(nzbins)
+    return _cross_indices(nzbins, n_correlations)
+
+
 def _zeta_from_fields(
     central_field: np.ndarray,
     annulus_field: np.ndarray,
+    symmetric: Optional[bool] = None,
 ) -> np.ndarray:
     """Compute i3PCF: covariance between a central aperture field and an
     annular 2PCF field.
 
-    The i3PCF for a triplet of tomographic bins (z_center, z2, z3) is:
+    Two row layouts, selected by ``symmetric``:
 
-        ζ(θ) = ⟨ C_{z_center} · A_{z2,z3}(θ) ⟩_patches
-             - ⟨ C_{z_center} ⟩ · ⟨ A_{z2,z3}(θ) ⟩
+    - **symmetric** -- centre and annulus share one tomographic binning, so
+      the rows are ``combinations_with_replacement(range(nzbins), 3)``,
+      ``(z_center, z2, z3)`` with ``z2 <= z3``::
 
-    where C is the central field (M_ap or M_g) and A is the annular
-    2PCF (ξ+, ξ-, ξ_g) evaluated in angular bins.
+          ζ(θ) = ⟨ C_{z_center} · A_{z2,z3}(θ) ⟩_patches
+               - ⟨ C_{z_center} ⟩ · ⟨ A_{z2,z3}(θ) ⟩
+
+    - **generic** -- they do not, so every centre bin meets every annulus
+      combination, centre-major: ``nzbins * n_correlations`` rows.  This is
+      what a weak-lensing centre against a clustering annulus needs (and the
+      reverse), and what γ_t has always needed.
+
+    ``symmetric=None`` *infers* the layout from the counts.  That is right
+    whenever the two counts cannot coincide by accident, and wrong when they
+    can: ``n_lens == n_source`` makes a cross annulus hold exactly
+    ``nz(nz+1)/2`` entries and it is then read as the triangle, silently
+    giving the wrong pairings and too few rows.  Pass ``symmetric`` explicitly
+    for any estimator whose centre and annulus come from different samples.
     """
-    central, annulus = _validate_and_cast_fields(central_field, annulus_field)
-    return _zeta_covariance(central, annulus, _triplet_indices(central.shape[1]))
+    central, annulus = _validate_and_cast_fields(
+        central_field, annulus_field, require_triangle=symmetric is True
+    )
+    indices = _layout_indices(
+        int(central.shape[1]), int(annulus.shape[1]), symmetric
+    )
+    return _zeta_covariance(central, annulus, indices)
 
 
 def _zeta_from_cross_fields(
@@ -337,89 +382,50 @@ def _zeta_from_cross_fields(
     annulus_field: np.ndarray,
     symmetric: Optional[bool] = None,
 ) -> np.ndarray:
-    """Compute i3PCF covariance for cross-correlation annulus fields.
+    """Deprecated alias of :func:`_zeta_from_fields`.
 
-    Used for ζ_gt and ζ_at where the annular 2PCF (galaxy-galaxy
-    lensing γ_t) has distinct lens and source tomographic bins,
-    so the number of annulus combinations may differ from the
-    standard upper-triangular count.
-
-    Two layouts:
-
-    - **symmetric** — the annulus combinations are the upper triangle of
-      ``nzbins``, so the output follows the legacy triplet ordering
-      ``(z_center, z2, z3)`` with ``z2 <= z3``.
-    - **generic** — every centre bin against every annulus combination,
-      centre-major.
-
-    ``symmetric`` selects between them.  Left as ``None`` it is *inferred*
-    from the combination count, which is what this function has always done
-    and is wrong for a GGL subset that happens to hold ``nz(nz+1)/2``
-    entries: 4 lens bins against a 4-source subset gives 10 combinations for
-    nzbins=4, which is read as the symmetric triangle and silently produces
-    10 rows of the wrong pairings instead of 40. Pass it explicitly whenever
-    the annulus is a GGL selection.
+    The two differed only in whether the upper-triangle rule was enforced
+    before the layout was chosen; `_zeta_from_fields` now takes ``symmetric``
+    and decides both.  Kept because it names the generic case at the call
+    sites that need it.
     """
-    xp = _xp(central_field, annulus_field)
-    central = xp.asarray(central_field)
-    annulus = xp.asarray(annulus_field)
-
-    if central.ndim != 3:
-        raise ValueError(
-            "central_field must have shape (nmaps, nzbins, n_patches); "
-            f"got {central.shape}"
-        )
-    if annulus.ndim != 4:
-        raise ValueError(
-            "annulus_field must have shape (nmaps, n_correlations, n_patches, nbins); "
-            f"got {annulus.shape}"
-        )
-    if central.shape[0] != annulus.shape[0]:
-        raise ValueError(
-            "central_field and annulus_field must have the same number of maps; "
-            f"got {central.shape[0]} and {annulus.shape[0]}"
-        )
-    if central.shape[2] != annulus.shape[2]:
-        raise ValueError(
-            "central_field and annulus_field must share n_patches; "
-            f"got {central.shape[2]} and {annulus.shape[2]}"
-        )
-
-    nzbins = central.shape[1]
-    n_correlations = annulus.shape[1]
-
-    if symmetric is None:
-        symmetric = n_correlations == nzbins * (nzbins + 1) // 2
-    elif symmetric and n_correlations != nzbins * (nzbins + 1) // 2:
-        raise ValueError(
-            f"symmetric=True needs the upper triangle of {nzbins} bins "
-            f"({nzbins * (nzbins + 1) // 2} combinations); got {n_correlations}"
-        )
-
-    if symmetric:
-        indices = _triplet_indices(nzbins)
-    else:
-        indices = _cross_indices(nzbins, n_correlations)
-
-    return _zeta_covariance(central, annulus, indices)
+    return _zeta_from_fields(central_field, annulus_field, symmetric=symmetric)
 
 
-def zeta_g_plus(M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+def zeta_g_plus(
+    M_g: np.ndarray, xi_p: np.ndarray, symmetric: Optional[bool] = None
+) -> np.ndarray:
     """i3PCF: galaxy density M_g at centre × cosmic shear ξ+ on annulus.
 
     Correlates the smoothed galaxy overdensity with the parity-even
     shear-shear correlation, probing the galaxy-matter-matter bispectrum.
+
+    The centre and the annulus are built from **different samples**, so their
+    tomographic binnings are independent and the output is one row per
+    ``(z_center, annulus_combination)``, centre-major --
+    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    is inferred from the counts and is only ambiguous when the two samples
+    happen to have the same number of bins; pass it explicitly there.
     """
-    return _zeta_from_fields(M_g, xi_p)
+    return _zeta_from_fields(M_g, xi_p, symmetric=symmetric)
 
 
-def zeta_g_minus(M_g: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+def zeta_g_minus(
+    M_g: np.ndarray, xi_m: np.ndarray, symmetric: Optional[bool] = None
+) -> np.ndarray:
     """i3PCF: galaxy density M_g at centre × cosmic shear ξ- on annulus.
 
     Like ζ_g+ but using the parity-odd shear correlation ξ-; sensitive
     to B-mode contamination.
+
+    The centre and the annulus are built from **different samples**, so their
+    tomographic binnings are independent and the output is one row per
+    ``(z_center, annulus_combination)``, centre-major --
+    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    is inferred from the counts and is only ambiguous when the two samples
+    happen to have the same number of bins; pass it explicitly there.
     """
-    return _zeta_from_fields(M_g, xi_m)
+    return _zeta_from_fields(M_g, xi_m, symmetric=symmetric)
 
 
 def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
@@ -428,12 +434,12 @@ def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
     Correlates the aperture mass (a pure E-mode measure of projected
     mass) with the shear-shear correlation ξ+.
     """
-    return _zeta_from_fields(M_a, xi_p)
+    return _zeta_from_fields(M_a, xi_p, symmetric=True)
 
 
 def zeta_a_minus(M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
     """i3PCF: aperture mass M_ap at centre × cosmic shear ξ- on annulus."""
-    return _zeta_from_fields(M_a, xi_m)
+    return _zeta_from_fields(M_a, xi_m, symmetric=True)
 
 
 def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
@@ -443,16 +449,25 @@ def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
     probability of finding three galaxies in a specific triangular
     configuration.
     """
-    return _zeta_from_fields(M_g, xi_g)
+    return _zeta_from_fields(M_g, xi_g, symmetric=True)
 
 
-def zeta_a_g(M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+def zeta_a_g(
+    M_a: np.ndarray, xi_g: np.ndarray, symmetric: Optional[bool] = None
+) -> np.ndarray:
     """i3PCF: aperture mass M_ap at centre × galaxy clustering ξ_g on annulus.
 
     Cross-correlates the projected mass (via lensing) with galaxy
     clustering, probing the matter-galaxy-galaxy bispectrum.
+
+    The centre and the annulus are built from **different samples**, so their
+    tomographic binnings are independent and the output is one row per
+    ``(z_center, annulus_combination)``, centre-major --
+    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    is inferred from the counts and is only ambiguous when the two samples
+    happen to have the same number of bins; pass it explicitly there.
     """
-    return _zeta_from_fields(M_a, xi_g)
+    return _zeta_from_fields(M_a, xi_g, symmetric=symmetric)
 
 
 def zeta_g_t(
@@ -478,14 +493,18 @@ def zeta_a_t(
 
 
 #: (result name, central field, annulus field, symmetric-triplet layout).
-#: ``None`` for the gamma_t pair: its layout is decided per call.
+#: ``True`` only where the centre and the annulus are built from the *same*
+#: sample, so the upper triangle is the right layout and the count is a real
+#: check.  ``None`` -- decided per call -- for every mixed-sample estimator:
+#: the two gamma_t entries, and the three that cross weak lensing with galaxy
+#: clustering.
 _ZETA_PLAN: Tuple[Tuple[str, str, str, Optional[bool]], ...] = (
-    ("zeta_g_plus", "M_g", "xi_p", True),
-    ("zeta_g_minus", "M_g", "xi_m", True),
+    ("zeta_g_plus", "M_g", "xi_p", None),
+    ("zeta_g_minus", "M_g", "xi_m", None),
     ("zeta_a_plus", "M_a", "xi_p", True),
     ("zeta_a_minus", "M_a", "xi_m", True),
     ("zeta_g_g", "M_g", "xi_g", True),
-    ("zeta_a_g", "M_a", "xi_g", True),
+    ("zeta_a_g", "M_a", "xi_g", None),
     ("zeta_g_t", "M_g", "xi_t", None),
     ("zeta_a_t", "M_a", "xi_t", None),
 )
@@ -495,7 +514,6 @@ def _batched_zetas(
     centrals: Dict[str, Any],
     annuli: Dict[str, Any],
     requested: Sequence[Tuple[str, str, str, Optional[bool]]],
-    xi_t_symmetric: Optional[bool],
 ) -> Optional[Dict[str, np.ndarray]]:
     """All requested estimators in one gather, one product and one mean.
 
@@ -512,8 +530,12 @@ def _batched_zetas(
     - a single estimator, where there is nothing to batch;
     - mixed dtypes, because concatenation would promote them and silently
       change an output's precision;
-    - annuli that disagree on the patch or angular-bin axes, which
-      concatenation cannot express.
+    - annuli that disagree on the patch or angular-bin axes, or centrals that
+      disagree on the patch axis, which concatenation cannot express.
+
+    The centrals may hold *different* numbers of tomographic bins -- M_ap over
+    source bins beside M_g over lens bins -- so every offset and layout below
+    is taken per field rather than from one shared ``nzbins``.
     """
     if len(requested) < 2:
         return None
@@ -528,42 +550,29 @@ def _batched_zetas(
         return None
     if len({a.shape[2:] for a in used_annuli}) != 1:
         return None
+    if len({a.shape[2] for a in used_centrals}) != 1:
+        return None
     if len({a.shape[0] for a in used_centrals + used_annuli}) != 1:
         return None
 
     xp = _xp(*used_centrals, *used_annuli)
-    nzbins = int(used_centrals[0].shape[1])
-    if any(int(a.shape[1]) != nzbins for a in used_centrals):
-        return None
 
     centre_offset, offset = {}, 0
     for name in central_names:
         centre_offset[name] = offset
-        offset += nzbins
+        offset += int(centrals[name].shape[1])
     annulus_offset, offset = {}, 0
     for name in annulus_names:
         annulus_offset[name] = offset
         offset += int(annuli[name].shape[1])
 
-    triangular = nzbins * (nzbins + 1) // 2
     centre_parts, pair_parts, plan = [], [], []
     for result_name, central_name, annulus_name, symmetric in requested:
+        nzbins = int(centrals[central_name].shape[1])
         n_correlations = int(annuli[annulus_name].shape[1])
-        if symmetric is None:
-            symmetric = (
-                n_correlations == triangular
-                if xi_t_symmetric is None
-                else xi_t_symmetric
-            )
-            if symmetric and n_correlations != triangular:
-                return None  # let the per-estimator path raise the real error
-        elif n_correlations != triangular:
-            return None
-        indices = (
-            _triplet_indices(nzbins)
-            if symmetric
-            else _cross_indices(nzbins, n_correlations)
-        )
+        if symmetric and n_correlations != nzbins * (nzbins + 1) // 2:
+            return None  # let the per-estimator path raise the real error
+        indices = _layout_indices(nzbins, n_correlations, symmetric)
         centre_parts.append(indices.centers + centre_offset[central_name])
         pair_parts.append(indices.pairs + annulus_offset[annulus_name])
         plan.append((result_name, len(indices.centers)))
@@ -599,52 +608,61 @@ def calculate_all_zetas(
     xi_g: Optional[np.ndarray] = None,
     xi_t: Optional[np.ndarray] = None,
     xi_t_symmetric: Optional[bool] = None,
+    symmetric: Optional[Mapping[str, bool]] = None,
 ) -> Dict[str, np.ndarray]:
     """Calculate all supported i3PCFs in Halder et al. notation.
 
     Keys in the returned dictionary are exactly the implemented helper names.
 
-    ``xi_t_symmetric`` is forwarded to the γ_t estimators; see
-    :func:`_zeta_from_cross_fields` for why the inferred default is not
-    always right for a GGL subset.
+    The centrals may carry different tomographies -- ``M_a`` over source bins
+    and ``M_g`` over lens bins is the 3x2pt case -- and each estimator is then
+    laid out accordingly: the upper triangle where the centre and the annulus
+    share a sample, one row per ``(z_center, annulus_combination)`` where they
+    do not.  :meth:`Correlation.zeta_triplets` and
+    :meth:`Correlation.zeta_cross_triplets` give the two row orders.
+
+    ``symmetric`` forces the layout of named estimators, e.g.
+    ``{"zeta_a_g": False}``.  Needed only when the counts are ambiguous --
+    equal numbers of source and lens bins make a cross annulus look like the
+    triangle -- and it is then the only way to say which was meant.
+    ``xi_t_symmetric`` is the older spelling of that override for the two γ_t
+    estimators; ``symmetric`` wins where both name one.
     """
     centrals = {"M_g": M_g, "M_a": M_a}
     annuli = {"xi_p": xi_p, "xi_m": xi_m, "xi_g": xi_g, "xi_t": xi_t}
-    requested = [
-        entry
-        for entry in _ZETA_PLAN
-        if centrals[entry[1]] is not None and annuli[entry[2]] is not None
-    ]
+    overrides = dict(symmetric or {})
+    unknown = set(overrides) - {entry[0] for entry in _ZETA_PLAN}
+    if unknown:
+        raise ValueError(f"unknown estimator name(s) in symmetric: {sorted(unknown)}")
+
+    requested: List[Tuple[str, str, str, Optional[bool]]] = []
+    for name, central_name, annulus_name, plan_symmetric in _ZETA_PLAN:
+        if centrals[central_name] is None or annuli[annulus_name] is None:
+            continue
+        if name in overrides:
+            resolved: Optional[bool] = bool(overrides[name])
+        elif plan_symmetric is None and annulus_name == "xi_t":
+            resolved = xi_t_symmetric
+        else:
+            resolved = plan_symmetric
+        requested.append((name, central_name, annulus_name, resolved))
+
     if requested:
         # Validate every pair through the individual helpers' checks first,
         # so a bad shape raises the same error whichever path runs.
-        for _name, central_name, annulus_name, symmetric in requested:
-            if symmetric:
+        for _name, central_name, annulus_name, resolved in requested:
+            if resolved:
                 _validate_and_cast_fields(
                     centrals[central_name], annuli[annulus_name]
                 )
-        batched = _batched_zetas(centrals, annuli, requested, xi_t_symmetric)
+        batched = _batched_zetas(centrals, annuli, requested)
         if batched is not None:
             return batched
 
-    results: Dict[str, np.ndarray] = {}
-
-    if M_g is not None and xi_p is not None:
-        results["zeta_g_plus"] = zeta_g_plus(M_g, xi_p)
-    if M_g is not None and xi_m is not None:
-        results["zeta_g_minus"] = zeta_g_minus(M_g, xi_m)
-    if M_a is not None and xi_p is not None:
-        results["zeta_a_plus"] = zeta_a_plus(M_a, xi_p)
-    if M_a is not None and xi_m is not None:
-        results["zeta_a_minus"] = zeta_a_minus(M_a, xi_m)
-    if M_g is not None and xi_g is not None:
-        results["zeta_g_g"] = zeta_g_g(M_g, xi_g)
-    if M_a is not None and xi_g is not None:
-        results["zeta_a_g"] = zeta_a_g(M_a, xi_g)
-    if M_g is not None and xi_t is not None:
-        results["zeta_g_t"] = zeta_g_t(M_g, xi_t, symmetric=xi_t_symmetric)
-    if M_a is not None and xi_t is not None:
-        results["zeta_a_t"] = zeta_a_t(M_a, xi_t, symmetric=xi_t_symmetric)
-
-    return results
+    return {
+        name: _zeta_from_fields(
+            centrals[central_name], annuli[annulus_name], symmetric=resolved
+        )
+        for name, central_name, annulus_name, resolved in requested
+    }
 

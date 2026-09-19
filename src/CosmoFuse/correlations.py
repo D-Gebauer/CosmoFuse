@@ -972,11 +972,38 @@ class Correlation:
         """Row order of the ζ estimators as ``(z_center, z2, z3)``.
 
         What :func:`~CosmoFuse.correlation_helpers.calculate_all_zetas`
-        returns along axis 1, and therefore what ``ZetaWriter`` stores.
+        returns along axis 1, and therefore what ``ZetaWriter`` stores --
+        for the estimators whose centre and annulus share one tomographic
+        sample: ``zeta_a_plus``, ``zeta_a_minus`` and ``zeta_g_g``.  The
+        others cross two samples and use :meth:`zeta_cross_triplets`.
         """
         import itertools
 
         return list(itertools.combinations_with_replacement(range(int(nzbins)), 3))
+
+    @staticmethod
+    def zeta_cross_triplets(
+        n_central_bins: int, n_annulus_combinations: int
+    ) -> List[Tuple[int, int]]:
+        """Row order of the ζ estimators that cross two samples.
+
+        ``(z_center, annulus_row)``, centre-major, where ``annulus_row``
+        indexes the 2PCF's own combination list --
+        :meth:`tomo_combinations` for ξ±/ξ_g, :meth:`ggl_combinations` for
+        ξ_t.  This is the layout of ``zeta_g_plus``, ``zeta_g_minus``,
+        ``zeta_a_g``, ``zeta_g_t`` and ``zeta_a_t`` whenever the centre and
+        the annulus are built from different samples -- which is every
+        6x2pt run with ``n_source != n_lens``, and, with an explicit
+        ``symmetric=False``, also when the two counts happen to match::
+
+            >>> Correlation.zeta_cross_triplets(2, 3)
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+        """
+        return [
+            (c, a)
+            for c in range(int(n_central_bins))
+            for a in range(int(n_annulus_combinations))
+        ]
 
     def _get_tomo_combination_indices(
         self, nzbins: int, nzbin_combs: int

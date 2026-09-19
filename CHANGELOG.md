@@ -1,5 +1,76 @@
 # Changelog
 
+## 6.4.0 (2026-09-19)
+
+Weak lensing and galaxy clustering may now carry **different tomographies**.
+A full 6x2pt i3PCF -- 4 source bins against 5 lens bins -- did not run before
+this release: three of the eight ζ estimators raised.
+
+### Mixed-sample ζ estimators
+
+`zeta_g_plus`, `zeta_g_minus` and `zeta_a_g` cross one sample's aperture with
+the other sample's 2PCF, but were built on `_zeta_from_fields`, which asserted
+that the annulus held the upper triangle of the *centre's* bins and laid the
+output out as `combinations_with_replacement(range(nzbins), 3)`.  With
+`n_source != n_lens` that assertion is simply false, and
+`calculate_all_zetas(M_a=..., M_g=..., xi_p=..., xi_g=...)` died on it:
+
+    ValueError: annulus_field has incompatible number of tomographic pairs;
+    expected 15 for 5 bins, got 10
+
+- **The triangle rule is now applied only where it means something.**
+  `_zeta_from_fields` takes `symmetric`: `True` keeps the upper triangle and
+  the count check, `False` gives one row per `(z_center, annulus_combination)`
+  centre-major, `None` infers from the counts.  `_zeta_from_cross_fields`
+  becomes an alias of it -- the two only ever differed in this.
+- `zeta_a_plus`, `zeta_a_minus` and `zeta_g_g` are built from a single sample,
+  so they pass `symmetric=True` and keep the strict check they always had.
+  The three mixed estimators default to inference, and gained an explicit
+  `symmetric` argument.
+- **`_batched_zetas` no longer requires the centrals to agree on `nzbins`.**
+  It read one `nzbins` off the first central and bailed out when another
+  disagreed, so M_ap over 4 source bins beside M_g over 5 lens bins fell back
+  to the per-estimator path -- which then raised.  Offsets and layouts are
+  taken per field; the 4+5 case batches and is bitwise equal to eight separate
+  calls.
+- `calculate_all_zetas` gained `symmetric`, a per-estimator override
+  (`{"zeta_a_g": False}`).  `xi_t_symmetric` is retained as the older spelling
+  of the same thing for γ_t, and `symmetric` wins where both name an
+  estimator.
+
+### The one ambiguous case, unchanged
+
+With `n_source == n_lens` a cross annulus holds exactly `nz(nz+1)/2`
+combinations, so inference cannot distinguish it from the triangle.  That case
+keeps the historical reading -- every pre-6.4.0 output is bit-for-bit
+unchanged -- and `symmetric=False` is how you ask for the other one.  This is
+the trap `_zeta_from_cross_fields` has always documented for γ_t; it now
+applies to five estimators and is spelled the same way for all of them.
+
+### Row order
+
+- **`Correlation.zeta_cross_triplets(n_central_bins, n_annulus_combinations)`**
+  gives the row order of every cross-sample ζ: `(z_center, annulus_row)`,
+  centre-major, where `annulus_row` indexes `tomo_combinations` (ξ±, ξ_g) or
+  `ggl_combinations` (ξ_t).  ζ_g_t and ζ_a_t had used this layout since 5.0
+  with no public accessor for it.
+- `zeta_triplets` is unchanged and now says which estimators it describes.
+
+### What this costs
+
+One assertion.  `zeta_g_plus(M_g, xi_p)` with a non-triangular annulus used to
+raise and now returns a cross layout, so a genuinely mis-shaped ξ± is no
+longer caught by the pair count -- it cannot be, once the count is legal.
+`symmetric=True` reinstates the check for callers who want it, and the
+same-sample estimators never lost it.
+
+### Tests
+
+`tests/test_correlation_helpers.py` grew the 4-source/5-lens table: all eight
+estimators against the literal definition, 415 triplets per angular bin, the
+batched path equal to the single calls, the equal-count case pinned to the old
+layout, the override, and `zeta_cross_triplets` gated against `_cross_indices`.
+
 ## 6.3.0 (2026-09-19)
 
 An audit pass: everything that could be done without losing performance,

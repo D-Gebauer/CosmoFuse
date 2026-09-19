@@ -242,12 +242,18 @@ part of the contract, not something to rederive:
 Correlation.tomo_combinations(4)         # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
 Correlation.tomo_combinations(4, True)   # gc_auto_correlations_only=True: the diagonal only
 Correlation.ggl_combinations(2, 4)       # xi_t rows as (lens_bin, source_bin)
-Correlation.zeta_triplets(4)             # zeta rows as (z_center, z2, z3)
+Correlation.zeta_triplets(4)             # same-sample zeta rows: (z_center, z2, z3)
+Correlation.zeta_cross_triplets(5, 10)   # cross-sample zeta rows: (z_center, annulus_row)
 ```
 
 Note that `gc_auto_correlations_only=True` changes the length of the $\xi_g$
 vector from `nz(nz+1)/2` to `nz` — a shape check will not catch a mislabelled
 data vector, so index it by the accessor.
+
+A ζ estimator uses `zeta_triplets` when its centre and its annulus are built
+from the **same** sample (`zeta_a_plus`, `zeta_a_minus`, `zeta_g_g`) and
+`zeta_cross_triplets` when they are not (`zeta_g_plus`, `zeta_g_minus`,
+`zeta_a_g`, `zeta_g_t`, `zeta_a_t`) — see below.
 
 #### 1. Single Map Pair (Patch-Level)
 
@@ -475,6 +481,28 @@ zg_g = zeta_g_g(M_g, xi_g)
 za_g = zeta_a_g(M_a, xi_g)
 zg_t = zeta_g_t(M_g, xi_t)
 za_t = zeta_a_t(M_a, xi_t)
+```
+
+### Mixed tomographies
+
+The source and lens samples need not share a binning: `M_a` over 4 source bins
+beside `M_g` over 5 lens bins is the ordinary 6x2pt case. An estimator whose
+centre and annulus come from one sample keeps the upper-triangle layout
+(`zeta_triplets`); one that crosses two samples returns a row per
+`(z_center, annulus_combination)`, centre-major (`zeta_cross_triplets`).
+
+The layout is inferred from the shapes, which is unambiguous except when the
+two samples happen to have the **same number of bins** — a cross annulus then
+holds exactly `nz(nz+1)/2` combinations and is read as the triangle, the
+historical behaviour. Say which you meant:
+
+```python
+za_g = zeta_a_g(M_a, xi_g, symmetric=False)   # 4 x 15 rows, not the triangle
+
+results = calculate_all_zetas(
+    M_g=M_g, M_a=M_a, xi_p=xi_p, xi_g=xi_g,
+    symmetric={"zeta_a_g": False, "zeta_g_plus": False},
+)
 ```
 
 Unified helper:
