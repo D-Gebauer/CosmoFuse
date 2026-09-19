@@ -1,4 +1,6 @@
-from typing import Callable, Optional, Tuple, Union
+import itertools
+import weakref
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import healpy as hp
 import numpy as np
@@ -186,3 +188,50 @@ def select_patch_centers(
         accepted[i] = masked_fraction <= f_mask
 
     return phi_c[accepted], theta_c[accepted]
+
+
+_OBJECT_SERIALS: Dict[int, Tuple[Any, int]] = {}
+_SERIAL_COUNTER = itertools.count(1)
+
+
+def live_object_serial(obj: Any) -> int:
+    """A number identifying *this* object for as long as it is alive.
+
+    ``id()`` and a CUDA pool pointer are unique only among live objects:
+    CPython reuses addresses as soon as an object is collected, and cupy's
+    memory pool hands a freed pointer straight to the next allocation.  A
+    cache keyed on either can therefore be handed a *different* object that
+    compares equal to the one it stored — which is how a transient aperture
+    filter, and a weight map rebuilt once per realisation, both end up
+    silently reusing the previous one's cached result.
+
+    Pairing the address with a serial closes that.  The entry is reused only
+    while the weak reference still resolves to the same object; a new object
+    at a recycled address gets a fresh serial.  The reference keeps nothing
+    alive and its callback drops the entry when the object dies, so the table
+    is bounded by the number of live objects that were ever fingerprinted.
+
+    Objects that cannot be weak-referenced fall back to their address, which
+    is no worse than what this replaces.
+    """
+    key = id(obj)
+    entry = _OBJECT_SERIALS.get(key)
+    if entry is not None and entry[0]() is obj:
+        return entry[1]
+
+    serial = next(_SERIAL_COUNTER)
+
+    def _drop(dead_ref: Any, _key: int = key) -> None:
+        # Only if the address has not already been re-registered: the
+        # callback runs after the object is gone, by which time a new one
+        # may already occupy it.
+        current = _OBJECT_SERIALS.get(_key)
+        if current is not None and current[0] is dead_ref:
+            del _OBJECT_SERIALS[_key]
+
+    try:
+        ref = weakref.ref(obj, _drop)
+    except TypeError:
+        return key
+    _OBJECT_SERIALS[key] = (ref, serial)
+    return serial

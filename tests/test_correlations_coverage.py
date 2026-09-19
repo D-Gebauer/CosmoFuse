@@ -146,7 +146,11 @@ class TestCorrelationCoverage(unittest.TestCase):
         def custom_filter(theta):
             return np.full_like(theta, 2.0)
 
-        self.assertIsInstance(corr._aperture_filter_key(custom_filter), int)
+        # not "Q_crittenden", and -- crucially -- not id(), which a
+        # collected filter's successor would reuse
+        key = corr._aperture_filter_key(custom_filter)
+        self.assertNotEqual(key, "Q_crittenden")
+        self.assertEqual(key, corr._aperture_filter_key(custom_filter))
         vals = corr._evaluate_aperture_filter(custom_filter, np.array([1.0], dtype=np.float64))
         np.testing.assert_allclose(vals, np.array([2.0], dtype=np.float64))
 
@@ -232,7 +236,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         corr.prepare()
         self.assertEqual(corr.compute_context.prepare_version, prepare_version_before)
 
-    def test_save_pairs_warns_when_host_pair_arrays_released(self):
+    def test_save_pairs_raises_when_host_pair_arrays_released(self):
         corr = Correlation(
             nside=1,
             phi_center=np.array([0.0]),
@@ -250,7 +254,10 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             outpath = Path(tmpdir) / "pairs.h5"
-            with self.assertWarnsRegex(RuntimeWarning, "Cannot save pairs"):
+            # raises rather than warns: a warning is invisible under -W
+            # ignore, and the batch job would exit 0 with no file after
+            # hours of pair finding
+            with self.assertRaisesRegex(RuntimeError, "Cannot save pairs"):
                 corr.save_pairs(str(outpath))
             self.assertFalse(outpath.exists())
 
@@ -3168,89 +3175,123 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(xip.shape, (self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (self.corr.n_patches, self.corr.nbins))
 
-        def test_xipm_gpu_fallback_path_with_fake_cupy(self):
-            """Cover the non-CPU xipm path with a fake CuPy backend."""
-            import importlib.util
-            import sys
-            from types import ModuleType
-            from pathlib import Path
+    def test_xipm_gpu_fallback_path_with_fake_cupy(self):
+        """Cover the non-CPU xipm path with a fake CuPy backend."""
+        import importlib.util
+        import sys
+        from types import ModuleType
+        from pathlib import Path
 
-            module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
-            module_name = "CosmoFuse.backend_fake_cupy_xipm"
-            fake_cupy = ModuleType("cupy")
+        module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
+        module_name = "CosmoFuse.backend_fake_cupy_xipm"
+        fake_cupy = ModuleType("cupy")
 
-            class _FakeRuntime:
-                @staticmethod
-                def getDeviceCount():
-                    return 1
+        class _FakeRuntime:
+            @staticmethod
+            def getDeviceCount():
+                return 1
 
-            class _FakeCuda:
-                runtime = _FakeRuntime()
+        class _FakeCuda:
+            runtime = _FakeRuntime()
 
-                class Device:
-                    def __init__(self, _device_id):
-                        self._device_id = _device_id
+            class Device:
+                def __init__(self, _device_id):
+                    self._device_id = _device_id
 
-                    def __enter__(self):
-                        return self
+                def __enter__(self):
+                    return self
 
-                    def __exit__(self, exc_type, exc, tb):
-                        return False
+                def __exit__(self, exc_type, exc, tb):
+                    return False
 
-            fake_cupy.asarray = np.asarray
-            fake_cupy.asnumpy = np.asarray
-            fake_cupy.zeros = np.zeros
-            fake_cupy.ones = np.ones
-            fake_cupy.sum = np.sum
-            fake_cupy.mean = np.mean
-            fake_cupy.conjugate = np.conjugate
-            fake_cupy.add = np.add
-            fake_cupy.float32 = np.float32
-            fake_cupy.float64 = np.float64
-            fake_cupy.complex64 = np.complex64
-            fake_cupy.complex128 = np.complex128
-            fake_cupy.uint32 = np.uint32
-            fake_cupy.int32 = np.int32
-            fake_cupy.cuda = _FakeCuda()
+        class _FakeElementwiseKernel:
+            """Just enough of ``cupy.ElementwiseKernel`` to exercise the
+            wrapper around it.
 
-            sys.modules["cupy"] = fake_cupy
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, module_path)
-                if spec is None or spec.loader is None:
-                    self.fail("Could not load backend module for fake CuPy import")
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+            The body is CUDA C and cannot be evaluated here, so the outputs
+            are zero-filled: this covers the *path* (upload, row expansion,
+            launch, reduce, normalise, shape) and is deliberately not a
+            numerical check -- ``tests/cuda_emulation.py`` holds the numpy
+            twins that check the arithmetic.
+            """
 
-                corr = Correlation(
-                    nside=self.nside,
-                    phi_center=self.phi_center,
-                    theta_center=self.theta_center,
-                    nbins=self.nbins,
-                    device="gpu",
+            def __init__(self, in_params, out_params, body, name, **_kwargs):
+                self.n_out = len(
+                    [p for p in out_params.split(",") if p.strip()]
                 )
-                corr.backend = module.get_backend("gpu")
+                self.name = name
 
-                n_pairs = 4
-                corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint32)]
-                corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex128)]
-                corr.bins = [np.array([2, 2], dtype=np.uint32)]
-                corr.prepare()
+            def __call__(self, *args, **_kwargs):
+                outs = args[-self.n_out:]
+                for out in outs:
+                    out[...] = 0
+                return outs[0] if self.n_out == 1 else outs
 
-                npix = 12 * self.nside**2
-                g11 = np.ones(npix, dtype=np.float64)
-                g21 = np.ones(npix, dtype=np.float64)
-                g12 = np.ones(npix, dtype=np.float64)
-                g22 = np.ones(npix, dtype=np.float64)
-                w1 = np.ones(npix, dtype=np.float64)
-                w2 = np.ones(npix, dtype=np.float64)
+        fake_cupy.ElementwiseKernel = _FakeElementwiseKernel
+        fake_cupy.asarray = np.asarray
+        fake_cupy.asnumpy = np.asarray
+        fake_cupy.zeros = np.zeros
+        fake_cupy.ones = np.ones
+        fake_cupy.sum = np.sum
+        fake_cupy.mean = np.mean
+        fake_cupy.conjugate = np.conjugate
+        fake_cupy.add = np.add
+        fake_cupy.float32 = np.float32
+        fake_cupy.float64 = np.float64
+        fake_cupy.complex64 = np.complex64
+        fake_cupy.complex128 = np.complex128
+        fake_cupy.uint32 = np.uint32
+        fake_cupy.int32 = np.int32
+        for _name in (
+            "ascontiguousarray", "empty", "where", "divide", "real",
+            "stack", "transpose", "take", "reshape", "concatenate",
+            "add", "multiply", "result_type", "ndarray", "int64",
+            "uint16", "int16", "bool_", "arange", "asanyarray",
+        ):
+            setattr(fake_cupy, _name, getattr(np, _name))
+        fake_cupy.cuda = _FakeCuda()
 
-                xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+        sys.modules["cupy"] = fake_cupy
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                self.fail("Could not load backend module for fake CuPy import")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
 
-                self.assertEqual(xip.shape, (self.n_patches, self.nbins))
-                self.assertEqual(xim.shape, (self.n_patches, self.nbins))
-            finally:
-                sys.modules.pop("cupy", None)
-                sys.modules.pop(module_name, None)
+            corr = Correlation(
+                nside=self.nside,
+                phi_center=self.phi_center,
+                theta_center=self.theta_center,
+                nbins=self.nbins,
+                device="gpu",
+            )
+            corr.backend = module.get_backend("gpu")
+
+            n_pairs = 4
+            corr.pair_inds = [np.zeros((2, n_pairs), dtype=np.uint32)]
+            corr.pair_exp2phi = [np.ones((2, n_pairs), dtype=np.complex128)]
+            corr.bins = [np.array([2, 2], dtype=np.uint32)]
+            corr.prepare()
+
+            npix = 12 * self.nside**2
+            g11 = np.ones(npix, dtype=np.float64)
+            g21 = np.ones(npix, dtype=np.float64)
+            g12 = np.ones(npix, dtype=np.float64)
+            g22 = np.ones(npix, dtype=np.float64)
+            w1 = np.ones(npix, dtype=np.float64)
+            w2 = np.ones(npix, dtype=np.float64)
+
+            xip, xim = corr.compute_shear_shear(g11, g21, g12, g22, w1, w2)
+
+            self.assertEqual(xip.shape, (corr.n_patches, corr.nbins))
+            self.assertEqual(xim.shape, (corr.n_patches, corr.nbins))
+            self.assertTrue(np.all(np.isfinite(np.asarray(xip))))
+            self.assertTrue(np.all(np.isfinite(np.asarray(xim))))
+        finally:
+            sys.modules.pop("cupy", None)
+            sys.modules.pop(module_name, None)
+
     def test_vectorized_shear_shear_cpu_skips_sumofweights(self):
         """On the CPU backend the kernel accumulates the weight sums, so
         neither the fingerprint cache nor the reduce machinery runs."""

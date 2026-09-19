@@ -35,7 +35,8 @@ _PATCH_AXIS: Dict[str, Tuple[int, ...]] = {
     "vectorized_density_shear": (-2,),
     "get_full_tomo_shear": (-1, -2, -2),
     "get_full_tomo_density": (-1, -2),
-    "get_full_tomo_ggl": (-2,),
+    # xi_t, then the optional N_ap / M_ap aperture outputs
+    "get_full_tomo_ggl": (-2, -1, -1),
     "get_3x2pt_tomo": (-1, -1, -2, -2, -2, -2),
 }
 
@@ -90,12 +91,61 @@ class MultiDeviceCorrelation:
 
     # ---- attributes that are the same on every part -----------------------
 
+    # Forwarded to ``parts[0]`` because they describe the geometry as a
+    # whole, not one device's share of it: every part is built with the same
+    # binning, the same mask and the same row space.  Anything *per patch*
+    # is deliberately absent -- ``phi_center``, ``theta_center``,
+    # ``n_patches``, ``patch_ranges`` -- because the first device's value is
+    # only its own slice, and returning that silently is how a 917-patch run
+    # comes back with 459 patches and no error.
+    _SHARED_ATTRIBUTES = frozenset(
+        {
+            "nside",
+            "npix",
+            "nbins",
+            "binedges",
+            "bincenters",
+            "theta_min",
+            "theta_max",
+            "theta_Q",
+            "patch_size",
+            "map_dtype",
+            "acc_dtype",
+            "rotation_dtype",
+            "index_dtype",
+            "map_precision",
+            "rotation_precision",
+            "accumulation_precision",
+            "pair_search_precision",
+            "resolution_factor",
+            "aperture_nside",
+            "level_table",
+            "row_pix",
+            "row_pix_hash",
+            "n_active",
+            "n_rows",
+            "n_appended",
+            "pack_pairs",
+            "pack_host_pairs",
+            "mask",
+        }
+    )
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_") or not self.__dict__.get("parts"):
             raise AttributeError(name)
         if name in _PATCH_AXIS:
             return self._dispatch_method(name)
-        return getattr(self.parts[0], name)
+        if name in self._SHARED_ATTRIBUTES:
+            return getattr(self.parts[0], name)
+        raise NotImplementedError(
+            f"{name!r} is not defined for a multi-device group: each part holds "
+            f"its own patch range, so the first device's value would be a "
+            f"fraction of the answer. Reach for the part you mean "
+            f"(group.parts[i].{name}), or use a single-device Correlation. "
+            f"The attributes that are the same on every part are: "
+            f"{', '.join(sorted(self._SHARED_ATTRIBUTES))}."
+        )
 
     @property
     def nbins(self) -> int:
@@ -155,6 +205,13 @@ class MultiDeviceCorrelation:
             first = results[0]
             if not isinstance(first, tuple):
                 return self._concat([r for r in results], axes[0])
+            if len(first) > len(axes):
+                raise NotImplementedError(
+                    f"{name} returned {len(first)} arrays but only "
+                    f"{len(axes)} patch axes are declared for it in "
+                    f"_PATCH_AXIS; the extra outputs cannot be concatenated "
+                    f"without knowing which axis is the patch axis."
+                )
             return tuple(
                 self._concat([r[k] for r in results], axes[k])
                 for k in range(len(first))

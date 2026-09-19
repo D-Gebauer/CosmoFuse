@@ -585,10 +585,17 @@ class TestCorrelation(unittest.TestCase):
         self.assertFalse(corr._is_backend_native_array(FakeNoDevice([1.0, 2.0])))
         self.assertFalse(corr._is_backend_native_array(FakeGPUArray([1.0, 2.0], device_id=1)))
 
-        fp = corr._fingerprint_weights(FakeGPUArray([1.0, 2.0], with_ptr=False))
+        first = FakeGPUArray([1.0, 2.0], with_ptr=False)
+        fp = corr._fingerprint_weights(first)
         self.assertEqual(fp[0], (2,))
         self.assertEqual(fp[1], np.dtype(np.float64).str)
-        self.assertIn("device:0;ptr:", fp[2])
+        # a per-live-object serial, deliberately not the pool pointer: cupy
+        # hands a freed pointer straight to the next allocation
+        self.assertIn("device:0;obj:", fp[2])
+        self.assertEqual(corr._fingerprint_weights(first), fp)
+        self.assertNotEqual(
+            corr._fingerprint_weights(FakeGPUArray([1.0, 2.0], with_ptr=False)), fp
+        )
 
     def test_get_aperture_methods_accept_backend_native_arrays_without_input_transfer(self):
         corr = Correlation(

@@ -347,10 +347,19 @@ class ZetaWriter:
         if self.swmr:
             self._file.swmr_mode = True
 
-    @staticmethod
-    def _chunks(arr: np.ndarray) -> Tuple[int, ...]:
+    def _chunks(self, arr: np.ndarray) -> Tuple[int, ...]:
+        """Chunk length in map-sets, capped by the flush window.
+
+        A chunk is the unit HDF5 reads, modifies and writes.  Sizing it at
+        ~1 MiB regardless of ``flush_every`` means a 50-map flush touches a
+        chunk that spans many more than 50 maps, so every flush rewrites the
+        whole partially-filled chunk -- write amplification proportional to
+        the ratio, and a file that stays padded to the chunk boundary.
+        Capping it at the flush window makes each flush write whole chunks.
+        """
         per_map = int(arr.dtype.itemsize * np.prod(arr.shape[1:], dtype=np.int64))
         n = max(1, _CHUNK_BYTES // max(per_map, 1))
+        n = min(n, max(1, int(self.flush_every)))
         return (int(n),) + arr.shape[1:]
 
     def _append(self, payload: Mapping[str, np.ndarray]) -> None:

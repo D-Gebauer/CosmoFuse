@@ -20,6 +20,8 @@ from typing import Any, Optional, Sequence, Tuple, Union
 import numpy as np
 from numba import njit, prange
 
+from .utils import live_object_serial
+
 logger = logging.getLogger(__name__)
 
 # --std is mandatory: NVRTC refuses to instantiate name_expressions
@@ -120,7 +122,15 @@ def _cpu_aperture_density_kernel(
     """Galaxy mean density M_g within an aperture: weighted δ_g convolved
     with the compensated filter Q(θ)."""
     n_patches = Q_offsets.shape[0] - 1
-    zero = map_values[0] * 0.0
+    # float64 explicitly, not ``x[0] * 0.0``.  That expression types as
+    # float64 under numba (python-float promotion) but as float32 under
+    # NUMBA_DISABLE_JIT=1, which pytest-env forces -- so the suite was
+    # measuring a float32 accumulation of a kernel that ships accumulating in
+    # float64.  Pinning it keeps the shipped numbers and makes the tests
+    # exercise them.  (It is deliberately not ``acc_dtype``: these four
+    # kernels reduce over a whole aperture disc or angular bin, where a
+    # float32 accumulator loses precision for nothing.)
+    zero = np.float64(0)
 
     for patch_idx in prange(n_patches):
         start = Q_offsets[patch_idx]
@@ -154,7 +164,15 @@ def _cpu_aperture_shear_kernel(
     relative to the patch centre.
     """
     n_patches = Q_offsets.shape[0] - 1
-    zero = g1[0] * 0.0
+    # float64 explicitly, not ``x[0] * 0.0``.  That expression types as
+    # float64 under numba (python-float promotion) but as float32 under
+    # NUMBA_DISABLE_JIT=1, which pytest-env forces -- so the suite was
+    # measuring a float32 accumulation of a kernel that ships accumulating in
+    # float64.  Pinning it keeps the shipped numbers and makes the tests
+    # exercise them.  (It is deliberately not ``acc_dtype``: these four
+    # kernels reduce over a whole aperture disc or angular bin, where a
+    # float32 accumulator loses precision for nothing.)
+    zero = np.float64(0)
 
     for patch_idx in prange(n_patches):
         start = Q_offsets[patch_idx]
@@ -954,8 +972,25 @@ def _combination_layout(
 
     The (tiny) device arrays are compared once per array object and the
     result cached by identity: the orchestrator caches and reuses them.
+
+    By ``live_object_serial`` and not ``id()``.  The orchestrator caches the
+    *canonical* combination arrays, but an explicit ``ggl_bin_combinations``
+    selection builds fresh ones on every call and drops them, so a second
+    selection can land on the recycled addresses of the first -- and the
+    layout carries ``rows``, the canonical row of every requested
+    combination, so a stale hit scatters the results into the previous
+    selection's rows.  The collision needs *both* ids to recycle at once and
+    CPython's LIFO free lists tend to swap rather than match them (it did not
+    fire in 4000 alternating calls here), but it is allocator luck, not a
+    guarantee.
     """
-    key = (id(comb_i), id(comb_j), kind, int(n1), int(n2))
+    key = (
+        live_object_serial(comb_i),
+        live_object_serial(comb_j),
+        kind,
+        int(n1),
+        int(n2),
+    )
     cached = _COMBINATION_LAYOUT_CACHE.get(key, _KERNEL_CACHE_MISS)
     if cached is not _KERNEL_CACHE_MISS:
         return cached
@@ -990,13 +1025,31 @@ def _combination_layout(
     return layout
 
 
+#: Exception names that mean "this source will never compile for these
+#: template arguments".  Anything else -- an IO error reading the NVRTC disk
+#: cache, a transient driver or allocation failure -- may succeed next time.
+_DETERMINISTIC_COMPILE_FAILURES = frozenset(
+    {"CompileException", "NVRTCError", "JitifyException", "NVRTCException"}
+)
+
+
+def _is_deterministic_compile_failure(exc: BaseException) -> bool:
+    return type(exc).__name__ in _DETERMINISTIC_COMPILE_FAILURES
+
+
 def _make_raw_kernel_builder(module: Any, filename: str, what: str) -> Any:
     """Per-builder cache of compiled RawKernels keyed by (name, template args).
 
-    A failed compilation is cached negatively (None) so it is not retried
-    and re-logged on every call.
+    A *deterministic* compile failure is cached negatively (None) so it is
+    not retried and re-logged on every call.  A transient one is **not**:
+    caching it would silently pin the process to the slower fallback kernel
+    for its whole lifetime, with no error and no way to tell from a
+    configuration that legitimately has no tiled kernel.  The retry is
+    logged once per key so a genuinely broken build still says so, without
+    a line per call.
     """
     kernel_cache: dict[tuple[str, tuple[str, ...]], Any] = {}
+    warned: set[tuple[str, tuple[str, ...]]] = set()
 
     def _get_or_build(kernel_name: str, template_args: Sequence[Any]) -> Optional[Any]:
         targs = tuple(str(a) for a in template_args)
@@ -1009,7 +1062,15 @@ def _make_raw_kernel_builder(module: Any, filename: str, what: str) -> Any:
         try:
             kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
-            logger.warning("%s RawKernel compilation failed (%s): %s", what, name_expression, exc)
+            if key not in warned:
+                warned.add(key)
+                logger.warning(
+                    "%s RawKernel compilation failed (%s): %s", what, name_expression, exc
+                )
+            if not _is_deterministic_compile_failure(exc):
+                # Retry next call rather than downgrading this process to
+                # the fallback kernel for good.
+                return None
             kernel = None
         kernel_cache[key] = kernel
         return kernel
@@ -1373,7 +1434,15 @@ def _cpu_xipm_cross_corr_kernel(
     accumulated in the same pass over the pair list.
     """
     nbins = offsets.shape[0] - 1
-    zero = wa[0] * 0.0
+    # float64 explicitly, not ``x[0] * 0.0``.  That expression types as
+    # float64 under numba (python-float promotion) but as float32 under
+    # NUMBA_DISABLE_JIT=1, which pytest-env forces -- so the suite was
+    # measuring a float32 accumulation of a kernel that ships accumulating in
+    # float64.  Pinning it keeps the shipped numbers and makes the tests
+    # exercise them.  (It is deliberately not ``acc_dtype``: these four
+    # kernels reduce over a whole aperture disc or angular bin, where a
+    # float32 accumulator loses precision for nothing.)
+    zero = np.float64(0)
     for b in prange(nbins):
         ab_p_re = zero
         ab_m_re = zero
@@ -1452,7 +1521,15 @@ def _cpu_xipm_auto_corr_kernel(
     the weight sum (denominator) is accumulated in the same pass.
     """
     nbins = offsets.shape[0] - 1
-    zero = w1[0] * 0.0
+    # float64 explicitly, not ``x[0] * 0.0``.  That expression types as
+    # float64 under numba (python-float promotion) but as float32 under
+    # NUMBA_DISABLE_JIT=1, which pytest-env forces -- so the suite was
+    # measuring a float32 accumulation of a kernel that ships accumulating in
+    # float64.  Pinning it keeps the shipped numbers and makes the tests
+    # exercise them.  (It is deliberately not ``acc_dtype``: these four
+    # kernels reduce over a whole aperture disc or angular bin, where a
+    # float32 accumulator loses precision for nothing.)
+    zero = np.float64(0)
     for b in prange(nbins):
         p_acc_re = zero
         m_acc_re = zero
@@ -2545,12 +2622,29 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
         device_id = None
         device_type = 'cpu'
     elif device.lower() == 'auto':
+        # 'auto' promises a working backend, so probe for a usable *device*
+        # and not merely for an importable cupy.  A driver/runtime mismatch,
+        # CUDA_VISIBLE_DEVICES="", an unusable card -- all of these import
+        # cleanly and then raise CUDARuntimeError on first use, which is a
+        # crash where the caller asked for a fallback.  'gpu' and an explicit
+        # device id stay strict: an explicit request must fail loudly.
         try:
             import cupy
+
+            if cupy.cuda.runtime.getDeviceCount() < 1:
+                raise RuntimeError("no CUDA device is visible")
             device_id = 0
             device_type = 'gpu'
         except ImportError:
             warnings.warn("Cupy not installed, falling back to CPU (numpy).")
+            device_id = None
+            device_type = 'cpu'
+        except Exception as exc:
+            warnings.warn(
+                f"Cupy is installed but no usable CUDA device was found "
+                f"({type(exc).__name__}: {exc}); falling back to CPU (numpy). "
+                f"Pass device='gpu' or a device id to make this an error."
+            )
             device_id = None
             device_type = 'cpu'
     else:

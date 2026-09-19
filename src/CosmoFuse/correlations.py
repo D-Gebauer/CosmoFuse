@@ -38,12 +38,26 @@ from .treecode import (
     level_groups,
     validate_resolution_factor,
 )
-from .utils import pixel2RaDec, select_patch_centers
+from .utils import live_object_serial, pixel2RaDec, select_patch_centers
 
 logger = logging.getLogger(__name__)
 
 # Digest memo for read-only weight arrays (see _fingerprint_weights).
 _FINGERPRINT_MEMO: Dict[Any, Any] = {}
+#: Frozen row-space map memo bounds (see ``_coerce_map_input_array``).
+_FROZEN_MAP_MEMO_MAX_ENTRIES = 16
+_FROZEN_MAP_MEMO_MAX_BYTES = 4 << 30
+
+
+def _frozen_memo_bytes(memo: Dict[Any, Any]) -> int:
+    """Device/host bytes held by the frozen row-space memo, derived blocks
+    included."""
+    total = 0
+    for _source, rows, blocks in memo.values():
+        total += int(getattr(rows, "nbytes", 0))
+        for block in blocks.values():
+            total += int(getattr(block, "nbytes", 0))
+    return total
 
 _ALLOWED_FLOAT_PRECISIONS = {
     "float32": np.float32,
@@ -514,6 +528,10 @@ class Correlation:
             _compute_aperture_shear_all_patches
         )
         self._compute_pairs_kernel = _get_pairs_numba_kernel(fastmath)
+        # Truncation radius of the aperture geometry, in arcminutes.  Q
+        # has decayed below 1e-3 of its peak by 5 theta_Q (Q_crittenden has
+        # formally unbounded support); Q_schneider is exactly zero past
+        # theta_Q.  Single source: pair_geometry builds the discs from it.
         self.radius_filter = 5 * self.theta_Q
 
         self.resolution_factor = validate_resolution_factor(resolution_factor)
@@ -583,6 +601,16 @@ class Correlation:
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
+        # Aperture geometry, filled by calculate_pairs_M_a()/load_pairs().
+        # Empty rather than absent: ensure_aperture_pairs() reads Q_inds to
+        # decide whether the cached geometry can be reused, so without these
+        # every aperture entry point raised AttributeError on a fresh
+        # instance instead of building the geometry on demand.
+        self.Q_inds: List[np.ndarray] = []
+        self.Q_cos: List[np.ndarray] = []
+        self.Q_sin: List[np.ndarray] = []
+        self.Q_val: List[np.ndarray] = []
+        self.Q_patch_area: List[float] = []
         # Host-packed pair payload (pack_host_pairs=True); replaces
         # pair_inds/pair_exp2phi rather than accompanying them.
         self.packed_pairs: Optional[List[np.ndarray]] = None
@@ -590,6 +618,7 @@ class Correlation:
         self.packed_block_sizes: Optional[List[np.ndarray]] = None
         self.compute_context.initialize_runtime_state()
         self._aperture_filter_active_key = "Q_crittenden"
+        self._prepare_failed = False
 
     @classmethod
     def from_mask(
@@ -740,10 +769,11 @@ class Correlation:
             rotation_complex_dtype=self.rotation_complex_dtype,
             index_dtype=self.index_dtype,
         )
+        search_dtype = np.dtype(self.pair_search_precision)
         pts = np.arange(3, dtype=self.index_dtype)
-        ra = np.array([0.0, 1e-3, 2e-3], dtype=self.rotation_dtype)
-        dec = np.array([0.0, 1e-3, 0.0], dtype=self.rotation_dtype)
-        binedges = np.asarray(self.binedges, dtype=self.rotation_dtype)
+        ra = np.array([0.0, 1e-3, 2e-3], dtype=search_dtype)
+        dec = np.array([0.0, 1e-3, 0.0], dtype=search_dtype)
+        binedges = np.asarray(self.binedges, dtype=search_dtype)
         self._compute_pairs_kernel(pts, ra, dec, binedges)
 
     @property
@@ -752,7 +782,12 @@ class Correlation:
 
     @inds_dev.setter
     def inds_dev(self, value: Any) -> None:
+        # ctx.inds_i_dev / inds_j_dev are the contiguous, kernel-dtype copies
+        # of exactly this array (see _pair_index_arrays).  Leaving them in
+        # place would have the next measurement read the previous geometry.
         self.compute_context.inds_dev = value
+        self.compute_context.inds_i_dev = None
+        self.compute_context.inds_j_dev = None
 
     @property
     def exp2phi_dev(self) -> Any:
@@ -801,6 +836,10 @@ class Correlation:
     @Q_inds_flat.setter
     def Q_inds_flat(self, value: Any) -> None:
         self.compute_context.Q_inds_flat = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
 
     @property
     def Q_cos_flat(self) -> Any:
@@ -809,6 +848,10 @@ class Correlation:
     @Q_cos_flat.setter
     def Q_cos_flat(self, value: Any) -> None:
         self.compute_context.Q_cos_flat = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
 
     @property
     def Q_sin_flat(self) -> Any:
@@ -817,6 +860,10 @@ class Correlation:
     @Q_sin_flat.setter
     def Q_sin_flat(self, value: Any) -> None:
         self.compute_context.Q_sin_flat = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
 
     @property
     def Q_val_flat(self) -> Any:
@@ -825,6 +872,10 @@ class Correlation:
     @Q_val_flat.setter
     def Q_val_flat(self, value: Any) -> None:
         self.compute_context.Q_val_flat = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
 
     @property
     def Q_offsets(self) -> Any:
@@ -833,6 +884,10 @@ class Correlation:
     @Q_offsets.setter
     def Q_offsets(self, value: Any) -> None:
         self.compute_context.Q_offsets = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
 
     @property
     def Q_patch_area_flat(self) -> Any:
@@ -841,6 +896,79 @@ class Correlation:
     @Q_patch_area_flat.setter
     def Q_patch_area_flat(self, value: Any) -> None:
         self.compute_context.Q_patch_area_flat = value
+        # The device copy is rebuilt from this by
+        # _prepare_aperture_device_buffers(); drop it so it cannot be read
+        # back against new host geometry.
+        self._invalidate_aperture_device_buffers()
+
+    def _invalidate_aperture_device_buffers(self) -> None:
+        """Drop the device aperture buffers derived from the host flats."""
+        ctx = self.compute_context
+        for name, value in ctx._APERTURE_DEVICE_DEFAULTS:
+            setattr(ctx, name, value)
+
+    # ---- which row of a returned data vector is which pair of bins -------
+
+    @staticmethod
+    def tomo_combinations(
+        nzbins: int, gc_auto_correlations_only: bool = False
+    ) -> List[Tuple[int, int]]:
+        """Row order of the symmetric tomographic outputs.
+
+        ``xi_p``, ``xi_m`` and ``xi_g`` come back as
+        ``(ncomb, n_patches, nbins)``; this is what row ``k`` means.  The
+        order is the upper triangle including the diagonal, row-major::
+
+            >>> Correlation.tomo_combinations(3)
+            [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+
+        With ``gc_auto_correlations_only=True`` (``vectorized_density_density``
+        and the ξ_g section of ``get_3x2pt_tomo``) only the diagonal is
+        measured and the vector is ``nzbins`` rows, not ``nzbins(nzbins+1)/2``
+        -- the silent shape change that makes mislabelling easy.
+
+        Mislabelling a data vector is not caught by any shape check, so this
+        is the accessor to index it by rather than to rederive.
+        """
+        if gc_auto_correlations_only:
+            return [(i, i) for i in range(int(nzbins))]
+        return [
+            (i, j) for i in range(int(nzbins)) for j in range(i, int(nzbins))
+        ]
+
+    @staticmethod
+    def ggl_combinations(
+        nlens_bins: int,
+        nsource_bins: int,
+        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+    ) -> List[Tuple[int, int]]:
+        """Row order of ``xi_t`` as ``(lens_bin, source_bin)``.
+
+        The full cartesian product, lens-major, unless an explicit
+        ``ggl_bin_combinations`` selection is passed -- in which case the
+        rows are exactly that selection, in the order given::
+
+            >>> Correlation.ggl_combinations(2, 3)
+            [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+        """
+        if ggl_bin_combinations is not None:
+            return [(int(a), int(b)) for a, b in ggl_bin_combinations]
+        return [
+            (i, j)
+            for i in range(int(nlens_bins))
+            for j in range(int(nsource_bins))
+        ]
+
+    @staticmethod
+    def zeta_triplets(nzbins: int) -> List[Tuple[int, int, int]]:
+        """Row order of the ζ estimators as ``(z_center, z2, z3)``.
+
+        What :func:`~CosmoFuse.correlation_helpers.calculate_all_zetas`
+        returns along axis 1, and therefore what ``ZetaWriter`` stores.
+        """
+        import itertools
+
+        return list(itertools.combinations_with_replacement(range(int(nzbins)), 3))
 
     def _get_tomo_combination_indices(
         self, nzbins: int, nzbin_combs: int
@@ -1175,58 +1303,6 @@ class Correlation:
             buffers["out_xig_den"],
             buffers["out_xit_num"],
             buffers["out_xit_den"],
-        )
-
-    def _get_or_create_fused_post_buffers(
-        self,
-        n_shear_bins: int,
-        n_density_bins: int,
-        n_patches: int,
-        ss_ncomb: int,
-        dd_ncomb: int,
-        ds_ncomb: int,
-        map_backend_dtype: Any,
-    ) -> Tuple[Any, Any, Any, Any, Any, Any]:
-        ctx = self.compute_context
-        if ctx.fused_output_buffers is None:
-            ctx.fused_output_buffers = {}
-
-        cache = ctx.fused_output_buffers
-        module = self.backend.module
-        empty = getattr(module, "empty", None)
-
-        specs = (
-            ("M_a", (n_shear_bins, n_patches)),
-            ("M_g", (n_density_bins, n_patches)),
-            ("xip", (ss_ncomb, n_patches, self.nbins)),
-            ("xim", (ss_ncomb, n_patches, self.nbins)),
-            ("xi_g", (dd_ncomb, n_patches, self.nbins)),
-            ("xi_t", (ds_ncomb, n_patches, self.nbins)),
-        )
-
-        buffers: Dict[str, Any] = {}
-        for name, shape in specs:
-            cache_key = f"post_{name}"
-            arr = cache.get(cache_key)
-            if (
-                arr is None
-                or getattr(arr, "shape", None) != shape
-                or getattr(arr, "dtype", None) != map_backend_dtype
-            ):
-                if empty is not None:
-                    arr = empty(shape, dtype=map_backend_dtype)
-                else:
-                    arr = self.backend.zeros(shape, dtype=map_backend_dtype)
-                cache[cache_key] = arr
-            buffers[name] = arr
-
-        return (
-            buffers["M_a"],
-            buffers["M_g"],
-            buffers["xip"],
-            buffers["xim"],
-            buffers["xi_g"],
-            buffers["xi_t"],
         )
 
     def preprocess(
@@ -1571,6 +1647,10 @@ class Correlation:
 
         module = self.backend.module
         ctx = self.compute_context
+        # From here on the object is part-way through publishing its device
+        # buffers; _ensure_prepared() refuses to measure until the tail of
+        # this method clears the flag.
+        self._prepare_failed = True
         if keep_unpacked:
             self.inds_dev = self.backend.to_device(temp_inds)
             _index_device_dtype = getattr(module, self.index_dtype.name)
@@ -1610,6 +1690,13 @@ class Correlation:
         self._prepare_aperture_device_buffers()
         self.ntotpairs = size
         self.compute_context.prepare_version += 1
+        # Published last, so that everything above having succeeded is what
+        # clears the flag.  A failure part-way through (an OOM during the
+        # aperture upload is the realistic one at nside 2048) leaves the
+        # device buffers set but ntotpairs at 0, which _ensure_prepared()
+        # cannot tell from a good state -- and the next measurement then
+        # returns finite numbers from a torn one.
+        self._prepare_failed = False
         if release_host_pairs:
             self.pair_inds = None
             self.pair_exp2phi = None
@@ -1619,8 +1706,61 @@ class Correlation:
             self.packed_block_sizes = None
 
     def _ensure_prepared(self) -> None:
+        if getattr(self, "_prepare_failed", False):
+            raise RuntimeError(
+                "prepare() failed on this object and left it part-way through "
+                "publishing its device buffers; it cannot measure. Fix the "
+                "cause (usually device memory) and call prepare() again."
+            )
         if self.inds_dev is None and self.compute_context.packed_pairs_dev is None:
+            if not self._has_pair_geometry():
+                raise RuntimeError(
+                    "no pair geometry: call preprocess() (or load_pairs()) "
+                    "before measuring."
+                )
             self.prepare()
+
+    def _has_pair_geometry(self) -> bool:
+        """Whether preprocess()/load_pairs() has produced something to prepare."""
+        if self.bins is None:
+            # released by prepare(release_host_pairs=True) -- already prepared
+            return True
+        if not len(self.bins):
+            return False
+        if self.packed_pairs is not None:
+            return True
+        return bool(self.pair_inds) and bool(self.pair_exp2phi)
+
+    def _packed_kernel_unavailable_message(
+        self, statistic: str, nzbins: int, slots_per_comb: int
+    ) -> str:
+        """Why a packed tomographic launch was declined, and what to do.
+
+        There is no fallback for the packed payload: the per-(bin, row)
+        kernels read the 24 B geometry, which ``pack_pairs=True`` does not
+        upload.  Decoding the payload to feed them would cost the memory
+        packing exists to save, so the honest answer is to say where the
+        limit is.
+        """
+        from .backend import _MAX_TILED_ACCUMULATORS
+
+        ncomb = nzbins * (nzbins + 1) // 2
+        max_bins = 0
+        while (max_bins + 1) * (max_bins + 2) // 2 * slots_per_comb <= (
+            _MAX_TILED_ACCUMULATORS
+        ):
+            max_bins += 1
+        return (
+            f"The packed {statistic} kernel is unavailable for {nzbins} "
+            f"tomographic bins: the tiled kernel keeps "
+            f"{slots_per_comb} accumulators per combination in registers and "
+            f"{nzbins} bins need {slots_per_comb * ncomb} of the "
+            f"{_MAX_TILED_ACCUMULATORS} available, so at most {max_bins} bins "
+            f"fit. There is no packed fallback -- the per-(bin, row) kernels "
+            f"read the unpacked geometry, which pack_pairs=True does not "
+            f"upload. Construct the Correlation with pack_pairs=False (24 B "
+            f"per pair on the device instead of 8 B)."
+        )
 
     def _require_unpacked_pairs(self, what: str) -> None:
         """Paths without a packed kernel need the 24 B device geometry
@@ -1689,7 +1829,14 @@ class Correlation:
         sumofweights: Optional[Union[np.ndarray, float]] = None,
         return_device: bool = True,
     ) -> Tuple[np.ndarray]:
-        """Compute scalar density-density 2PCF (w(theta)) for one map pair."""
+        """Compute scalar density-density 2PCF (w(theta)) for one map pair.
+
+        Ratio-of-sums over both pair orientations, as everywhere else in the
+        library.  ``sumofweights``, if given, is the sum for *one*
+        orientation and is applied to both -- note that
+        :meth:`compute_density_shear` takes its ``sumofweights`` as the
+        already-summed total instead.
+        """
         self._ensure_prepared()
         self._require_unpacked_pairs("compute_density_density")
 
@@ -1768,9 +1915,16 @@ class Correlation:
             )
             w_ba_num = self._reduce_pairs(out_ba)
 
-        w_ab = self._normalize_scalar_pairs(w_ab_num, sum_ab)
-        w_ba = self._normalize_scalar_pairs(w_ba_num, sum_ba)
-        w_theta = 0.5 * (w_ab + w_ba)
+        # Ratio of sums, not mean of ratios: both orientations of a cross
+        # combination are summed and divided once, which is the wrapper
+        # contract on both backends (TreeCorr's definition) and what
+        # ``vectorized_density_density``, ``get_3x2pt_tomo`` and
+        # ``compute_density_shear`` already do.  ``0.5 * (N_ab/D_ab +
+        # N_ba/D_ba)`` is a different estimator whenever the two orientations
+        # carry different weight, i.e. for every cross pair.  The auto case
+        # and an explicit ``sumofweights`` (where D_ab == D_ba) are unchanged
+        # up to the last bits.
+        w_theta = self._normalize_scalar_pairs(w_ab_num + w_ba_num, sum_ab + sum_ba)
         if return_device and self.backend.name == "cupy":
             return (self.backend.module.real(w_theta),)
         return (np.real(self.backend.to_numpy(w_theta)),)
@@ -2172,22 +2326,61 @@ class Correlation:
         raise ValueError(
             "sumofweights must be scalar, (nzbin_combs,), "
             f"({nzbin_combs}, {self.n_patches}, {self.nbins}), "
-            f"or ({nzbin_combs}, {nbins_total}); got {sum_np.shape}"
+            f"or ({nzbin_combs}, {nbins_total}) -- or the directional form, "
+            f"the same prefixed with a leading 2 for the (a->b, b->a) "
+            f"orientations; got {sum_np.shape}"
         )
+
+    def _is_per_comb_sumofweights_shape(
+        self, shape: Tuple[int, ...], nzbin_combs: int
+    ) -> bool:
+        """Whether *shape* is one of the accepted per-combination layouts."""
+        nbins_total = self.n_patches * self.nbins
+        if len(shape) == 0:
+            return True
+        if len(shape) == 1:
+            size = int(shape[0])
+            return (
+                size == nzbin_combs
+                or (nzbin_combs == 1 and size == nbins_total)
+                or size == nzbin_combs * nbins_total
+            )
+        if len(shape) == 2:
+            return shape == (nzbin_combs, nbins_total) or (
+                nzbin_combs == 1 and shape == (self.n_patches, self.nbins)
+            )
+        if len(shape) == 3:
+            return shape == (nzbin_combs, self.n_patches, self.nbins)
+        return False
 
     def _normalize_tomo_sumofweights_directional(
         self, sumofweights: Union[np.ndarray, float], nzbin_combs: int
     ) -> Any:
-        if (
-            self._is_backend_native_array(sumofweights)
-            and sumofweights.ndim >= 2
-            and sumofweights.shape[0] == 2
-        ):
+        """Accept either one sum per combination or one per orientation.
+
+        The directional form is the per-combination form with a leading 2.
+        Deciding that from ``shape[0] == 2`` alone makes the per-combination
+        form unusable whenever there happen to be exactly two tomographic
+        combinations -- a ``(2, nbins_total)`` array is then read as two
+        orientations of a one-combination measurement.  Deciding it from the
+        whole shape removes the collision: an array is directional only when
+        what follows the leading 2 is itself a valid per-combination layout.
+        """
+
+        def directional(array: Any) -> bool:
+            shape = tuple(getattr(array, "shape", ()))
+            return (
+                len(shape) >= 2
+                and shape[0] == 2
+                and self._is_per_comb_sumofweights_shape(shape[1:], nzbin_combs)
+            )
+
+        if self._is_backend_native_array(sumofweights) and directional(sumofweights):
             sum_ab = self._normalize_tomo_sumofweights_per_comb(sumofweights[0], nzbin_combs)
             sum_ba = self._normalize_tomo_sumofweights_per_comb(sumofweights[1], nzbin_combs)
             return self.backend.module.stack((sum_ab, sum_ba), axis=0)
         sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
-        if sum_np.ndim >= 2 and sum_np.shape[0] == 2:
+        if directional(sum_np):
             sum_ab = self._normalize_tomo_sumofweights_per_comb(sum_np[0], nzbin_combs)
             sum_ba = self._normalize_tomo_sumofweights_per_comb(sum_np[1], nzbin_combs)
             return self.backend.module.stack((sum_ab, sum_ba), axis=0)
@@ -2275,7 +2468,14 @@ class Correlation:
         if self.aperture_nside is None:
             return None
         cache = self.__dict__.get("_aperture_cells_cache")
-        key = (int(self.aperture_nside), int(self.nside), id(self.map_inds))
+        # live_object_serial, not id(): load_pairs() reassigns map_inds, and
+        # the replacement can land on the old array's address -- which would
+        # reuse aperture cells built for a different row space.
+        key = (
+            int(self.aperture_nside),
+            int(self.nside),
+            live_object_serial(self.map_inds),
+        )
         if cache is not None and cache[0] == key:
             return cache[1]
         shift = 2 * (int(np.log2(self.nside)) - int(np.log2(self.aperture_nside)))
@@ -2434,12 +2634,55 @@ class Correlation:
                 rows = self._to_backend_array(rows, dtype=self.map_dtype)
             else:
                 rows.flags.writeable = False
-            while len(memo) >= 16:
+            # Bounded by bytes as well as by entries.  Sixteen entries is a
+            # harmless count and a ruinous size: one frozen (4, 2, npix)
+            # float32 shear map-set is 1.6 GB at nside 2048, so the entry
+            # bound alone permits ~25 GB of VRAM for a cache whose stated
+            # purpose is a handful of fixed weight maps.
+            entry = (arr, rows, {})
+            memo[key] = entry
+            limit = self._frozen_map_memo_max_bytes()
+            while len(memo) > 1 and (
+                len(memo) > _FROZEN_MAP_MEMO_MAX_ENTRIES
+                or _frozen_memo_bytes(memo) > limit
+            ):
                 memo.pop(next(iter(memo)))
-            # Keep a reference to the source so its id() cannot be reused.
-            # entry[2] caches derived virtual-row weight blocks.
-            entry = memo[key] = (arr, rows, {})
         return entry[1]
+
+    def _frozen_map_memo_max_bytes(self) -> float:
+        """Byte budget for the frozen row-space memo.
+
+        A tenth of an explicit ``memory_budget_gb`` when one is set --
+        the memo is a convenience, not the working set -- and otherwise a
+        fixed cap that still holds several nside-2048 weight map-sets.
+        """
+        budget = getattr(self, "memory_budget_gb", None)
+        if budget is not None and np.isfinite(budget):
+            return min(_FROZEN_MAP_MEMO_MAX_BYTES, 0.1 * float(budget) * 1e9)
+        return float(_FROZEN_MAP_MEMO_MAX_BYTES)
+
+    def release_device_memory(self) -> None:
+        """Drop every cache this object holds on the device.
+
+        The pair scratch is 32 B/pair and the frozen-map memo whole
+        map-sets; both live for as long as the object does, which makes a
+        long-lived ``Correlation`` hard to share a GPU with.  The pair
+        geometry and the prepared device buffers are *not* touched -- the
+        object still measures, it just rebuilds its scratch on the next
+        call.
+        """
+        ctx = self.compute_context
+        ctx.pair_scratch = None
+        ctx.aperture_scratch = None
+        ctx.fused_output_buffers = None
+        memo = getattr(ctx, "frozen_map_memo", None)
+        if memo is not None:
+            memo.clear()
+        ctx._xipm_sumofweights_cache = None
+        ctx._xipm_sumofweights_cache_w_fingerprint = None
+        pool = self.backend.get_memory_pool()
+        if pool is not None:
+            pool.free_all_blocks()
 
     def _map_to_device(self, array: Any) -> Any:
         """Row-space backend array at map precision for any accepted map input."""
@@ -3249,10 +3492,18 @@ class Correlation:
             shape = tuple(getattr(w_np, "shape", ()))
             dtype_str = np.dtype(getattr(w_np, "dtype", self.map_dtype)).str
             device_id = getattr(getattr(w_np, "device", None), "id", "unknown")
-            data_ptr = getattr(getattr(w_np, "data", None), "ptr", None)
-            if data_ptr is None:
-                data_ptr = id(w_np)
-            return (shape, dtype_str, f"device:{device_id};ptr:{data_ptr}")
+            # Deliberately *not* the pool pointer.  cupy's allocator hands a
+            # freed pointer straight back to the next allocation, so a plain
+            # ``for k: w = cp.asarray(w_host[k])`` loop gives the second map
+            # the first one's address — and, with a pointer-keyed cache, the
+            # first one's sum of weights.  A per-live-object serial cannot be
+            # recycled while the array it names is still alive, so a hit means
+            # the same array rather than the same address.
+            return (
+                shape,
+                dtype_str,
+                f"device:{device_id};obj:{live_object_serial(w_np)}",
+            )
 
         w_contiguous = np.ascontiguousarray(w_np)
         # Read-only arrays cannot change content, so their digest can be
@@ -3267,8 +3518,13 @@ class Correlation:
                 w_np.dtype.str,
             )
             cached = _FINGERPRINT_MEMO.get(memo_key)
-            if cached is not None:
-                return cached
+            # The weak reference is what makes the id safe to key on: an
+            # array built and dropped once per realisation can land on the
+            # recycled address of the previous one, and would otherwise
+            # inherit its digest.  Holding the reference costs nothing and
+            # pins nothing.
+            if cached is not None and cached[0]() is w_np:
+                return cached[1]
         # blake2b accepts buffer-protocol objects: hashing a memoryview gives
         # the same digest as .tobytes() without the full byte copy.
         digest = hashlib.blake2b(memoryview(w_contiguous).cast("B")).hexdigest()
@@ -3276,7 +3532,7 @@ class Correlation:
         if memo_key is not None:
             if len(_FINGERPRINT_MEMO) > 64:
                 _FINGERPRINT_MEMO.clear()
-            _FINGERPRINT_MEMO[memo_key] = result
+            _FINGERPRINT_MEMO[memo_key] = (weakref.ref(w_np), result)
         return result
 
     def _normalize_xipm_sumofweights(
@@ -3443,6 +3699,30 @@ class Correlation:
             cache.pop(next(iter(cache)))
         return sumofweights_dev
 
+    def compute_sumofweights(
+        self, weights: Any, nzbins: Optional[int] = None
+    ) -> Any:
+        """Precompute the pair weight sums the ``sumofweights=`` argument takes.
+
+        Every tomographic method accepts ``sumofweights=`` so that a weight
+        set that does not change between realisations is reduced once
+        instead of once per map.  This is what builds a valid value: the
+        directional ``(2, ncomb, n_patches * nbins)`` array, orientation 0
+        being A→B and orientation 1 B→A (identical for auto combinations).
+
+        Needs the unpacked geometry, so ``pack_pairs=False`` on a GPU.
+
+        Args:
+            weights: ``(nzbins, n_active)`` or ``(nzbins, npix)`` weight maps.
+            nzbins: defaults to ``weights.shape[0]``.
+        """
+        if nzbins is None:
+            nzbins = int(weights.shape[0])
+        nzbin_combs = nzbins * (nzbins + 1) // 2
+        return self._compute_tomo_sumofweights(
+            self._map_to_device(weights), nzbins, nzbin_combs
+        )
+
     def _compute_tomo_sumofweights(
         self, w_dev: Any, nzbins: int, nzbin_combs: int
     ) -> Any:
@@ -3593,8 +3873,7 @@ class Correlation:
             )
             if not launched:
                 raise RuntimeError(
-                    "The packed ξ± kernel is unavailable for this configuration "
-                    f"({nzbins} tomographic bins); use pack_pairs=False."
+                    self._packed_kernel_unavailable_message("ξ±", nzbins, 3)
                 )
         else:
             inds_i, inds_j = self._pair_index_arrays()
@@ -4133,7 +4412,10 @@ class Correlation:
                 )
                 if not launched:
                     raise RuntimeError(
-                        "Backend declined vectorized density-density tomography kernel launch."
+                        self._packed_kernel_unavailable_message("ξ_g", nzbins, 2)
+                        if self.inds_dev is None
+                        else "Backend declined vectorized density-density "
+                        "tomography kernel launch."
                     )
 
         den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
@@ -4261,7 +4543,10 @@ class Correlation:
                 )
                 if not launched:
                     raise RuntimeError(
-                        "Backend declined vectorized density-shear tomography kernel launch."
+                        self._packed_kernel_unavailable_message("ξ_t", nzbins, 2)
+                        if self.inds_dev is None
+                        else "Backend declined vectorized density-shear "
+                        "tomography kernel launch."
                     )
 
         num_ab = out_num
@@ -4675,53 +4960,40 @@ class Correlation:
             out[valid] = num[valid] / den[valid]
             return out
 
-        def _safe_div_into_device(num: Any, den: Any, out: Any) -> Any:
-            mask = den != 0
-            safe_den = module.where(mask, den, self.map_dtype.type(1.0))
-            module.divide(num, safe_den, out=out)
-            out *= mask.astype(out.dtype, copy=False)
-            return out
+        def _safe_div_to_device(num: Any, den: Any) -> Any:
+            """One fused launch into a *fresh* array at map precision.
+
+            The result is what the caller keeps, so it must not be a buffer
+            this call will overwrite on the next one -- see the note on
+            aliasing in :meth:`get_3x2pt_tomo`.  Allocating it costs a pool
+            hand-out rather than a copy, and the pool recycles the block as
+            soon as the caller drops the result, so a loop that reduces and
+            discards holds no more device memory than the cache did.
+            """
+            return safe_divide(module, num, den, dtype=map_backend_dtype)
 
         shape_pb = (n_patches, self.nbins)
         if return_device and on_gpu:
-            (
-                M_a_dev,
-                M_g_dev,
-                xip_dev,
-                xim_dev,
-                xi_g_dev,
-                xi_t_dev,
-            ) = self._get_or_create_fused_post_buffers(
-                n_shear_bins=n_shear_bins,
-                n_density_bins=n_density_bins,
-                n_patches=n_patches,
-                ss_ncomb=ss_ncomb,
-                dd_ncomb=dd_ncomb,
-                ds_ncomb=ds_ncomb,
-                map_backend_dtype=map_backend_dtype,
-            )
-
-            _safe_div_into_device(out_ma_num, out_ma_den, M_a_dev)
-            _safe_div_into_device(out_mg_num, out_mg_den, M_g_dev)
-            # whole stacks at once: one set of launches per statistic
+            # whole stacks at once: one launch per statistic
             xipm_den = out_xipm_den.reshape((ss_ncomb,) + shape_pb)
-            _safe_div_into_device(
-                out_xipm_num[0].reshape((ss_ncomb,) + shape_pb), xipm_den, xip_dev
+            return (
+                _safe_div_to_device(out_ma_num, out_ma_den),
+                _safe_div_to_device(out_mg_num, out_mg_den),
+                _safe_div_to_device(
+                    out_xipm_num[0].reshape((ss_ncomb,) + shape_pb), xipm_den
+                ),
+                _safe_div_to_device(
+                    out_xipm_num[1].reshape((ss_ncomb,) + shape_pb), xipm_den
+                ),
+                _safe_div_to_device(
+                    out_xig_num.reshape((dd_ncomb,) + shape_pb),
+                    out_xig_den.reshape((dd_ncomb,) + shape_pb),
+                ),
+                _safe_div_to_device(
+                    out_xit_num.reshape((ds_ncomb,) + shape_pb),
+                    out_xit_den.reshape((ds_ncomb,) + shape_pb),
+                ),
             )
-            _safe_div_into_device(
-                out_xipm_num[1].reshape((ss_ncomb,) + shape_pb), xipm_den, xim_dev
-            )
-            _safe_div_into_device(
-                out_xig_num.reshape((dd_ncomb,) + shape_pb),
-                out_xig_den.reshape((dd_ncomb,) + shape_pb),
-                xi_g_dev,
-            )
-            _safe_div_into_device(
-                out_xit_num.reshape((ds_ncomb,) + shape_pb),
-                out_xit_den.reshape((ds_ncomb,) + shape_pb),
-                xi_t_dev,
-            )
-            return M_a_dev, M_g_dev, xip_dev, xim_dev, xi_g_dev, xi_t_dev
 
         to_np = lambda arr: np.asarray(self.backend.to_numpy(arr), dtype=self.map_dtype)
         M_a = _safe_div(to_np(out_ma_num), to_np(out_ma_den))

@@ -230,13 +230,9 @@ class TestBackend(unittest.TestCase):
 
     def test_get_backend_auto_import_error_in_gpu_block(self):
         real_import = __import__
-        call_count = {"cupy": 0}
 
         def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
             if name == "cupy":
-                if call_count["cupy"] == 0:
-                    call_count["cupy"] += 1
-                    return MagicMock()
                 raise ImportError("mocked cupy import failure")
             return real_import(name, globals, locals, fromlist, level)
 
@@ -247,6 +243,43 @@ class TestBackend(unittest.TestCase):
                 mock_warn.assert_called_once_with(
                     "Cupy not installed, falling back to CPU (numpy)."
                 )
+
+    def test_get_backend_auto_falls_back_when_no_device_is_usable(self):
+        """cupy imports but the driver does not cooperate.
+
+        A driver/runtime mismatch, ``CUDA_VISIBLE_DEVICES=""`` or an
+        unusable card all import cleanly and then raise on first use.
+        ``auto`` promises a working backend, so it must fall back rather
+        than propagate.
+        """
+        fake_cupy = MagicMock()
+        fake_cupy.cuda.runtime.getDeviceCount.side_effect = RuntimeError(
+            "cudaErrorNoDevice"
+        )
+        with patch.dict(sys.modules, {"cupy": fake_cupy}):
+            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+                backend = get_backend("auto")
+        self.assertEqual(backend.name, "numpy")
+        self.assertIn("no usable CUDA device", mock_warn.call_args[0][0])
+
+    def test_get_backend_auto_falls_back_when_no_device_is_visible(self):
+        fake_cupy = MagicMock()
+        fake_cupy.cuda.runtime.getDeviceCount.return_value = 0
+        with patch.dict(sys.modules, {"cupy": fake_cupy}):
+            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+                backend = get_backend("auto")
+        self.assertEqual(backend.name, "numpy")
+        self.assertIn("no usable CUDA device", mock_warn.call_args[0][0])
+
+    def test_explicit_gpu_request_stays_strict(self):
+        """An explicit device must fail loudly; only 'auto' falls back."""
+        fake_cupy = MagicMock()
+        fake_cupy.cuda.runtime.getDeviceCount.side_effect = RuntimeError(
+            "cudaErrorNoDevice"
+        )
+        with patch.dict(sys.modules, {"cupy": fake_cupy}):
+            with self.assertRaises(RuntimeError):
+                get_backend("gpu")
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_get_backend_auto_with_cupy(self):
@@ -974,9 +1007,7 @@ class TestBackend(unittest.TestCase):
         kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
         self.assertFalse(kernel(*self._aperture_args(np.float32, np.float32)))
 
-    def test_cupy_3x2pt_tomo_aperture_kernel_compile_failure_returns_false(self):
-        compile_attempts = []
-
+    def _aperture_kernel_raising(self, exception, attempts):
         class FakeModule:
             float32 = np.float32
             int32 = np.int32
@@ -984,15 +1015,40 @@ class TestBackend(unittest.TestCase):
 
             @staticmethod
             def RawKernel(*_args, **_kwargs):
-                compile_attempts.append(1)
-                raise RuntimeError("compile failed")
+                attempts.append(1)
+                raise exception
 
-        kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+        return _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
+
+    def test_deterministic_compile_failure_is_cached_negatively(self):
+        """This source will never compile for these template arguments, so
+        retrying it on every call would only burn NVRTC time."""
+
+        class CompileException(RuntimeError):
+            pass
+
+        attempts = []
+        kernel = self._aperture_kernel_raising(
+            CompileException("nvrtc: syntax error"), attempts
+        )
         args = self._aperture_args(np.float32, np.float32)
         self.assertFalse(kernel(*args))
         self.assertFalse(kernel(*args))
-        # A failed compilation is cached negatively: not retried.
-        self.assertEqual(len(compile_attempts), 1)
+        self.assertEqual(len(attempts), 1)
+
+    def test_transient_compile_failure_is_retried(self):
+        """A disk-cache read error or a momentary resource failure must not
+        pin the process to the fallback kernel for its lifetime.
+
+        Caching it did exactly that: silent, permanent, and indistinguishable
+        from a configuration that legitimately has no tiled kernel.
+        """
+        attempts = []
+        kernel = self._aperture_kernel_raising(OSError("cache file busy"), attempts)
+        args = self._aperture_args(np.float32, np.float32)
+        self.assertFalse(kernel(*args))
+        self.assertFalse(kernel(*args))
+        self.assertEqual(len(attempts), 2)
 
     @staticmethod
     def _make_fake_cuda_namespace():

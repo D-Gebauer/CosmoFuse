@@ -22,6 +22,9 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
+#: Device/host bytes per pair of the packed payload:
+#: ``(npairs, 4) uint16`` = two local row indices + two angles.
+PACKED_BYTES_PER_PAIR = 4 * np.dtype(np.uint16).itemsize
 ANGLE_STEPS = 65536
 ANGLE_UNIT = 2.0 * np.pi / ANGLE_STEPS  # 9.587379924285257e-05
 MAX_LOCAL_ROWS = 65536

@@ -20,7 +20,7 @@ import numpy as np
 from tqdm import trange
 
 from .correlation_helpers import Q_crittenden
-from .packing import pack_patch
+from .packing import PACKED_BYTES_PER_PAIR, pack_patch
 from .treecode import (
     PatchCells,
     TreecodeGeometry,
@@ -28,7 +28,7 @@ from .treecode import (
     estimate_pairs_per_bin,
     level_groups,
 )
-from .utils import pixel2RaDec
+from .utils import live_object_serial, pixel2RaDec
 
 if TYPE_CHECKING:
     from .correlations import Correlation
@@ -43,9 +43,19 @@ class PairGeometry:
 
     @staticmethod
     def aperture_filter_key(aperture_filter: Callable[..., Any]) -> Any:
+        """Identify the filter the cached aperture geometry was built with.
+
+        Not ``id()``: nothing here holds a reference to the filter, so a
+        transient one — a lambda or a ``functools.partial`` written inline,
+        which is the documented way to pass this argument — is collected the
+        moment the call returns, and the next one lands on the same address
+        and is taken for it.  The result is a measurement silently made with
+        the *previous* filter's Q values.  ``live_object_serial`` is unique
+        per live object, so a recycled address cannot forge a hit.
+        """
         if aperture_filter is Q_crittenden:
             return "Q_crittenden"
-        return id(aperture_filter)
+        return ("filter", live_object_serial(aperture_filter))
 
     @staticmethod
     def evaluate_aperture_filter(
@@ -181,6 +191,7 @@ class PairGeometry:
         device memory on GPU backends.  Returns the projection.
         """
         budget = owner.memory_budget_gb
+        budget_is_device = False
         if budget is None:
             if owner.backend.name != "cupy":
                 return None
@@ -189,6 +200,7 @@ class PairGeometry:
             except Exception:  # pragma: no cover - driver query failed
                 return None
             budget = free_bytes / 1e9
+            budget_is_device = True
         if not np.isfinite(budget):
             return None
 
@@ -199,7 +211,25 @@ class PairGeometry:
             disc = hp.query_disc(owner.nside, vec=vec, radius=radius)
             n_pix[i] = int(np.count_nonzero(owner.map_mask[disc]))
 
-        bytes_per_pair = 2 * owner.index_dtype.itemsize + 2 * owner.rotation_complex_dtype.itemsize
+        # Project the resource actually being budgeted against.  The two are
+        # not the same number: the exact geometry is 24 B/pair and lives in
+        # host RAM, while what ``prepare()`` uploads is 8 B/pair whenever
+        # ``pack_pairs`` is on.  Charging the host layout against free
+        # *device* memory rejects runs that fit -- which is exactly the
+        # nside 2048 case packing exists for.
+        exact_bytes_per_pair = (
+            2 * owner.index_dtype.itemsize
+            + 2 * owner.rotation_complex_dtype.itemsize
+        )
+        if budget_is_device:
+            resource = "device"
+            packed = bool(getattr(owner, "pack_pairs", False))
+        else:
+            resource = "host"
+            packed = bool(getattr(owner, "pack_host_pairs", False))
+        bytes_per_pair = (
+            PACKED_BYTES_PER_PAIR if packed else exact_bytes_per_pair
+        )
 
         def projected_gb(level_nside: np.ndarray) -> float:
             pairs = estimate_pairs_per_bin(
@@ -210,7 +240,12 @@ class PairGeometry:
         from .treecode import assign_levels, is_power_of_two
 
         need = projected_gb(owner.level_nside)
-        report = {"projected_gb": need, "budget_gb": float(budget)}
+        report = {
+            "projected_gb": need,
+            "budget_gb": float(budget),
+            "resource": resource,
+            "bytes_per_pair": int(bytes_per_pair),
+        }
         if need <= budget:
             return report
 
@@ -237,7 +272,8 @@ class PairGeometry:
         )
         raise MemoryError(
             f"Projected pair geometry for {owner.n_patches} patches at nside "
-            f"{owner.nside} ({mode}): ~{need:.3g} GB, budget {budget:.3g} GB. "
+            f"{owner.nside} ({mode}): ~{need:.3g} GB of {resource} memory at "
+            f"{bytes_per_pair} B/pair, budget {budget:.3g} GB. "
             f"{hint} (The static treecode is a different, windowed estimator: "
             "use the same resolution_factor for data and simulations. Set "
             "memory_budget_gb=float('inf') to skip this check.)"
@@ -403,7 +439,7 @@ class PairGeometry:
             )
         pix_center = hp.ang2pix(owner.nside, owner.theta_center[i], owner.phi_center[i])
         patch_inds = hp.query_disc(
-            owner.nside, vec=vec, radius=np.radians(5 * owner.theta_Q / 60)
+            owner.nside, vec=vec, radius=np.radians(owner.radius_filter / 60)
         )
         qpix_inds = patch_inds[owner.map_mask[patch_inds]]
         qpix_inds = qpix_inds[qpix_inds != pix_center]
@@ -441,7 +477,7 @@ class PairGeometry:
         nside_ap = int(owner.aperture_nside)
         pix_center = hp.ang2pix(nside_ap, owner.theta_center[i], owner.phi_center[i])
         disc = hp.query_disc(
-            nside_ap, vec=vec, radius=np.radians(5 * owner.theta_Q / 60)
+            nside_ap, vec=vec, radius=np.radians(owner.radius_filter / 60)
         )
         disc = disc[disc != pix_center]
         pos = np.searchsorted(cell_pix, disc)

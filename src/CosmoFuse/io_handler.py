@@ -48,12 +48,15 @@ class PairIOHandler:
         if owner.bins is None or (
             not packed and (owner.pair_inds is None or owner.pair_exp2phi is None)
         ):
-            warnings.warn(
-                "Cannot save pairs because host pair arrays were released. "
-                "Reload or recompute pairs before calling save_pairs().",
-                RuntimeWarning,
+            # Not a warning: the job would otherwise exit 0 with no file,
+            # after hours of pair finding, and the warning is invisible under
+            # -W ignore or a filtered log.
+            raise RuntimeError(
+                "Cannot save pairs because host pair arrays were released "
+                "(release_host_pairs=True). Recompute or reload the pairs "
+                "before calling save_pairs(), or preprocess without "
+                "release_host_pairs."
             )
-            return
 
         n_patches = owner.n_patches
         if packed:
@@ -79,6 +82,10 @@ class PairIOHandler:
 
         treecode = getattr(owner, "_treecode", None)
         virtual_rows = treecode is not None or owner.aperture_nside is not None
+        # Written down rather than inferred twice: the reader used to derive
+        # this from a different set of dataset names, which disagreed for a
+        # packed file with aperture_nside but no treecode (it has tc_Q_inds
+        # and no tc_pair_inds, so the reader looked for Q_inds and raised).
         pair_name = "tc_pair_inds" if virtual_rows else "pair_inds"
         q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
 
@@ -92,6 +99,7 @@ class PairIOHandler:
         with h5py.File(filepath, "w") as fp:
             fp.attrs["format_version"] = version
             fp.attrs["packed_pairs"] = bool(packed)
+            fp.attrs["virtual_rows"] = bool(virtual_rows)
             # Provenance of the estimator (ignored by old readers).
             if owner.resolution_factor is not None:
                 fp.attrs["resolution_factor"] = float(owner.resolution_factor)
@@ -324,7 +332,17 @@ class PairIOHandler:
         q0, q1 = int(q_offsets[start_ind]), int(q_offsets[stop_ind])
 
         packed = "packed_pairs" in fp
-        virtual_rows = "tc_pair_inds" in fp or (packed and "treecode" in fp)
+        # The writer records this; the fallback is for files written before
+        # it did, and now looks at the dataset the flag actually governs
+        # (tc_Q_inds) instead of inferring it from a different one.
+        if "virtual_rows" in fp.attrs:
+            virtual_rows = bool(fp.attrs["virtual_rows"])
+        else:
+            virtual_rows = (
+                "tc_pair_inds" in fp
+                or "tc_Q_inds" in fp
+                or (packed and "treecode" in fp)
+            )
         pair_name = "tc_pair_inds" if "tc_pair_inds" in fp else "pair_inds"
         q_name = "tc_Q_inds" if virtual_rows else "Q_inds"
 
@@ -414,7 +432,12 @@ class PairIOHandler:
                 owner, fp["treecode"], block_ids_flat, start_ind, stop_ind
             )
 
-        owner.pack_host_pairs = True
+        # Deliberately not ``owner.pack_host_pairs = True``: the flag is the
+        # user's request for how *future* pair finding should behave, not a
+        # property of the file just read.  Setting it here made a later
+        # preprocess() on the same object silently measure with uint16
+        # rotations -- a different estimator.  ``owner.packed_pairs`` already
+        # tells the rest of the code what this instance holds.
         owner.packed_pairs = []
         owner.packed_block_ids = []
         owner.packed_block_sizes = []

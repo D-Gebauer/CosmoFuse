@@ -198,8 +198,14 @@ class TestPackedPairFile(unittest.TestCase):
     def test_round_trip(self):
         corr = self._fresh(pack_pairs=True)
         corr.load_pairs(self.path)
-        self.assertTrue(corr.pack_host_pairs)
+        # the payload is what the file carries...
+        self.assertIsNotNone(corr.packed_pairs)
         self.assertIsNone(corr.pair_inds)
+        # ...but pack_host_pairs stays the user's request for how *future*
+        # pair finding should behave.  Setting it from the file made a later
+        # preprocess() on the same object silently measure with uint16
+        # rotations, which is a different estimator.
+        self.assertFalse(corr.pack_host_pairs)
         self.assertEqual(corr.ntotpairs, self.reference.ntotpairs)
         assert_same_state(self, device_state(self.reference), device_state(corr))
 
