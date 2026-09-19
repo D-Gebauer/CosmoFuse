@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cosmofuse"
-version = "6.2.0"
+version = "6.3.0"
 authors = [
     { name="David Gebauer", email="git@gebauer.ai" },
 ]
@@ -50,6 +50,9 @@ dev = [
     "pre-commit>=2.0.0",
     "treecorr",
 ]
+# No Sphinx sources are in the tree yet; the documentation is README.md
+# plus docs/estimator_note.md. Kept so the readthedocs URL below has a
+# declared toolchain the day the sources land.
 docs = [
     "sphinx>=5.0.0",
     "sphinx-rtd-theme>=1.0.0",
@@ -118,12 +121,12 @@ python_functions = ["test_*"]
 env = [
     "NUMBA_DISABLE_JIT=1",
 ]
+# Coverage is a CI concern, not a default: forcing it here made every
+# invocation -- including a single-test debug run -- instrument the whole
+# package and rewrite htmlcov/.  `make coverage` and the CI job ask for it.
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=CosmoFuse",
-    "--cov-report=term-missing",
-    "--cov-report=html",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

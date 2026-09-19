@@ -37,4 +37,9 @@ jobs:
       uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
-        fail_ci_if_error: true
+        token: ${{ secrets.CODECOV_TOKEN }}
+        # v4 requires a token. Without one the upload fails and, with
+        # fail_ci_if_error, turns the whole run red for a reason that has
+        # nothing to do with the code -- so this stays false until the
+        # secret is set in the repository.
+        fail_ci_if_error: false

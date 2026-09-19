@@ -28,8 +28,47 @@ NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
 
 
+#: ``make_corr`` is ~13.5 s of pair finding and ``setUpClass`` runs once per
+#: *subclass* -- six of them across this file and test_row_layouts.py, for
+#: ~68 s of a 775 s suite spent rebuilding the same geometry.  The geometry
+#: is a pure function of the arguments, so it is built once per distinct
+#: configuration and the per-test mutable state is reset instead.
+_CORR_CACHE = {}
+
+
+def reset_corr(corr):
+    """Drop the device-side state the degrade tests mutate.
+
+    ``fused()`` already clears these after each run; doing it again at
+    ``setUpClass`` is what makes sharing one instance between subclasses
+    equivalent to building a fresh one.
+    """
+    corr.compute_context.Q_inds_dev = None
+    corr.compute_context.degrade_csr = None
+    corr.compute_context.pair_scratch = None
+    corr.compute_context.fused_output_buffers = None
+    memo = getattr(corr.compute_context, "frozen_map_memo", None)
+    if memo is not None:
+        memo.clear()
+    corr._expansion_memo = None
+    corr._expansion_layout = None
+    corr._expansion_depth = 0
+    return corr
+
+
 def make_corr(k=2.0, aperture_nside=None, map_precision="float64",
               accumulation_precision="same", n_side_centers=4):
+    key = (k, aperture_nside, map_precision, accumulation_precision,
+           n_side_centers)
+    cached = _CORR_CACHE.get(key)
+    if cached is not None:
+        return reset_corr(cached)
+    _CORR_CACHE[key] = corr = _build_corr(*key)
+    return corr
+
+
+def _build_corr(k, aperture_nside, map_precision, accumulation_precision,
+                n_side_centers):
     theta, phi = hp.pix2ang(NSIDE, np.arange(NPIX))
     mask = (np.degrees(phi) < 200.0) & (np.abs(90 - np.degrees(theta)) < 55)
     rng = np.random.default_rng(1)

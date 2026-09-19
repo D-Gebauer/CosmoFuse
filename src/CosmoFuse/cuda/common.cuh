@@ -41,27 +41,6 @@ static __device__ inline cuDoubleComplex cuCmul(cuDoubleComplex a, cuDoubleCompl
 }
 
 /*
- * Parallel sum reduction within a single thread block.
- * Each thread contributes its local accumulator `val` (e.g. a partial
- * xi+ numerator); the result in thread 0 is the total sum for the block.
- */
-template<typename T>
-__device__ inline T block_reduce_sum(T val) {
-    __shared__ T shared[BLOCK_SIZE];
-    int lane = threadIdx.x;
-    shared[lane] = val;
-    __syncthreads();
-
-    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
-        if (lane < stride) {
-            shared[lane] += shared[lane + stride];
-        }
-        __syncthreads();
-    }
-    return shared[0];
-}
-
-/*
  * Simultaneous reduction of two values in one pass -- avoids a second
  * __syncthreads() barrier.  Used when a kernel accumulates two quantities
  * over the same pair loop, e.g. xi+ and xi- numerators, or a numerator

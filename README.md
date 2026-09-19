@@ -22,7 +22,12 @@ $$ M_a = \frac{A \sum_{\text{p}}{w_p g_t Q_p}}{\sum_{\text{p}}{w_p}} $$
 
 where $g_t$ is the tangential shear. The shear 2PCFs are calculated as:
 
-$$ \xi_+ = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2^*}}{\sum_{\text{pairs}}{w_1 w_2}}, \quad \xi_- = \frac{\sum_{\text{pairs}}{w_1 w_2 g_1 g_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
+$$ \xi_+ = \frac{\sum_{\text{pairs}}{w_1 w_2 \, g_1' g_2'^*}}{\sum_{\text{pairs}}{w_1 w_2}}, \quad \xi_- = \frac{\sum_{\text{pairs}}{w_1 w_2 \, g_1' g_2'}}{\sum_{\text{pairs}}{w_1 w_2}} $$
+
+where $g' = g\,e^{-2i\varphi}$ is the shear rotated into the frame of the pair
+($\varphi$ the position angle of the separation vector at that pixel, one per
+pair member). The rotation is not optional bookkeeping: without it $\xi_-$ is
+not invariant under a rotation of the coordinate frame.
 
 ### 2. Galaxy Clustering ($\zeta_{g,g}$)
 
@@ -159,7 +164,7 @@ To load pairs and immediately release host-side pair arrays after backend prepar
 
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
-Pair files are written in a consolidated layout (format version 2; version 3 with `resolution_factor`) that loads with a handful of bulk reads; files written by older CosmoFuse versions remain fully readable.
+Pair files are written in a consolidated layout (format version 2; version 3 with `resolution_factor`, version 4 with `pack_host_pairs`) that loads with a handful of bulk reads. Versions 2 and later are readable; **format version 1 is not** — it is rejected with an explicit error, so a pre-consolidation archive has to be regenerated.
 
 `pack_pairs=True` stores the pair geometry on the *device* in 8 instead of 24 bytes per pair, so about three times as many pairs fit on a GPU; host arrays and pair files stay exact. `pack_host_pairs=True` applies the same packing already at pair-finding time, which cuts host RAM and the pair file by the same factor (`pair_inds` / `pair_exp2phi` are then `None`, the payload lives in `packed_pairs`):
 
@@ -171,7 +176,7 @@ Both are off by default. Packing quantises the pair rotations to $2\pi/65536$, w
 
 ### Aperture filters
 
-The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `calculate_pairs_M_a()`, `select_patch_centers()`, and `Correlation.from_mask()`. Two filters ship with the package:
+The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `calculate_pairs_M_a()`, `select_patch_centers()`, and `Correlation.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
 
 **`Q_crittenden` (default)** — the exponential compensated filter of [Crittenden et al. (2002)](https://arxiv.org/abs/astro-ph/0012336), as used for the i3PCF in [Halder et al. (2021)](https://arxiv.org/abs/2102.10177):
 
@@ -202,6 +207,47 @@ The package supports 3 main probes: Cosmic Shear, Galaxy Clustering, and Galaxy-
 | **Shear** | Aperture Mass ($M_a$) | Shear 2PCF ($\xi_\pm$) | Shear maps ($g_1, g_2$), Weights ($w$) |
 | **Clustering** | Aperture Count ($M_g$) | Angular Clustering ($\xi_g$) | Density maps ($\delta$ or counts), Weights ($w$) |
 | **GGL** | Aperture Count ($M_g$) | Tangential Shear ($\xi_t$) | Lens density + Source shear |
+
+#### What the measurement methods return (`return_device`)
+
+Every measurement method takes `return_device` and it defaults to **`True`**.
+On a GPU backend that means you get **cupy arrays**, not numpy — which is what
+makes the device-resident pipeline work: `MapLoader` keeps the maps on the
+card, `ZetaWriter` reduces on the card and copies ~9 kB instead of ~1 MB per
+map-set, and nothing crosses PCIe that does not have to. Pass
+`return_device=False` for numpy.
+
+Two things worth knowing:
+
+* **A multi-device group always returns numpy.** `MultiDeviceCorrelation`
+  concatenates the per-device patch ranges on the host, so `return_device` is
+  ignored there.
+* **The arrays are yours.** Each call allocates its outputs, so collecting
+  results in a list across realisations is safe:
+
+  ```python
+  results = [corr.get_3x2pt_tomo(...) for _ in range(n_realisations)]   # fine
+  ```
+
+  (Before 6.3.0 `get_3x2pt_tomo(return_device=True)` returned cached buffers
+  that the next call overwrote in place, so that loop silently produced N
+  copies of the last realisation.)
+
+#### Which row is which pair of bins
+
+The tomographic outputs are `(ncomb, n_patches, nbins)` and the row order is
+part of the contract, not something to rederive:
+
+```python
+Correlation.tomo_combinations(4)         # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
+Correlation.tomo_combinations(4, True)   # gc_auto_correlations_only=True: the diagonal only
+Correlation.ggl_combinations(2, 4)       # xi_t rows as (lens_bin, source_bin)
+Correlation.zeta_triplets(4)             # zeta rows as (z_center, z2, z3)
+```
+
+Note that `gc_auto_correlations_only=True` changes the length of the $\xi_g$
+vector from `nz(nz+1)/2` to `nz` — a shape check will not catch a mislabelled
+data vector, so index it by the accessor.
 
 #### 1. Single Map Pair (Patch-Level)
 

@@ -1,5 +1,267 @@
 # Changelog
 
+## 6.3.0 (2026-09-19)
+
+An audit pass: everything that could be done without losing performance,
+growing memory, or moving a number that was already right.
+Every public GPU call is **bitwise identical** to 6.2.0 (measured, A/B) except
+`compute_density_density`, which was measuring the wrong estimator.
+
+### Performance
+
+- **The zeta reduction is vectorised over the triplet list.**
+  `_zeta_from_fields` and `_zeta_from_cross_fields` walked the tomographic
+  triplets in Python, about five array operations per triplet on ~1 MB of
+  data.  At the production geometry that made the reduction the largest item
+  in a map-set -- roughly nine times the measurement it follows -- and all of
+  it host-side launch overhead.
+  - All eight estimators now go through one `_zeta_covariance()`.  The triplet
+    list becomes a pair of index arrays (`_ZetaIndices`), so a reduction is
+    one gather, one product and one mean regardless of the triplet count:
+    ~800 array operations become ~80.
+  - The index arrays are memoised per binning and **uploaded once per
+    device**.  A fresh host index array costs ~0.28 ms per estimator to
+    upload -- more than the arithmetic it indexes, and 40 % of what remained
+    once the loop was gone.  `getDevice()` keys the cache.
+  - **And then all eight share one gather.** Each estimator was a single
+    gather, but eight of them is still eight times the fixed array-op cost --
+    and at these sizes that cost *is* the runtime (~0.03 ms per cupy call on
+    ~1 MB).  Concatenating the centres once and the annuli once makes it one
+    set of operations for the whole reduction.  The batch is skipped, and the
+    per-estimator path taken, when the inputs do not share a dtype
+    (concatenation would silently raise an output's precision) or when the
+    annuli disagree on the patch/angular axes.
+  - A100, 450 patches, float64, all eight estimators from device-resident
+    input: **31.5 -> 0.80 ms (39x)** at 4 tomographic and 10 angular bins.
+    The reduction was nine times the measurement; it is now a fifth of it.
+    Bit-for-bit identical on numpy; <= 0.3 ULP on cupy.
+
+- **One fused kernel for the safe divide** (`backend.safe_divide`).  `den != 0`
+  + `where` + `divide` + `astype` + `*=` is five kernels and two full-size
+  temporaries per output array, and `get_3x2pt_tomo` produces six.  Written
+  out element by element it is one kernel and no temporary: **0.745 -> 0.068 ms**
+  for the six at production shapes.  `_normalize_by_weights` shares it, which
+  is three more per `get_full_tomo_shear`.
+  - Deliberately the *same expression* rather than a tidier one: the `den == 0`
+    branch still multiplies the quotient by zero instead of assigning it, so a
+    negative numerator still yields `-0.0` and a non-finite one still yields
+    `NaN`.  Verified bit-for-bit over 32 dtype/shape combinations.
+
+- **`get_full_tomo_ggl` shares one row expansion** between its passes, as the
+  other `get_full_tomo_*` methods already did -- four expansions per call
+  became two when an aperture output is requested.  The scope is taken only
+  then, because it is the `aperture_tomo.cu` leaf that fixes the layout at
+  `"soa"`; a xi_t-only call keeps its direct AoS write.
+
+- Measured end to end on the A100 (12 patches, 11 M pairs, all values bitwise
+  unchanged):
+
+  | call | 6.2.0 | 6.3.0 |
+  |---|---|---|
+  | `get_3x2pt_tomo` | 4.713 ms | 4.607 ms |
+  | `get_full_tomo_shear` | 3.041 ms | 3.000 ms |
+  | `get_full_tomo_ggl` (+N_ap, +M_ap) | 3.929 ms | 3.892 ms |
+  | `get_3x2pt_tomo`, k = 2 | 1.762 ms | **1.104 ms** |
+  | `get_full_tomo_shear`, k = 2 | 1.097 ms | **0.778 ms** |
+  | `get_full_tomo_ggl`, k = 2 | 1.455 ms | **1.256 ms** |
+
+  The treecode configurations gain most: the kernels are small there, so the
+  host side is the wall clock.
+
+- **The frozen-map memo is bounded by bytes**, not by 16 entries.  Sixteen is
+  a harmless count and a ruinous size: one frozen `(4, 2, npix)` float32
+  shear map-set is 1.6 GB at nside 2048, so the entry bound alone permitted
+  ~25 GB of VRAM for a cache whose stated purpose is a handful of fixed
+  weight maps.
+- **`release_device_memory()`** (new): drops the pair scratch (32 B/pair), the
+  frozen-map memo and the weight-sum caches without touching the prepared
+  geometry.  A long-lived `Correlation` can now share a GPU.
+- **HDF5 chunks are capped by `flush_every`** (`ZetaWriter`).  A ~1 MiB chunk
+  against a 50-map flush window means every flush rewrites a partially filled
+  chunk.
+- The pair search no longer fills a **write-only `bin_indices` array**: 8 B
+  per pair written once and never read (only its `.size`, which is
+  `inds_a.size`).
+
+### Fixed -- silent wrong answers
+
+- **`compute_density_density` used a mean of ratios where everything else uses
+  a ratio of sums.**  `0.5*(N_ab/D_ab + N_ba/D_ba)` instead of
+  `(N_ab+N_ba)/(D_ab+D_ba)`; the two agree only when both orientations carry
+  the same weight, i.e. never for a cross pair.  Measured discrepancy against
+  `vectorized_density_density` and `get_3x2pt_tomo` on a cross pair:
+  **3.7 % relative**.  The auto case is unchanged.  **This changes numbers**
+  -- it is the one output in this release that moves.  `tests/test_estimator_parity.py`
+  is the gate that was missing: single-map vs vectorised vs fused, per
+  statistic, on both backends.
+- **`get_3x2pt_tomo(return_device=True)` returned cached buffers** that the
+  next call overwrote in place, so `[corr.get_3x2pt_tomo(...) for _ in ...]`
+  produced N references to the last realisation with no error.  Each call now
+  allocates its outputs; the pool recycles them, so a consume-and-discard loop
+  holds no more device memory than the cache did (measured: +0.02 MB per live
+  result at production shape).
+- **Three caches were keyed on a recycled address.**  `id()` and a CUDA pool
+  pointer identify an object only while it is alive: CPython reuses addresses
+  and cupy's pool hands a freed pointer straight to the next allocation.  None
+  of the three held a reference to what it had keyed.
+  - a transient `aperture_filter` -- a lambda or `functools.partial` written
+    inline, which is the documented way to pass it -- was silently ignored,
+    and the measurement made with the *previous* filter's Q values;
+  - `for k: w = cp.asarray(w_host[k]); corr.compute_shear_shear(..., w, w)`
+    gave the second map the first one's sum of weights;
+  - a frozen host weight map rebuilt per realisation inherited the previous
+    one's digest.
+  All three now go through `utils.live_object_serial`, which pins nothing and
+  cannot be forged by a recycled address.  `tests/test_identity_caches.py`
+  recycles the addresses deliberately.
+  - **Two more of the same class, not in the audit**, found by sweeping for
+    `id()`-keyed cache keys: `_combination_layout` (a module-level cache keyed
+    on `(id(comb_i), id(comb_j))`, while an explicit `ggl_bin_combinations`
+    selection builds fresh arrays every call and drops them -- a stale hit
+    would scatter the results into the *previous* selection's rows), and the
+    aperture-cell cache keyed on `id(self.map_inds)`, which `load_pairs()`
+    reassigns.  Neither could be made to fire here -- the layout key needs
+    *both* ids to recycle at once and CPython's LIFO free lists tend to swap
+    rather than match them (0 of 4000 alternating calls) -- but both are
+    allocator luck rather than a guarantee, and the fix is a dict lookup of
+    the same cost.
+- **`MultiDeviceCorrelation.__getattr__` forwarded anything it did not know to
+  `parts[0]`**, so `compute_shear_shear`, `phi_center`, `n_patches` and the
+  rest silently returned *one device's share* of the patches -- 459 of 917,
+  with no error.  It now forwards an explicit allow-list of attributes that
+  are the same on every part and raises `NotImplementedError` for the rest.
+- **Loading a packed pair file no longer flips `pack_host_pairs`.**  The flag
+  is the user's request for how future pair finding should behave; setting it
+  from a file made a later `preprocess()` silently measure with uint16
+  rotations, which is a different estimator.
+- **The CPU accumulators are explicitly float64.**  `zero = x[0] * 0.0` types
+  as float64 under numba but as float32 under `NUMBA_DISABLE_JIT=1`, which
+  pytest-env forces -- so the suite was measuring a float32 accumulation of
+  four kernels that ship accumulating in float64.  The shipped numbers do not
+  move; the tests now exercise them.
+
+### Fixed -- failures
+
+- **A packed file written with `aperture_nside` can be read back.**  The
+  writer chose its dataset names from one rule and the reader from another,
+  which disagreed for exactly that combination (`tc_Q_inds` present,
+  `tc_pair_inds` absent), so the load raised `KeyError: 'Q_inds'`.  The flag
+  is now written as a file attribute; the inference is kept as a fallback for
+  older files and fixed.  This is `pack_host_pairs` + `aperture_nside`, i.e.
+  the nside 2048 archive.
+- **`preflight_pair_memory` projects the resource it is budgeting against.**
+  It charged the 24 B/pair *host* layout against free *device* memory, so runs
+  that fit were rejected with `MemoryError` -- exactly the large-geometry case
+  `pack_pairs` exists for.  It now uses 8 B/pair when the relevant packing is
+  on, and the report and the error name which resource.
+- **`save_pairs()` after `release_host_pairs=True` raises** instead of warning
+  and returning.  The job used to exit 0 with no file, after hours of pair
+  finding, and the warning is invisible under `-W ignore`.
+- **A failed `prepare()` refuses to measure.**  It published the device
+  buffers before setting `ntotpairs`, so an OOM part-way through left an
+  object that `_ensure_prepared()` could not tell from a good one and that
+  returned finite numbers from a torn state.
+- **`device='auto'` falls back to CPU** when cupy imports but no device is
+  usable (driver/runtime mismatch, `CUDA_VISIBLE_DEVICES=""`, an unusable
+  card).  It only caught `ImportError`.  `device='gpu'` and an explicit id
+  stay strict.
+- **Every aperture entry point works on a fresh instance.**  `Q_inds` and its
+  siblings are initialised in `__init__`, so `ensure_aperture_pairs` builds
+  the geometry on demand instead of raising `AttributeError`; and a
+  measurement with no pair geometry at all now states the precondition.
+- **`MultiDeviceCorrelation.get_full_tomo_ggl(return_N_ap=True)`** no longer
+  raises `IndexError`: `_PATCH_AXIS` declares all three outputs, and a
+  mismatch between the declared axes and the returned arity is now an error
+  that says so.
+- **A transient kernel-compilation failure is no longer cached.**  A failed
+  NVRTC compile was cached negatively forever, so one transient hiccup (a
+  disk-cache read error) silently pinned the process to the slower fallback
+  kernel for its whole lifetime.  Deterministic compile errors are still
+  cached; transient ones are retried.  *(Found while running this release's
+  tests, not in the audit.)*
+
+### API
+
+- **`Correlation.tomo_combinations()`, `.ggl_combinations()`,
+  `.zeta_triplets()`** (new): the row order of every tomographic output, which
+  had to be guessed.  Gated against the private builders so they cannot drift.
+- **`Correlation.compute_sumofweights()`** (new): the public `sumofweights=`
+  argument had no supported way to produce a value.
+- **`zeta_g_t` / `zeta_a_t` / `calculate_all_zetas` take `symmetric=`**.  The
+  γ_t layout was inferred from the combination *count*, so a GGL subset that
+  happens to hold `nz(nz+1)/2` entries was silently treated as the symmetric
+  shear ordering -- 10 rows of wrong pairings instead of 40.  The inferred
+  default is unchanged.
+- **The directional `sumofweights` form is decided from the whole shape.**
+  `shape[0] == 2` alone made the per-combination form unusable whenever there
+  happened to be exactly two tomographic combinations.
+- **`pack_pairs=True` past the accumulator limit** now says where the limit
+  is and why there is no fallback, instead of a bare decline.
+- The device-buffer property setters **invalidate the caches derived from
+  them** (`inds_i_dev`/`inds_j_dev`, the aperture device buffers).
+- `radius_filter` is now the single source of the `5 * theta_Q` truncation
+  radius rather than an unread attribute beside three literals.
+
+### Numerics
+
+- The zeta reduction is **bit-for-bit identical on numpy** to the per-triplet
+  loop.  On cupy it moves by <= 1 ULP (a larger output changes the reduction
+  blocking) and gains a property the loop lacked: reducing one map-set at a
+  time now gives bitwise the same numbers as a stacked batch, so `ZetaWriter`'s
+  device route and a batch reduction agree exactly.
+- Integer `central`/`annulus` input to the zeta helpers is no longer truncated
+  to integer output.
+
+### Tests
+
+- `tests/test_estimator_parity.py` (new): one estimator per statistic across
+  the single-map, vectorised and fused paths, on both backends, plus the
+  combination-ordering accessors and the precomputed sum of weights.
+- `tests/test_identity_caches.py` (new): the three recycled-address caches,
+  with the addresses recycled deliberately.
+- **83 lines of test are collected again.**
+  `test_xipm_gpu_fallback_path_with_fake_cupy` was nested inside the body of
+  the test above it, so pytest never saw it -- and it did not pass once it
+  ran (it referenced attributes the test class does not have, and its fake
+  cupy was missing half the module surface).  Both fixed.
+- **The degrade fixture is built once per configuration**, not once per
+  subclass: ~54 s off the suite.
+- Two tests that asserted only `len(outputs) == 8` -- which no input can
+  falsify -- now assert what the clamp branches actually do.
+- **Coverage is no longer forced on every invocation** (`make coverage` and CI
+  ask for it), and `make lint` / `make format` have recipes instead of being
+  `.PHONY` entries that exit 0 having checked nothing.
+
+### Docs
+
+- `docs/estimator_note.md` said `compute_shear_shear` keeps the historical
+  average-of-ratios form.  It does not, and since this release neither does
+  `compute_density_density`: every entry point is the ratio of sums.  This was
+  the most misleading line in the repo -- a scientific claim, not a cosmetic
+  one.
+- `README.md`: the ξ± formula now shows the rotation into the pair frame
+  (without it ξ− is not rotation-invariant, so the formula was wrong even
+  though the code is right); format version 1 files are *not* readable, as
+  `MIN_FORMAT_VERSION = 2` has always enforced; `U_crittenden`/`U_schneider`
+  are named; and `return_device` is documented, including that it defaults to
+  `True`, that a multi-device group ignores it, and that the returned arrays
+  are the caller's.
+- `warmup()` compiles the pair-search kernel at `pair_search_precision`, which
+  is what `preprocess()` uses -- it compiled it at `rotation_precision`, so
+  the compile it paid for was never the one that ran.  The docstring now says
+  the pair search is Numba on both backends.
+- CI: `codecov-action@v4` gets a token and no longer fails the run on an
+  upload error unrelated to the code.
+
+### Removed
+
+- `block_reduce_sum` (`cuda/common.cuh`), `_resolve_aperture_filter`, a dead
+  `npix` local, and `cross_definition_check()` from
+  `benchmarks/static_treecode/benchmark_treecorr.py` -- the last recombined
+  CosmoFuse's numerators "TreeCorr-style" to compare against the pre-5.0 cross
+  estimator, so since 5.0 it compared the estimator against itself.
+- `_get_or_create_fused_post_buffers`, the cache behind the aliasing above.
+
 ## 6.2.0 (2026-09-18)
 
 ### Performance

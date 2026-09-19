@@ -761,7 +761,15 @@ class Correlation:
 
         Moves the one-off Numba compilation cost (roughly 10-20 s in a
         fresh environment; sub-second afterwards thanks to the on-disk
-        cache) out of the first map measurement.  No-op on GPU backends.
+        cache) out of the first map measurement.
+
+        On a GPU backend the *measurement* kernels are CUDA and are compiled
+        per tomographic-bin-count template on first launch, so
+        ``Backend.warmup`` is a no-op there -- but the **pair search** is
+        Numba on both backends, so its kernel is compiled here regardless of
+        backend.  It is compiled at ``pair_search_precision``, which is what
+        ``preprocess()`` will use; compiling it at ``rotation_precision``
+        (as this used to) warmed a signature the pair search never calls.
         """
         self.backend.warmup(
             map_dtype=self.map_dtype,
@@ -1019,12 +1027,6 @@ class Correlation:
         cached_tuple = (comb_i_dev, comb_j_dev)
         self.compute_context.tomo_combination_cache[cache_key] = cached_tuple
         return cached_tuple
-
-    def _resolve_aperture_filter(
-        self,
-        aperture_filter: Optional[Callable[..., Any]] = None,
-    ) -> Callable[..., Any]:
-        return PairGeometry.resolve_aperture_filter(aperture_filter)
 
     def _aperture_filter_key(self, aperture_filter: Callable[..., Any]) -> Any:
         return PairGeometry.aperture_filter_key(aperture_filter)
@@ -4831,8 +4833,6 @@ class Correlation:
 
         n_shear_bins = int(shear_np.shape[0])
         n_density_bins = int(density_np.shape[0])
-        npix = int(density_soa.shape[0])  # rows of the device buffers
-
         n_patches = int(self.n_patches)
         nbins_total = int(self.n_patches * self.nbins)
 

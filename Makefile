@@ -1,4 +1,4 @@
-.PHONY: help install install-dev test lint format clean build
+.PHONY: help install install-dev test test-fast coverage lint format clean build
 
 help: ## Show this help message
 	@echo "Available commands:"
@@ -12,6 +12,12 @@ install-dev: ## Install the package with development dependencies
 
 test: ## Run tests with pytest
 	pytest tests/ -v
+
+test-fast: ## Run the fast local loop (no GPU, no slow exactness gates)
+	pytest tests/ -m "not gpu and not slow" -q
+
+coverage: ## Run the CI selection with coverage reports
+	pytest tests/ -m "not gpu" --cov=CosmoFuse --cov-report=term-missing --cov-report=html --cov-report=xml
 
 test-env: ## Run tests with pytest in specific environment (usage: make test-env-pytest ENV=myenv)
 	conda run --no-capture-output -n $(ENV) pytest tests/ -v
@@ -37,6 +43,16 @@ clean: ## Clean build, test, coverage, cache and temporary artifacts
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 	find . -type d -name ".ipynb_checkpoints" -prune -exec rm -rf {} +
 	find . -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*$$py.class" \) -delete
+
+lint: ## Check formatting and types (requires the dev extras)
+	black --check src tests
+	isort --check-only src tests
+	flake8 src tests
+	mypy src
+
+format: ## Apply formatting
+	black src tests
+	isort src tests
 
 build: ## Build the package
 	python -m build

@@ -45,8 +45,11 @@ $$ \xi^{(b),ij} = \frac{N^{(b)}_{ij} + N^{(b)}_{ji}}{W^{(b)}_{ij} + W^{(b)}_{ji}
 
 i.e. the standard weighted estimator (TreeCorr's definition), not the mean of
 the two orientation ratios. Since 5.0 this applies to $\xi_\pm$ as well as to
-$\xi_{\rm g}$ and $\xi_{\rm t}$. (The single-map `compute_shear_shear` keeps the
-historical average-of-ratios form; see the CHANGELOG.)
+$\xi_{\rm g}$ and $\xi_{\rm t}$, and it applies to **every** entry point:
+the single-map `compute_shear_shear`, `compute_density_density` and
+`compute_density_shear` measure the same estimator as the vectorised and
+fused paths. (`compute_density_density` used the mean of the two orientation
+ratios until 6.3.0; `tests/test_estimator_parity.py` is the gate.)
 
 ## 2. The i3PCF
 

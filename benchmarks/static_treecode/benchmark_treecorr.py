@@ -159,41 +159,6 @@ def compare(x, ref, combs_auto):
     return out
 
 
-def cross_definition_check(n):
-    """CosmoFuse's cross-bin xi+- is the mean of the two orientation ratios,
-    TreeCorr's the ratio of the summed orientations.  Recombine CosmoFuse's
-    raw numerators/denominators TreeCorr-style and compare."""
-    from CosmoFuse import Correlation
-
-    G["tc_kwargs"] = TC_MODES["treecorr_brute"]
-    ref = [treecorr_patch(i) for i in range(n)]
-    ref_p = np.array([r[0] for r in ref]).transpose(1, 0, 2)
-    corr = Correlation(G["nside"], G["phi_c"][:n], G["theta_c"][:n], nbins=len(G["edges"]) - 1,
-                       theta_min=np.degrees(G["edges"][0]) * 60, theta_max=np.degrees(G["edges"][-1]) * 60,
-                       patch_size=G["R"], theta_Q=G["R"], mask=G["mask"], device="cpu",
-                       map_precision="float64", rotation_precision="float64")
-    corr.preprocess()
-    nz = G["shear"].shape[0]
-    dens = np.zeros((nz, G["row_pix"].size))
-    out = corr.get_3x2pt_tomo(shear_maps=G["shear"], density_maps=dens, weights=(G["w"], G["w"]),
-                              flip_g1=True, return_device=False)
-    buf = corr.compute_context.fused_output_buffers
-    num = np.asarray(buf["out_xip_num"]).reshape(-1, n, len(G["edges"]) - 1)
-    den = np.asarray(buf["out_xip_den"]).reshape(-1, n, len(G["edges"]) - 1)
-    combs = [(i, j) for i in range(nz) for j in range(i, nz)]
-    worst_mean_of_ratios = worst_ratio_of_sums = 0.0
-    for c, (i, j) in enumerate(combs):
-        if i == j:
-            continue
-        ros = (num[2 * c] + num[2 * c + 1]) / (den[2 * c] + den[2 * c + 1])
-        scale = np.max(np.abs(ref_p[c]))
-        worst_ratio_of_sums = max(worst_ratio_of_sums, float(np.max(np.abs(ros - ref_p[c])) / scale))
-        worst_mean_of_ratios = max(worst_mean_of_ratios, float(np.max(np.abs(np.asarray(out[2])[c] - ref_p[c])) / scale))
-    return {"n_patches": n,
-            "xip_cross_cosmofuse_mean_of_ratios_vs_treecorr_max_rel": worst_mean_of_ratios,
-            "xip_cross_cosmofuse_recombined_as_ratio_of_sums_vs_treecorr_max_rel": worst_ratio_of_sums}
-
-
 def zeta(Ma, xi, combs):
     """zeta(z, z, z) for the auto combinations: <M xi> - <M><xi> over patches."""
     out, err = [], []
@@ -363,7 +328,11 @@ def one_run(args, nside, mask, lut, row_pix, shear, w, edges, phi_c, theta_c, np
     report["zeta_level"] = zl
 
     # ---- cross-combination estimator definition (CPU, small subset) ---------------
-    report["cross_definition_check"] = cross_definition_check(min(12, npatch))
+    # cross_definition_check() removed: it recombined CosmoFuse's raw
+    # numerators/denominators "TreeCorr-style" to compare against the
+    # pre-5.0 average-of-ratios cross estimator.  Since 5.0 CosmoFuse *is*
+    # the ratio of summed orientations, so the check compared the estimator
+    # against itself and could not fail.
 
     tag = args.tag or tag
     out = f"benchmarks/static_treecode/results/benchmark_treecorr_{args.scenario}{tag}.json"
