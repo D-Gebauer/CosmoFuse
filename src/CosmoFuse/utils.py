@@ -76,7 +76,7 @@ def select_patch_centers(
     full-resolution ``mask`` is at most ``f_mask`` within the 2PCF patch
     disc (radius ``patch_size``) and at most ``f_mask_filter`` within
     the compensated-filter support disc (radius ``5 * theta_Q`` — the
-    same region ``Correlation.calculate_pairs_M_a`` uses).
+    same region ``PatchCorrelation.find_aperture_pairs`` uses).
 
     ``nside_centers`` controls the patch (over)sampling density: a finer
     grid yields more, more strongly overlapping patches.
@@ -86,7 +86,7 @@ def select_patch_centers(
         nside_centers: Resolution of the candidate-centre grid (coarser
             than the mask resolution).
         patch_size: Patch radius in arcminutes (same meaning as
-            ``Correlation(patch_size=...)``).
+            ``PatchCorrelation(patch_size=...)``).
         theta_Q: Compensated filter scale in arcminutes; defaults to
             ``patch_size``.
         f_mask: Maximum tolerated masked fraction inside the patch disc.
@@ -115,7 +115,7 @@ def select_patch_centers(
             The patch-disc (2PCF) check always uses the pixel fraction.
         aperture_filter: Filter used for the weighting; defaults to the
             built-in ``Q_crittenden`` (same convention as
-            ``Correlation.preprocess``: called as
+            ``PatchCorrelation.preprocess``: called as
             ``aperture_filter(theta, theta_Q)`` with theta in radians
             and theta_Q in arcminutes, falling back to
             ``aperture_filter(theta)``).  Pass the same filter here and
@@ -123,8 +123,8 @@ def select_patch_centers(
 
     Returns:
         ``(phi_center, theta_center)`` in radians, ordered to match the
-        ``Correlation`` constructor, so
-        ``Correlation(nside, *select_patch_centers(...), ...)`` works.
+        ``PatchCorrelation`` constructor, so
+        ``PatchCorrelation(nside, *select_patch_centers(...), ...)`` works.
     """
     mask = np.asarray(mask)
     if mask.ndim != 1:

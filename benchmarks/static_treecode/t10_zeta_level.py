@@ -39,7 +39,7 @@ NSIDE = 512
 
 
 def build_correlation(args, resolution_factor, aperture_nside=None):
-    from CosmoFuse import Correlation
+    from CosmoFuse import PatchCorrelation
 
     mask = hp.ud_grade(hp.read_map(os.path.expanduser(MASK_FILE)), NSIDE)
     map_inds = np.where(mask != 0)[0]
@@ -50,7 +50,7 @@ def build_correlation(args, resolution_factor, aperture_nside=None):
     edges = np.geomspace(args.theta_min, args.theta_max, args.theta_bins + 1)
     edges = edges[edges < 2 * args.radius - 5]
 
-    corr = Correlation(
+    corr = PatchCorrelation(
         NSIDE,
         phi,
         theta,
@@ -105,7 +105,7 @@ def measure(args):
                 if args.f16:   # T11: what a float16 map archive would deliver
                     shear = shear.astype(np.float16).astype(np.float32)
                 t1 = time.time()
-                out = corr.get_full_tomo_shear(
+                out = corr.shear(
                     shear, w, flip_g1=True, return_device=False
                 )
                 wall += time.time() - t1

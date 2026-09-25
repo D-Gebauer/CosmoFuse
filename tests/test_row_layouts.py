@@ -23,7 +23,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 from .test_degrade_kernel import FusedDegradeBase, make_corr
 from .test_gpu_kernel_emulation import emulated_gpu
@@ -179,41 +179,41 @@ class TestOneExpansionPerCall(FusedDegradeBase):
 
     def count_expansions(self, corr, fn):
         seen = []
-        real = Correlation._expand_rows_fused
+        real = PatchCorrelation._expand_rows_fused
 
         def counting(self, *a, **kw):
             out = real(self, *a, **kw)
             seen.append(kw.get("layout", "soa"))
             return out
 
-        with patch.object(Correlation, "_expand_rows_fused", counting):
+        with patch.object(PatchCorrelation, "_expand_rows_fused", counting):
             self.fused(corr, fn)
         return seen
 
     def test_get_full_tomo_shear_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.get_full_tomo_shear(
+        seen = self.count_expansions(corr, lambda c: c.shear(
             self.shear, self.w, return_device=False))
         self.assertEqual(seen, ["interleaved"])
 
     def test_get_full_tomo_density_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.get_full_tomo_density(
+        seen = self.count_expansions(corr, lambda c: c.density(
             self.dens, self.w, return_device=False))
         self.assertEqual(seen, ["soa"])
 
     def test_a_flip_does_not_cost_a_second_expansion(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.get_full_tomo_shear(
+        seen = self.count_expansions(corr, lambda c: c.shear(
             self.shear, self.w, flip_g1=True, return_device=False))
         self.assertEqual(seen, ["interleaved"])
 
     def test_pair_only_calls_take_aos_from_the_degrade(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.vectorized_shear_shear(
+        seen = self.count_expansions(corr, lambda c: c.shear_shear(
             self.shear, self.w, return_device=False))
         self.assertEqual(seen, ["aos"])
-        seen = self.count_expansions(corr, lambda c: c.get_3x2pt_tomo(
+        seen = self.count_expansions(corr, lambda c: c.three_by_two_pt(
             shear_maps=self.shear, density_maps=self.dens,
             weights={"shear": self.w, "density": self.w},
             return_device=False))
@@ -230,7 +230,7 @@ class TestOneExpansionPerCall(FusedDegradeBase):
         """Only the route changes, never what the kernels get."""
         corr = self.corr
         with emulated_gpu(corr):
-            with patch.object(Correlation, "_use_fused_degrade",
+            with patch.object(PatchCorrelation, "_use_fused_degrade",
                               lambda self, w: True):
                 direct = corr._pair_shear_rows(self.shear, self.w, "pairs")
                 with corr._expansion_scope(layout="soa"):
@@ -249,16 +249,16 @@ class TestPublicFlipsUnchanged(FusedDegradeBase):
 
     def cases(self, corr, shear, flip_g1, flip_g2):
         return {
-            "get_full_tomo_shear": lambda c: c.get_full_tomo_shear(
+            "shear": lambda c: c.shear(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
                 return_device=False),
-            "vectorized_shear_shear": lambda c: c.vectorized_shear_shear(
+            "shear_shear": lambda c: c.shear_shear(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
                 return_device=False),
-            "get_full_tomo_ggl": lambda c: c.get_full_tomo_ggl(
+            "ggl": lambda c: c.ggl(
                 self.dens, shear, self.w, self.w, flip_g1=flip_g1,
                 flip_g2=flip_g2, return_device=False),
-            "get_3x2pt_tomo": lambda c: c.get_3x2pt_tomo(
+            "three_by_two_pt": lambda c: c.three_by_two_pt(
                 shear_maps=shear, density_maps=self.dens,
                 weights={"shear": self.w, "density": self.w},
                 flip_g1=flip_g1, flip_g2=flip_g2, return_device=False),

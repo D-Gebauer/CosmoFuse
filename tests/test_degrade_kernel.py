@@ -19,7 +19,7 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 from .cuda_emulation import LAUNCH_LOG
 from .test_gpu_kernel_emulation import emulated_gpu
@@ -73,7 +73,7 @@ def _build_corr(k, aperture_nside, map_precision, accumulation_precision,
     mask = (np.degrees(phi) < 200.0) & (np.abs(90 - np.degrees(theta)) < 55)
     rng = np.random.default_rng(1)
     mask[rng.choice(NPIX, NPIX // 30, replace=False)] = False
-    corr = Correlation.from_mask(
+    corr = PatchCorrelation.from_mask(
         NSIDE, mask, n_side_centers, patch_size=600, theta_Q=200, f_mask=0.3,
         nbins=4, theta_min=120, theta_max=1100, device="cpu",
         map_precision=map_precision, rotation_precision="float64",
@@ -100,7 +100,7 @@ class FusedDegradeBase(unittest.TestCase):
         """Run `fn(corr)` with the fused kernels active."""
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
-            with patch.object(Correlation, "_use_fused_degrade",
+            with patch.object(PatchCorrelation, "_use_fused_degrade",
                               lambda self, w: True):
                 del LAUNCH_LOG[:]
                 out = fn(corr)
@@ -238,19 +238,19 @@ class TestPublicMethodsMatch(FusedDegradeBase):
     def test_methods(self):
         corr = self.corr
         cases = {
-            "get_full_tomo_shear": lambda c: c.get_full_tomo_shear(
+            "shear": lambda c: c.shear(
                 self.shear, self.w, return_device=False),
-            "vectorized_shear_shear": lambda c: c.vectorized_shear_shear(
+            "shear_shear": lambda c: c.shear_shear(
                 self.shear, self.w, return_device=False),
-            "get_full_tomo_density": lambda c: c.get_full_tomo_density(
+            "density": lambda c: c.density(
                 self.dens, self.w, return_device=False),
-            "get_full_tomo_ggl": lambda c: c.get_full_tomo_ggl(
+            "ggl": lambda c: c.ggl(
                 self.dens, self.shear, self.w, self.w, return_device=False),
-            "get_3x2pt_tomo": lambda c: c.get_3x2pt_tomo(
+            "three_by_two_pt": lambda c: c.three_by_two_pt(
                 shear_maps=self.shear, density_maps=self.dens,
                 weights={"shear": self.w, "density": self.w},
                 return_device=False),
-            "get_aperture_shear": lambda c: c.get_aperture_shear(
+            "aperture_shear_single": lambda c: c.aperture_shear_single(
                 self.shear[0, 0], self.shear[0, 1], self.w[0],
                 return_device=False),
         }

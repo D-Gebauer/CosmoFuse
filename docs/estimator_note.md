@@ -46,9 +46,9 @@ $$ \xi^{(b),ij} = \frac{N^{(b)}_{ij} + N^{(b)}_{ji}}{W^{(b)}_{ij} + W^{(b)}_{ji}
 i.e. the standard weighted estimator (TreeCorr's definition), not the mean of
 the two orientation ratios. Since 5.0 this applies to $\xi_\pm$ as well as to
 $\xi_{\rm g}$ and $\xi_{\rm t}$, and it applies to **every** entry point:
-the single-map `compute_shear_shear`, `compute_density_density` and
-`compute_density_shear` measure the same estimator as the vectorised and
-fused paths. (`compute_density_density` used the mean of the two orientation
+the single-map `shear_shear_single`, `density_density_single` and
+`density_shear_single` measure the same estimator as the vectorised and
+fused paths. (`density_density_single` used the mean of the two orientation
 ratios until 6.3.0; `tests/test_estimator_parity.py` is the gate.)
 
 ## 2. The i3PCF
@@ -81,7 +81,7 @@ $$ N_{\rm side}^{(b)} = \min \left\{ N \in \{1,2,4,\dots,N_{\rm side}\} : \; \ma
 with $\mathrm{resol}(N) = \sqrt{\Omega_{\rm pix}(N)}$ (healpy's `nside2resol`)
 and $\theta_b$ the *lower* edge of the bin. The resulting table (one
 $N_{\rm side}$ per bin, plus the realised $k_{\rm eff} = \theta_b /
-\mathrm{resol}(N_{\rm side}^{(b)})$) is `Correlation.level_table`; it is stored
+\mathrm{resol}(N_{\rm side}^{(b)})$) is `PatchCorrelation.level_table`; it is stored
 in the pair file and must be quoted with any measurement. $k$ is global: one
 value for all statistics and all bins. `resolution_factor=None` (the default)
 keeps every bin at the base resolution and reproduces the pre-5.0 estimator

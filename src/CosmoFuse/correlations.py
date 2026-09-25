@@ -329,7 +329,7 @@ def _normalize_precision(
     return np.dtype(allowed[precision_name])
 
 
-class Correlation:
+class PatchCorrelation:
     """Base class for all correlation functions.
 
     This class contains methods for finding pairs and their angles, as well as
@@ -359,11 +359,11 @@ class Correlation:
         """``device=[0, 1, ...]`` builds a patch-parallel multi-GPU group.
 
         A single device (the default) is unaffected: the instance returned
-        is an ordinary :class:`Correlation`.
+        is an ordinary :class:`PatchCorrelation`.
         """
         device = kwargs.get("device", args[10] if len(args) > 10 else None)
         if isinstance(device, (list, tuple, set)):
-            from .multi_device import MultiDeviceCorrelation
+            from .multi_device import MultiDevicePatchCorrelation
 
             devices = list(device)
             kwargs.pop("device", None)
@@ -371,7 +371,7 @@ class Correlation:
                 args = args[:10]
             if len(devices) == 1:  # a one-element list is just that device
                 return super().__new__(cls)
-            return MultiDeviceCorrelation(*args, devices=devices, **kwargs)
+            return MultiDevicePatchCorrelation(*args, devices=devices, **kwargs)
         return super().__new__(cls)
 
     def __init__(
@@ -397,7 +397,7 @@ class Correlation:
         pack_pairs: bool = False,
         pack_host_pairs: bool = False,
     ) -> None:
-        """Initialize the Correlation class with validation.
+        """Initialize the PatchCorrelation class with validation.
 
         Args:
             nside: HEALPix resolution parameter
@@ -448,7 +448,7 @@ class Correlation:
                 by ~1e-5 of its statistical error and does not bias it.
                 Pair files and host arrays stay exact.  On GPU backends the
                 packed geometry serves every tomographic method
-                (``vectorized_*``, ``get_full_tomo_*``, ``get_3x2pt_tomo``)
+                (``vectorized_*``, ``get_full_tomo_*``, ``three_by_two_pt``)
                 and the aperture statistics; the single-map ``compute_*``
                 methods need the unpacked geometry.
             pair_search_precision: Precision of the pair *search*
@@ -592,7 +592,7 @@ class Correlation:
 
         if isinstance(device, (list, tuple, set)):
             # a single-element device list is just that device; several
-            # devices are handled by MultiDeviceCorrelation (see __new__)
+            # devices are handled by MultiDevicePatchCorrelation (see __new__)
             device = list(device)[0]
         self.backend = get_backend(device)
         self.device = device
@@ -601,7 +601,7 @@ class Correlation:
         self.pair_inds = []
         self.pair_exp2phi = []
         self.bins = []
-        # Aperture geometry, filled by calculate_pairs_M_a()/load_pairs().
+        # Aperture geometry, filled by find_aperture_pairs()/load_pairs().
         # Empty rather than absent: ensure_aperture_pairs() reads Q_inds to
         # decide whether the cached geometry can be reused, so without these
         # every aperture entry point raised AttributeError on a fresh
@@ -633,8 +633,8 @@ class Correlation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         filter_weighting: str = "abs",
         **kwargs: Any,
-    ) -> "Correlation":
-        """Construct a Correlation with patch centres selected from a mask.
+    ) -> "PatchCorrelation":
+        """Construct a PatchCorrelation with patch centres selected from a mask.
 
         Convenience wrapper around
         :func:`CosmoFuse.utils.select_patch_centers`: candidate centres on
@@ -927,11 +927,11 @@ class Correlation:
         ``(ncomb, n_patches, nbins)``; this is what row ``k`` means.  The
         order is the upper triangle including the diagonal, row-major::
 
-            >>> Correlation.tomo_combinations(3)
+            >>> PatchCorrelation.tomo_combinations(3)
             [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
 
-        With ``gc_auto_correlations_only=True`` (``vectorized_density_density``
-        and the ξ_g section of ``get_3x2pt_tomo``) only the diagonal is
+        With ``gc_auto_correlations_only=True`` (``density_density``
+        and the ξ_g section of ``three_by_two_pt``) only the diagonal is
         measured and the vector is ``nzbins`` rows, not ``nzbins(nzbins+1)/2``
         -- the silent shape change that makes mislabelling easy.
 
@@ -956,7 +956,7 @@ class Correlation:
         ``ggl_bin_combinations`` selection is passed -- in which case the
         rows are exactly that selection, in the order given::
 
-            >>> Correlation.ggl_combinations(2, 3)
+            >>> PatchCorrelation.ggl_combinations(2, 3)
             [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
         """
         if ggl_bin_combinations is not None:
@@ -996,7 +996,7 @@ class Correlation:
         6x2pt run with ``n_source != n_lens``, and, with an explicit
         ``symmetric=False``, also when the two counts happen to match::
 
-            >>> Correlation.zeta_cross_triplets(2, 3)
+            >>> PatchCorrelation.zeta_cross_triplets(2, 3)
             [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
         """
         return [
@@ -1055,7 +1055,9 @@ class Correlation:
         self.compute_context.tomo_combination_cache[cache_key] = cached_tuple
         return cached_tuple
 
-    def _aperture_filter_key(self, aperture_filter: Callable[..., Any]) -> Any:
+    def aperture_filter_key(self, aperture_filter: Callable[..., Any]) -> Any:
+        """Key identifying the filter an aperture geometry was built with
+        (stable for as long as the filter object is alive)."""
         return PairGeometry.aperture_filter_key(aperture_filter)
 
     def _evaluate_aperture_filter(
@@ -1170,8 +1172,8 @@ class Correlation:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         return PairGeometry.get_pairs_helper(self, i)
 
-    def calculate_pairs_2PCF(self) -> None:
-        PairGeometry.calculate_pairs_2PCF(self)
+    def find_pairs(self) -> None:
+        PairGeometry.find_pairs(self)
 
     def get_pairs_patch_M_a(
         self,
@@ -1201,11 +1203,11 @@ class Correlation:
             aperture_filter=aperture_filter,
         )
 
-    def calculate_pairs_M_a(
+    def find_aperture_pairs(
         self,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
-        PairGeometry.calculate_pairs_M_a(self, aperture_filter=aperture_filter)
+        PairGeometry.find_aperture_pairs(self, aperture_filter=aperture_filter)
 
     def _prepare_aperture_flat(self) -> None:
         PairGeometry.prepare_aperture_flat(self)
@@ -1344,11 +1346,11 @@ class Correlation:
         """
         logger.info("Calculating pairs for aperture mass")
         if aperture_filter is None:
-            self.calculate_pairs_M_a()
+            self.find_aperture_pairs()
         else:
-            self.calculate_pairs_M_a(aperture_filter=aperture_filter)
+            self.find_aperture_pairs(aperture_filter=aperture_filter)
         logger.info("Calculating pairs for 2PCF")
-        self.calculate_pairs_2PCF()
+        self.find_pairs()
         logger.info("Preparing flattened pair arrays on backend device")
         if release_host_pairs:
             self.prepare(release_host_pairs=True)
@@ -1373,7 +1375,7 @@ class Correlation:
             release_host_pairs=release_host_pairs,
         )
 
-    def get_aperture_shear(
+    def aperture_shear_single(
         self,
         g1: np.ndarray,
         g2: np.ndarray,
@@ -1471,7 +1473,7 @@ class Correlation:
             return aperture_shear
         return self.backend.to_numpy(aperture_shear)
 
-    def get_aperture_density(
+    def aperture_density_single(
         self,
         map_values: np.ndarray,
         w: np.ndarray,
@@ -1787,7 +1789,7 @@ class Correlation:
             f"{_MAX_TILED_ACCUMULATORS} available, so at most {max_bins} bins "
             f"fit. There is no packed fallback -- the per-(bin, row) kernels "
             f"read the unpacked geometry, which pack_pairs=True does not "
-            f"upload. Construct the Correlation with pack_pairs=False (24 B "
+            f"upload. Construct the PatchCorrelation with pack_pairs=False (24 B "
             f"per pair on the device instead of 8 B)."
         )
 
@@ -1799,7 +1801,7 @@ class Correlation:
             raise NotImplementedError(
                 f"{what} is not available with pack_pairs=True on a GPU backend; "
                 "use the tomographic methods (vectorized_*, get_full_tomo_*, "
-                "get_3x2pt_tomo) or construct the Correlation with pack_pairs=False."
+                "three_by_two_pt) or construct the PatchCorrelation with pack_pairs=False."
             )
 
     def _pair_index_arrays(self) -> Tuple[Any, Any]:
@@ -1815,7 +1817,7 @@ class Correlation:
             )
         return ctx.inds_i_dev, ctx.inds_j_dev
 
-    def compute_shear_shear(
+    def shear_shear_single(
         self,
         g11: np.ndarray,
         g21: np.ndarray,
@@ -1832,7 +1834,7 @@ class Correlation:
         checks are bypassed.
         """
         self._ensure_prepared()
-        self._require_unpacked_pairs("compute_shear_shear")
+        self._require_unpacked_pairs("shear_shear_single")
         return_numpy = not (return_device and self.backend.name == "cupy")
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
             return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy)
@@ -1849,7 +1851,7 @@ class Correlation:
             return_numpy=return_numpy,
         )
 
-    def compute_density_density(
+    def density_density_single(
         self,
         density1: np.ndarray,
         density2: np.ndarray,
@@ -1863,11 +1865,11 @@ class Correlation:
         Ratio-of-sums over both pair orientations, as everywhere else in the
         library.  ``sumofweights``, if given, is the sum for *one*
         orientation and is applied to both -- note that
-        :meth:`compute_density_shear` takes its ``sumofweights`` as the
+        :meth:`density_shear_single` takes its ``sumofweights`` as the
         already-summed total instead.
         """
         self._ensure_prepared()
-        self._require_unpacked_pairs("compute_density_density")
+        self._require_unpacked_pairs("density_density_single")
 
         density1_dev = self._map_to_device(density1)
         density2_dev = self._map_to_device(density2)
@@ -1947,8 +1949,8 @@ class Correlation:
         # Ratio of sums, not mean of ratios: both orientations of a cross
         # combination are summed and divided once, which is the wrapper
         # contract on both backends (TreeCorr's definition) and what
-        # ``vectorized_density_density``, ``get_3x2pt_tomo`` and
-        # ``compute_density_shear`` already do.  ``0.5 * (N_ab/D_ab +
+        # ``density_density``, ``three_by_two_pt`` and
+        # ``density_shear_single`` already do.  ``0.5 * (N_ab/D_ab +
         # N_ba/D_ba)`` is a different estimator whenever the two orientations
         # carry different weight, i.e. for every cross pair.  The auto case
         # and an explicit ``sumofweights`` (where D_ab == D_ba) are unchanged
@@ -1958,7 +1960,7 @@ class Correlation:
             return (self.backend.module.real(w_theta),)
         return (np.real(self.backend.to_numpy(w_theta)),)
 
-    def compute_density_shear(
+    def density_shear_single(
         self,
         density_lens: np.ndarray,
         g1_source: np.ndarray,
@@ -1970,7 +1972,7 @@ class Correlation:
     ) -> Tuple[np.ndarray]:
         """Compute scalar-shear 2PCF (gamma_t) for one lens/source map pair."""
         self._ensure_prepared()
-        self._require_unpacked_pairs("compute_density_shear")
+        self._require_unpacked_pairs("density_shear_single")
 
         density_lens_dev = self._map_to_device(density_lens)
         g1_source_dev = self._map_to_device(g1_source)
@@ -2613,7 +2615,7 @@ class Correlation:
             raise ValueError(
                 "map arrays must have either npix="
                 f"{self.npix} (full sky) or n_active={n_active} (row space, "
-                f"see Correlation.row_pix) pixels along the last axis; got {n_last}"
+                f"see PatchCorrelation.row_pix) pixels along the last axis; got {n_last}"
             )
         if self._is_backend_native_array(array):
             ctx = self.compute_context
@@ -2695,7 +2697,7 @@ class Correlation:
 
         The pair scratch is 32 B/pair and the frozen-map memo whole
         map-sets; both live for as long as the object does, which makes a
-        long-lived ``Correlation`` hard to share a GPU with.  The pair
+        long-lived ``PatchCorrelation`` hard to share a GPU with.  The pair
         geometry and the prepared device buffers are *not* touched -- the
         object still measures, it just rebuilds its scratch on the next
         call.
@@ -3110,7 +3112,7 @@ class Correlation:
     def _expansion_scope(self, layout: str = "aos") -> Any:
         """Context manager: share virtual-row expansions between the leaf
         computations of one public call (e.g. aperture + 2PCF pass of
-        ``get_full_tomo_shear``).  Inside the scope every expansion fills
+        ``shear``).  Inside the scope every expansion fills
         *all* blocks once and is memoised on the identity of its inputs;
         the memo is dropped on exit, so reused device buffers (e.g.
         ``MapLoader`` slots) can never produce a stale hit.
@@ -3823,17 +3825,33 @@ class Correlation:
         """Normalise the ``(2, ncomb, nbins_total)`` numerators of the
         tomographic ξ± kernels (ratio of the orientation sums)."""
         den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
-        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
         # Normalise both orientations of every combination in one go: the
         # per-combination loop issued ~12 tiny kernels per combination, which
         # dominated the per-call launch latency at nside 512.
+        xip, xim = self._finish_pair_sums((out_num[0], out_num[1]), den, nzbin_combs)
+        return xip, xim
+
+    def _finish_pair_sums(
+        self, nums: Sequence[Any], den: Any, nzbin_combs: int
+    ) -> Tuple[Any, ...]:
+        """Ratio-of-sums normalisation of the pair kernels' outputs.
+
+        ``nums``: numerators ``(ncomb, n_patches * nbins)`` sharing the
+        denominator ``den`` (same shape, or broadcastable after
+        :meth:`_align_denominator`).  Returns one ``(ncomb, n_patches,
+        nbins)`` array per numerator at map precision.  The single seam
+        between the pair kernels and the per-group normalisation, so an
+        estimator whose groups are not patches (``Global2PCF``'s tiles)
+        can take the sums instead.
+        """
+        map_backend_dtype = getattr(self.backend.module, self.map_dtype.name)
         shape = (nzbin_combs, self.n_patches, self.nbins)
-        den = self._align_denominator(out_num[0], den)
-        xip = self._normalize_by_weights(out_num[0], den)
-        xim = self._normalize_by_weights(out_num[1], den)
-        return (
-            xip.reshape(shape).astype(map_backend_dtype, copy=False),
-            xim.reshape(shape).astype(map_backend_dtype, copy=False),
+        den = self._align_denominator(nums[0], den)
+        return tuple(
+            self._normalize_by_weights(num, den)
+            .reshape(shape)
+            .astype(map_backend_dtype, copy=False)
+            for num in nums
         )
 
     def _xipm_tomo_vectorized(
@@ -3966,7 +3984,7 @@ class Correlation:
             )
         return self._finish_xipm_tomo(out_num, out_w, sumofweights_dev, auto_comb, nzbin_combs)
 
-    def vectorized_shear_shear(
+    def shear_shear(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4034,7 +4052,7 @@ class Correlation:
             return self.backend.module.real(xi_p), self.backend.module.real(xi_m)
         return np.real(self.backend.to_numpy(xi_p)), np.real(self.backend.to_numpy(xi_m))
 
-    def _compute_tomo_aperture_shear(
+    def aperture_shear(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4043,6 +4061,11 @@ class Correlation:
         flip_g2: bool = False,
         return_device: bool = True,
     ) -> np.ndarray:
+        """Tomographic aperture mass ``M_a`` at every patch centre.
+
+        ``shear_maps``: ``(nz, 2, npix | n_active)``, ``w``: ``(nz, npix |
+        n_active)``.  Returns ``(nz, n_patches)``.
+        """
         shear_maps_arr = self._coerce_map_input_array(shear_maps)
         w_arr = self._coerce_map_input_array(w)
         nzbins = shear_maps_arr.shape[0]
@@ -4115,13 +4138,18 @@ class Correlation:
             )
         return M_a
 
-    def _compute_tomo_aperture_density(
+    def aperture_density(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
     ) -> np.ndarray:
+        """Tomographic aperture density ``M_g`` at every patch centre.
+
+        ``density_maps``, ``w``: ``(nz, npix | n_active)``.  Returns
+        ``(nz, n_patches)``.
+        """
         density_arr = self._coerce_map_input_array(density_maps)
         w_arr = self._coerce_map_input_array(w)
 
@@ -4179,7 +4207,7 @@ class Correlation:
             )
         return M_g
 
-    def get_full_tomo_shear(
+    def shear(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4197,7 +4225,7 @@ class Correlation:
         shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
         with self._expansion_scope(layout="soa"):  # one degrade, both passes
-            M_a = self._compute_tomo_aperture_shear(
+            M_a = self.aperture_shear(
                 shear_dev,
                 w_dev,
                 aperture_filter=aperture_filter,
@@ -4205,7 +4233,7 @@ class Correlation:
                 flip_g2=flip_g2,
                 return_device=return_device,
             )
-            xi_p, xi_m = self.vectorized_shear_shear(
+            xi_p, xi_m = self.shear_shear(
                 shear_dev,
                 w_dev,
                 sumofweights=sumofweights,
@@ -4215,7 +4243,7 @@ class Correlation:
             )
         return M_a, xi_p, xi_m
 
-    def get_full_tomo_density(
+    def density(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
@@ -4231,13 +4259,13 @@ class Correlation:
         density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
         with self._expansion_scope(layout="soa"):  # one degrade, both passes
-            M_g = self._compute_tomo_aperture_density(
+            M_g = self.aperture_density(
                 density_dev,
                 w_dev,
                 aperture_filter=aperture_filter,
                 return_device=return_device,
             )
-            xi_g = self.vectorized_density_density(
+            xi_g = self.density_density(
                 density_dev,
                 w_dev,
                 sumofweights=sumofweights,
@@ -4246,7 +4274,7 @@ class Correlation:
             )
         return M_g, xi_g
 
-    def get_full_tomo_ggl(
+    def ggl(
         self,
         density_maps: np.ndarray,
         shear_maps: np.ndarray,
@@ -4299,7 +4327,7 @@ class Correlation:
             self._expansion_scope(layout="soa") if want_aperture else nullcontext()
         )
         with scope:
-            xi_t = self.vectorized_density_shear(
+            xi_t = self.density_shear(
                 density_dev,
                 shear_dev,
                 density_w_dev,
@@ -4317,7 +4345,7 @@ class Correlation:
             outputs: List[Any] = [xi_t]
             if return_N_ap:
                 outputs.append(
-                    self._compute_tomo_aperture_density(
+                    self.aperture_density(
                         density_dev,
                         density_w_dev,
                         aperture_filter=aperture_filter,
@@ -4326,7 +4354,7 @@ class Correlation:
                 )
             if return_M_ap:
                 outputs.append(
-                    self._compute_tomo_aperture_shear(
+                    self.aperture_shear(
                         shear_dev,
                         shear_w_dev,
                         aperture_filter=aperture_filter,
@@ -4355,7 +4383,6 @@ class Correlation:
             )
 
         module = self.backend.module
-        map_backend_dtype = getattr(module, self.map_dtype.name)
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = self.n_patches * self.nbins
 
@@ -4448,12 +4475,7 @@ class Correlation:
                     )
 
         den = self._symmetrised_denominators(out_den, sumofweights_dev, auto_comb)
-        shape = (nzbin_combs, self.n_patches, self.nbins)
-        return (
-            self._normalize_by_weights(out_num, self._align_denominator(out_num, den))
-            .reshape(shape)
-            .astype(map_backend_dtype, copy=False)
-        )
+        return self._finish_pair_sums((out_num,), den, nzbin_combs)[0]
 
     def _density_shear_tomo_vectorized(
         self,
@@ -4476,7 +4498,6 @@ class Correlation:
             )
 
         module = self.backend.module
-        map_backend_dtype = getattr(module, self.map_dtype.name)
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = self.n_patches * self.nbins
 
@@ -4572,7 +4593,7 @@ class Correlation:
                 )
                 if not launched:
                     raise RuntimeError(
-                        self._packed_kernel_unavailable_message("ξ_t", nzbins, 2)
+                        self._packed_kernel_unavailable_message("ξ_t", nsource_bins, 2)
                         if self.inds_dev is None
                         else "Backend declined vectorized density-shear "
                         "tomography kernel launch."
@@ -4608,16 +4629,9 @@ class Correlation:
                 else:
                     sum_total = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
 
-        shape = (nzbin_combs, self.n_patches, self.nbins)
-        return (
-            self._normalize_by_weights(
-                num_ab, self._align_denominator(num_ab, sum_total)
-            )
-            .reshape(shape)
-            .astype(map_backend_dtype, copy=False)
-        )
+        return self._finish_pair_sums((num_ab,), sum_total, nzbin_combs)[0]
 
-    def vectorized_density_density(
+    def density_density(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
@@ -4645,7 +4659,7 @@ class Correlation:
             return self.backend.module.real(wtheta)
         return np.real(self.backend.to_numpy(wtheta))
 
-    def vectorized_density_shear(
+    def density_shear(
         self,
         density_maps: np.ndarray,
         shear_maps: np.ndarray,
@@ -4992,7 +5006,7 @@ class Correlation:
 
             The result is what the caller keeps, so it must not be a buffer
             this call will overwrite on the next one -- see the note on
-            aliasing in :meth:`get_3x2pt_tomo`.  Allocating it costs a pool
+            aliasing in :meth:`three_by_two_pt`.  Allocating it costs a pool
             hand-out rather than a copy, and the pool recycles the block as
             soon as the caller drops the result, so a loop that reduces and
             discards holds no more device memory than the cache did.
@@ -5141,7 +5155,7 @@ class Correlation:
         if not (ok_ss and ok_dd and ok_ds):
             raise RuntimeError("Backend declined a 3x2pt pair kernel launch.")
 
-    def get_3x2pt_tomo(
+    def three_by_two_pt(
         self,
         shear_maps: Optional[np.ndarray] = None,
         density_maps: Optional[np.ndarray] = None,
@@ -5162,7 +5176,7 @@ class Correlation:
     ]:
         if shear_maps is None or density_maps is None:
             raise ValueError(
-                "Both shear_maps and density_maps must be provided for get_3x2pt_tomo."
+                "Both shear_maps and density_maps must be provided for three_by_two_pt."
             )
 
         shear_arr = self._coerce_map_input_array(shear_maps)

@@ -21,7 +21,7 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 from CosmoFuse.utils import select_patch_centers
 
 MASK = "/home/david/Documents/research/PDFast/data/DESY3_Mask.fits"
@@ -33,7 +33,7 @@ def degrade_mask(mask: np.ndarray, nside: int) -> np.ndarray:
     return hp.ud_grade(mask.astype(np.float64), nside) >= 0.5
 
 
-def geometry_stats(corr: Correlation) -> dict:
+def geometry_stats(corr: PatchCorrelation) -> dict:
     bins = np.asarray(corr.bins, dtype=np.int64)
     per_patch = bins.sum(axis=1)
     pair_pix = np.unique(np.concatenate([p.ravel() for p in corr.pair_inds]))
@@ -79,7 +79,7 @@ def main() -> None:
     # --- production geometry at nside 512 --------------------------------
     mask512 = degrade_mask(mask2048, 512)
     t0 = time.perf_counter()
-    corr = Correlation.from_mask(
+    corr = PatchCorrelation.from_mask(
         512,
         mask512,
         args.nside_centers,
@@ -91,8 +91,8 @@ def main() -> None:
         theta_max=250,
         device="cpu",
     )
-    corr.calculate_pairs_M_a()
-    corr.calculate_pairs_2PCF()
+    corr.find_aperture_pairs()
+    corr.find_pairs()
     out["production_512"] = geometry_stats(corr)
     out["production_512"]["preprocess_s"] = time.perf_counter() - t0
     phi_c, theta_c = corr.phi_center, corr.theta_center
@@ -103,7 +103,7 @@ def main() -> None:
     best = int(np.argmax(per_patch))
     for nside in (512, 1024, 2048):
         m = degrade_mask(mask2048, nside)
-        c = Correlation(
+        c = PatchCorrelation(
             nside,
             phi_c[best : best + 1],
             theta_c[best : best + 1],
@@ -116,7 +116,7 @@ def main() -> None:
             device="cpu",
         )
         t0 = time.perf_counter()
-        c.calculate_pairs_2PCF()
+        c.find_pairs()
         dt = time.perf_counter() - t0
         b = np.asarray(c.bins[0], dtype=np.int64)
         vec = hp.ang2vec(theta_c[best], phi_c[best])

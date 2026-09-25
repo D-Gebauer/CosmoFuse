@@ -1,4 +1,4 @@
-"""Tests for the Correlation class."""
+"""Tests for the PatchCorrelation class."""
 import sys
 import tempfile
 import unittest
@@ -12,11 +12,11 @@ from scipy.special import binom
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 
 
 class TestCorrelationCalculations(unittest.TestCase):
-    """Test the Correlation class calculation methods."""
+    """Test the PatchCorrelation class calculation methods."""
 
     def setUp(self):
         """Set up test fixtures."""
@@ -31,8 +31,8 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.theta_Q = 30.0
         self.npix = 12 * self.nside**2
 
-        # Create a Correlation instance
-        self.corr = Correlation(
+        # Create a PatchCorrelation instance
+        self.corr = PatchCorrelation(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -54,12 +54,12 @@ class TestCorrelationCalculations(unittest.TestCase):
 
 
     def test_get_aperture_shear(self):
-        """Test the get_aperture_shear method."""
+        """Test the aperture_shear_single method."""
         g1 = np.random.rand(self.npix)
         g2 = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        M_a = self.corr.get_aperture_shear(g1, g2, w)
+        M_a = self.corr.aperture_shear_single(g1, g2, w)
 
         self.assertEqual(M_a.shape, (1,))
         
@@ -116,7 +116,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 out_den[:] = weights[Q_inds]
 
         self.corr.backend = FakeBackend()
-        M_a = self.corr.get_aperture_shear(g1, g2, w)
+        M_a = self.corr.aperture_shear_single(g1, g2, w)
 
         Q_inds = self.corr.Q_inds[0]
         Q_cos = self.corr.Q_cos[0]
@@ -133,18 +133,18 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = IncompleteBackend()
         with self.assertRaisesRegex(RuntimeError, "aperture-shear kernel"):
-            self.corr.get_aperture_shear(
+            self.corr.aperture_shear_single(
                 np.random.rand(self.npix),
                 np.random.rand(self.npix),
                 np.ones(self.npix),
             )
 
     def test_get_aperture_density(self):
-        """Test the get_aperture_density method for spin-0 fields."""
+        """Test the aperture_density_single method for spin-0 fields."""
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        aperture_density = self.corr.get_aperture_density(delta, w)
+        aperture_density = self.corr.aperture_density_single(delta, w)
 
         self.assertEqual(aperture_density.shape, (1,))
 
@@ -189,7 +189,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = FakeBackend()
 
-        aperture_density = self.corr.get_aperture_density(delta, w)
+        aperture_density = self.corr.aperture_density_single(delta, w)
         Q_inds = self.corr.Q_inds[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]
@@ -206,7 +206,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = IncompleteBackend()
         with self.assertRaisesRegex(RuntimeError, "aperture-density kernel"):
-            self.corr.get_aperture_density(np.random.rand(self.npix), np.ones(self.npix))
+            self.corr.aperture_density_single(np.random.rand(self.npix), np.ones(self.npix))
 
     def test_get_aperture_density_numpy_backend_path(self):
         """Explicitly cover numpy backend path for scalar aperture."""
@@ -238,7 +238,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.corr.backend = NumpyBackend()
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
-        result = self.corr.get_aperture_density(delta, w)
+        result = self.corr.aperture_density_single(delta, w)
         self.assertEqual(result.shape, (1,))
 
     def test_get_pairs_patch_M_a(self):
@@ -279,7 +279,7 @@ class TestCorrelationCalculations(unittest.TestCase):
     @patch('healpy.query_disc')
     @patch('CosmoFuse.correlations.pixel2RaDec')
     def test_calculate_pairs_M_a(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
-        """Test the calculate_pairs_M_a method."""
+        """Test the find_aperture_pairs method."""
         mock_ang2pix.return_value = 99
         mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
         
@@ -290,7 +290,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         
         mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
 
-        self.corr.calculate_pairs_M_a()
+        self.corr.find_aperture_pairs()
 
         self.assertEqual(len(self.corr.Q_cos), 1)
         self.assertEqual(len(self.corr.Q_sin), 1)
@@ -305,23 +305,23 @@ class TestCorrelationCalculations(unittest.TestCase):
     @patch('CosmoFuse.correlations.pixel2RaDec')
     def test_save_and_load_pairs(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
         """Test the save_pairs and load_pairs methods."""
-        # Mocking for calculate_pairs_2PCF
+        # Mocking for find_pairs
         mock_query_disc.return_value = np.arange(100)
         mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
-        self.corr.calculate_pairs_2PCF()
+        self.corr.find_pairs()
 
-        # Mocking for calculate_pairs_M_a
+        # Mocking for find_aperture_pairs
         mock_ang2pix.return_value = 99
         mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
         ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
         Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
         mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
-        self.corr.calculate_pairs_M_a()
+        self.corr.find_aperture_pairs()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self.corr.save_pairs(tmp.name)
 
-            new_corr = Correlation(
+            new_corr = PatchCorrelation(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -346,7 +346,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
                 
     def test_prepare_and_get_full_tomo_shear(self):
-        """Test prepare and get_full_tomo_shear methods."""
+        """Test prepare and shear methods."""
         # Calculate pairs first
         with patch('healpy.query_disc') as mock_query_disc, \
              patch('CosmoFuse.correlations.pixel2RaDec') as mock_pixel2RaDec:
@@ -354,7 +354,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             mock_query_disc.return_value = np.arange(100)
             mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
 
-            self.corr.calculate_pairs_2PCF()
+            self.corr.find_pairs()
         
         self.corr.prepare()
 
@@ -376,7 +376,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.ones((nzbins, self.npix))
 
-        M_ap, xip, xim = self.corr.get_full_tomo_shear(shear_maps, w)
+        M_ap, xip, xim = self.corr.shear(shear_maps, w)
 
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
@@ -453,7 +453,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             sys.modules.pop(module_name, None)
 
     def test_calculate_pairs_2PCF(self):
-        """Test calculate_pairs_2PCF sequential aggregation."""
+        """Test find_pairs sequential aggregation."""
         # The patch centres have to grow with n_patches: the pre-flight
         # memory projection walks one disc per patch, and on a machine with
         # a GPU it really runs (with no memory_budget_gb the budget is the
@@ -469,7 +469,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 (np.array([[3], [4]]), np.array([1 - 1j]), np.array([1])),
             ],
         ) as mock_helper:
-            self.corr.calculate_pairs_2PCF()
+            self.corr.find_pairs()
 
         self.assertEqual(mock_helper.call_count, 2)
         self.assertEqual(len(self.corr.pair_inds), 2)

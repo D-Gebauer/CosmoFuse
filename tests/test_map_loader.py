@@ -8,7 +8,7 @@ import unittest
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation, MapFileLoader
+from CosmoFuse import PatchCorrelation, MapFileLoader
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -17,7 +17,7 @@ NPIX = hp.nside2npix(NSIDE)
 def make_corr():
     theta, phi = hp.pix2ang(NSIDE, np.arange(NPIX))
     mask = (np.degrees(phi) < 140.0) & (np.abs(90 - np.degrees(theta)) < 40)
-    corr = Correlation(
+    corr = PatchCorrelation(
         NSIDE, np.radians([40.0, 70.0]), np.radians([90.0, 100.0]), nbins=3,
         theta_min=150, theta_max=900, patch_size=500, theta_Q=150, mask=mask,
         device="cpu", rotation_precision="float64", resolution_factor=2.0,
@@ -35,7 +35,7 @@ class TestMapFileLoader(unittest.TestCase):
         cls.archive = rng.normal(size=(cls.nmaps, 2, 2, cls.corr.n_active)) * 0.05
         cls.w = np.ones((2, cls.corr.n_active))
         cls.serial = [
-            cls.corr.get_full_tomo_shear(m, cls.w, return_device=False) for m in cls.archive
+            cls.corr.shear(m, cls.w, return_device=False) for m in cls.archive
         ]
 
     def run_loader(self, n_slots, n_readers, jitter):
@@ -64,7 +64,7 @@ class TestMapFileLoader(unittest.TestCase):
             order.append(k)
             if k % 5 == 0:
                 time.sleep(jitter)  # a slow consumer must not lose maps
-            results.append(self.corr.get_full_tomo_shear(dev["shear"], self.w, return_device=False))
+            results.append(self.corr.shear(dev["shear"], self.w, return_device=False))
         self.assertEqual(order, list(range(self.nmaps)))
         for got, want in zip(results, self.serial):
             for a, b in zip(got, want):
@@ -167,7 +167,7 @@ class TestMapFileLoader(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
 
     def test_hash_mismatch_raises(self):
-        other = Correlation(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
+        other = PatchCorrelation(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
         self.assertNotEqual(other.row_pix_hash, self.corr.row_pix_hash)
         with self.assertRaisesRegex(ValueError, "row_pix hash mismatch"):
             MapFileLoader(

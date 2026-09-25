@@ -15,7 +15,7 @@ import unittest
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 
 from .test_gpu_kernel_emulation import emulated_gpu
 
@@ -33,10 +33,10 @@ def _make_mask() -> np.ndarray:
     return mask
 
 
-def _make_corr(mask, **kwargs) -> Correlation:
+def _make_corr(mask, **kwargs) -> PatchCorrelation:
     phi_c = np.radians([30.0, 42.0, 80.0])
     theta_c = np.radians([95.0, 102.0, 70.0])
-    corr = Correlation(
+    corr = PatchCorrelation(
         NSIDE,
         phi_c,
         theta_c,
@@ -51,12 +51,12 @@ def _make_corr(mask, **kwargs) -> Correlation:
         rotation_precision="float64",
         **kwargs,
     )
-    corr.calculate_pairs_M_a()
-    corr.calculate_pairs_2PCF()
+    corr.find_aperture_pairs()
+    corr.find_pairs()
     return corr
 
 
-def _legacy_layout(corr: Correlation) -> Correlation:
+def _legacy_layout(corr: PatchCorrelation) -> PatchCorrelation:
     """Same geometry, but with the pre-row-space full-sky device layout."""
     legacy = _make_corr(np.ones(NPIX, dtype=bool))
     legacy.pair_inds = corr.pair_inds
@@ -139,7 +139,7 @@ class TestRowSpace(unittest.TestCase):
     def test_wrong_length_maps_raise(self):
         bad = np.ones((3, 2, NPIX // 4))
         with self.assertRaisesRegex(ValueError, "map arrays must have either npix"):
-            self.corr.vectorized_shear_shear(bad, np.ones((3, NPIX // 4)), return_device=False)
+            self.corr.shear_shear(bad, np.ones((3, NPIX // 4)), return_device=False)
 
     def test_geometry_outside_mask_raises(self):
         other = _make_corr(self.mask)
@@ -151,66 +151,66 @@ class TestRowSpace(unittest.TestCase):
 
     # -- every public measurement method ------------------------------------
     def test_aperture_single_map(self):
-        self.check(lambda c, f: c.get_aperture_shear(
+        self.check(lambda c, f: c.aperture_shear_single(
             f(self.shear[0, 0]), f(self.shear[0, 1]), f(self.w_s[0]), return_device=False))
-        self.check(lambda c, f: c.get_aperture_density(
+        self.check(lambda c, f: c.aperture_density_single(
             f(self.dens[0]), f(self.w_d[0]), return_device=False))
 
     def test_single_pair_2pcf(self):
         s, w = self.shear, self.w_s
-        self.check(lambda c, f: c.compute_shear_shear(
+        self.check(lambda c, f: c.shear_shear_single(
             *(lambda g1, g2, ww: (g1, g2, g1, g2, ww, ww))(f(s[0, 0]), f(s[0, 1]), f(w[0])),
             return_device=False))
-        self.check(lambda c, f: c.compute_shear_shear(
+        self.check(lambda c, f: c.shear_shear_single(
             f(s[0, 0]), f(s[0, 1]), f(s[1, 0]), f(s[1, 1]), f(w[0]), f(w[1]), return_device=False))
-        self.check(lambda c, f: c.compute_density_density(
+        self.check(lambda c, f: c.density_density_single(
             f(self.dens[0]), f(self.dens[1]), f(self.w_d[0]), f(self.w_d[1]), return_device=False))
-        self.check(lambda c, f: c.compute_density_shear(
+        self.check(lambda c, f: c.density_shear_single(
             f(self.dens[0]), f(s[1, 0]), f(s[1, 1]), f(self.w_d[0]), f(w[1]), return_device=False))
 
     def test_vectorized_tomography(self):
         for flips in ({}, {"flip_g1": True}, {"flip_g2": True}):
-            self.check(lambda c, f: c.vectorized_shear_shear(
+            self.check(lambda c, f: c.shear_shear(
                 f(self.shear), f(self.w_s), return_device=False, **flips))
-            self.check(lambda c, f: c.vectorized_density_shear(
+            self.check(lambda c, f: c.density_shear(
                 f(self.dens), f(self.shear), f(self.w_d), f(self.w_s), return_device=False, **flips))
-        self.check(lambda c, f: c.vectorized_density_density(
+        self.check(lambda c, f: c.density_density(
             f(self.dens), f(self.w_d), return_device=False))
-        self.check(lambda c, f: c.vectorized_density_density(
+        self.check(lambda c, f: c.density_density(
             f(self.dens), f(self.w_d), gc_auto_correlations_only=True, return_device=False))
 
     def test_full_tomo_and_fused(self):
-        self.check(lambda c, f: c.get_full_tomo_shear(
+        self.check(lambda c, f: c.shear(
             f(self.shear), f(self.w_s), flip_g1=True, return_device=False))
-        self.check(lambda c, f: c.get_full_tomo_density(
+        self.check(lambda c, f: c.density(
             f(self.dens), f(self.w_d), return_device=False))
-        self.check(lambda c, f: c.get_full_tomo_ggl(
+        self.check(lambda c, f: c.ggl(
             f(self.dens), f(self.shear), f(self.w_d), f(self.w_s),
             return_N_ap=True, return_M_ap=True, flip_g2=True, return_device=False))
         for flips in ({}, {"flip_g1": True, "flip_g2": True}):
-            self.check(lambda c, f: tuple(np.array(o, copy=True) for o in c.get_3x2pt_tomo(
+            self.check(lambda c, f: tuple(np.array(o, copy=True) for o in c.three_by_two_pt(
                 shear_maps=f(self.shear), density_maps=f(self.dens),
                 weights=(f(self.w_s), f(self.w_d)), return_device=False, **flips)))
         # unit weights are created in row space
-        self.check(lambda c, f: tuple(np.array(o, copy=True) for o in c.get_3x2pt_tomo(
+        self.check(lambda c, f: tuple(np.array(o, copy=True) for o in c.three_by_two_pt(
             shear_maps=f(self.shear), density_maps=f(self.dens), return_device=False)))
 
     def test_gpu_orchestrator_paths(self):
         cpu = {
-            "shear": self.corr.get_full_tomo_shear(self.shear, self.w_s, flip_g1=True, return_device=False),
-            "dd": self.corr.vectorized_density_density(self.dens, self.w_d, return_device=False),
-            "ds": self.corr.vectorized_density_shear(
+            "shear": self.corr.shear(self.shear, self.w_s, flip_g1=True, return_device=False),
+            "dd": self.corr.density_density(self.dens, self.w_d, return_device=False),
+            "ds": self.corr.density_shear(
                 self.dens, self.shear, self.w_d, self.w_s, return_device=False),
         }
         for corr, to_input in ((self.corr, self.rows), (self.corr, lambda a: a), (self.legacy, lambda a: a)):
             with emulated_gpu(corr) as calls:
                 corr.compute_context.Q_inds_dev = None
                 gpu = {
-                    "shear": corr.get_full_tomo_shear(
+                    "shear": corr.shear(
                         to_input(self.shear), to_input(self.w_s), flip_g1=True, return_device=False),
-                    "dd": corr.vectorized_density_density(
+                    "dd": corr.density_density(
                         to_input(self.dens), to_input(self.w_d), return_device=False),
-                    "ds": corr.vectorized_density_shear(
+                    "ds": corr.density_shear(
                         to_input(self.dens), to_input(self.shear), to_input(self.w_d),
                         to_input(self.w_s), return_device=False),
                 }
@@ -228,12 +228,12 @@ class TestRowSpace(unittest.TestCase):
         corr = _make_corr(self.mask)
         corr.prepare()
         w = self.w_s.copy()
-        ref = corr.vectorized_shear_shear(self.shear, w, return_device=False)
+        ref = corr.shear_shear(self.shear, w, return_device=False)
         w.flags.writeable = False
         first = corr._coerce_map_input_array(w)
         self.assertIs(corr._coerce_map_input_array(w), first)
         self.assertEqual(first.shape[-1], corr.n_active)
-        self.assert_same(corr.vectorized_shear_shear(self.shear, w, return_device=False), ref)
+        self.assert_same(corr.shear_shear(self.shear, w, return_device=False), ref)
         # writable arrays are never memoised
         w2 = self.w_s.copy()
         self.assertIsNot(corr._coerce_map_input_array(w2), corr._coerce_map_input_array(w2))
@@ -245,8 +245,8 @@ class TestRowSpace(unittest.TestCase):
         clone.prepare()
         self.assertTrue(np.array_equal(clone.row_pix, self.corr.row_pix))
         self.assert_same(
-            clone.vectorized_shear_shear(self.rows(self.shear), self.rows(self.w_s), return_device=False),
-            self.corr.vectorized_shear_shear(self.shear, self.w_s, return_device=False),
+            clone.shear_shear(self.rows(self.shear), self.rows(self.w_s), return_device=False),
+            self.corr.shear_shear(self.shear, self.w_s, return_device=False),
         )
 
 

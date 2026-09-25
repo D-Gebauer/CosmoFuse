@@ -8,7 +8,7 @@
 """
 import argparse, gc, json, time
 import h5py, healpy as hp, numpy as np
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -26,11 +26,11 @@ def free(corr):
 
 
 def timed(corr, g, w, n=8):
-    corr.vectorized_shear_shear(g, w, flip_g1=True); sync(corr)
+    corr.shear_shear(g, w, flip_g1=True); sync(corr)
     ts = []
     for _ in range(n):
         sync(corr); t0 = time.perf_counter()
-        corr.vectorized_shear_shear(g, w, flip_g1=True)
+        corr.shear_shear(g, w, flip_g1=True)
         sync(corr); ts.append(time.perf_counter() - t0)
     return float(np.median(ts) * 1e3)
 
@@ -61,12 +61,12 @@ def main():
     if "P" in args.parts:
         res = {}
         for dev in ("cpu", "gpu"):
-            corr = Correlation(nside, phi[:24], theta[:24], device=dev, map_precision="float64",
+            corr = PatchCorrelation(nside, phi[:24], theta[:24], device=dev, map_precision="float64",
                                rotation_precision="float64", resolution_factor=4.0, pack_pairs=True, **geo)
             corr.preprocess()
             w = np.ascontiguousarray(w_full[:, corr.row_pix])
             res[dev] = [np.asarray(o, dtype=np.float64) for o in
-                        corr.get_full_tomo_shear(cut[0], w, flip_g1=True, return_device=False)]
+                        corr.shear(cut[0], w, flip_g1=True, return_device=False)]
             if dev == "gpu":
                 assert corr.inds_dev is None and corr.compute_context.packed_pairs_dev is not None
         out["P_gpu_packed_vs_cpu_packed"] = [
@@ -76,7 +76,7 @@ def main():
     if "A" in args.parts:
         results = {}
         for pack in (False, True):
-            corr = Correlation(nside, phi, theta, device="gpu", map_precision="float32",
+            corr = PatchCorrelation(nside, phi, theta, device="gpu", map_precision="float32",
                                accumulation_precision="float64", pack_pairs=pack, **geo)
             corr.load_pairs(pair_file, release_host_pairs=True)
             sync(corr)
@@ -86,7 +86,7 @@ def main():
             res = []
             for k in range(cut.shape[0]):
                 g = xp.asarray(cut[k].astype(np.float32))
-                res.append([o.get().astype(np.float64) for o in corr.vectorized_shear_shear(g, w, flip_g1=True)])
+                res.append([o.get().astype(np.float64) for o in corr.shear_shear(g, w, flip_g1=True)])
             ms = timed(corr, g, w)
             results[pack] = res
             out[f"A_512_pack{pack}"] = {"ms": ms, "device_used_GB_after_prepare": pool, "n_pairs": int(corr.ntotpairs)}
@@ -118,7 +118,7 @@ def main():
         mask = mask != 0
         edges = np.geomspace(5.0, 250.0, 12); edges = edges[edges < 215]
         for pack in (False, True):
-            corr = Correlation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
+            corr = PatchCorrelation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
                                patch_size=110, theta_Q=110, mask=mask, device="gpu", map_precision="float32",
                                accumulation_precision="float64", resolution_factor=2.9, aperture_nside=512,
                                pack_pairs=pack)

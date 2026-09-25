@@ -2,7 +2,7 @@
 
 Reference workload = production Q-patch pair file + real baryonified shear
 maps (footprint cut-outs scattered into full-sky arrays, exactly like the
-production script), ``get_full_tomo_shear(..., flip_g1=True)``.
+production script), ``shear(..., flip_g1=True)``.
 
 Reports, per map-set, synchronised wall times for
   * host scatter (footprint -> full sky),
@@ -21,7 +21,7 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 
@@ -58,7 +58,7 @@ def main() -> None:
 
     phi = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_phi.dat")
     theta = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_theta.dat")
-    corr = Correlation(
+    corr = PatchCorrelation(
         nside,
         phi,
         theta,
@@ -101,7 +101,7 @@ def main() -> None:
 
     # warm-up (kernel compilation, buffer allocation)
     full[:, :, map_inds] = cut[0]
-    corr.get_full_tomo_shear(full, w_host, flip_g1=True, return_device=False)
+    corr.shear(full, w_host, flip_g1=True, return_device=False)
     sync(corr)
 
     for k in range(nsets):
@@ -111,7 +111,7 @@ def main() -> None:
 
         sync(corr)
         t0 = time.perf_counter()
-        out = corr.get_full_tomo_shear(full, w_host, flip_g1=True, return_device=False)
+        out = corr.shear(full, w_host, flip_g1=True, return_device=False)
         sync(corr)
         t_call_host.append(time.perf_counter() - t0)
         results.append([np.asarray(o, dtype=np.float64) for o in out])
@@ -121,7 +121,7 @@ def main() -> None:
             w_dev = corr.backend.to_device(w_host)
             sync(corr)
             t0 = time.perf_counter()
-            corr.get_full_tomo_shear(g_dev, w_dev, flip_g1=True, return_device=False)
+            corr.shear(g_dev, w_dev, flip_g1=True, return_device=False)
             sync(corr)
             t_call_dev.append(time.perf_counter() - t0)
 

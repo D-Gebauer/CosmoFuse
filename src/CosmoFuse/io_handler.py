@@ -8,7 +8,7 @@ import warnings
 from .treecode import TreecodeGeometry, assign_levels
 
 if TYPE_CHECKING:
-    from .correlations import Correlation
+    from .correlations import PatchCorrelation
 
 
 class PairIOHandler:
@@ -43,7 +43,7 @@ class PairIOHandler:
     FULL_RESOLUTION_FORMAT_VERSION = 2
 
     @staticmethod
-    def save_pairs(owner: "Correlation", filepath: str) -> None:
+    def save_pairs(owner: "PatchCorrelation", filepath: str) -> None:
         packed = getattr(owner, "packed_pairs", None) is not None
         if owner.bins is None or (
             not packed and (owner.pair_inds is None or owner.pair_exp2phi is None)
@@ -179,7 +179,7 @@ class PairIOHandler:
 
     @staticmethod
     def _save_packed_pairs(
-        owner: "Correlation",
+        owner: "PatchCorrelation",
         fp: "h5py.File",
         pair_offsets: np.ndarray,
         total_pairs: int,
@@ -220,7 +220,7 @@ class PairIOHandler:
 
     @staticmethod
     def load_pairs(
-        owner: "Correlation",
+        owner: "PatchCorrelation",
         filepath: str,
         start_ind: int = 0,
         stop_ind: Optional[int] = None,
@@ -271,7 +271,7 @@ class PairIOHandler:
         owner.prepare(release_host_pairs=release_host_pairs)
 
     @staticmethod
-    def _load_resolution(owner: "Correlation", fp: "h5py.File", filepath: str) -> None:
+    def _load_resolution(owner: "PatchCorrelation", fp: "h5py.File", filepath: str) -> None:
         """Adopt the estimator definition stored in the file.
 
         The file is authoritative for the geometry (as for nside, bins, ...).
@@ -293,14 +293,14 @@ class PairIOHandler:
         if asked_k is not None and not np.array_equal(asked_levels, file_levels):
             raise ValueError(
                 f"{filepath} was built with resolution_factor={file_k} "
-                f"(nside per bin {file_levels.tolist()}), but this Correlation "
+                f"(nside per bin {file_levels.tolist()}), but this PatchCorrelation "
                 f"asks for resolution_factor={asked_k} "
                 f"(nside per bin {asked_levels.tolist()})."
             )
         if asked_ap is not None and asked_ap != file_ap:
             raise ValueError(
                 f"{filepath} was built with aperture_nside="
-                f"{file_ap or int(owner.nside)}, but this Correlation asks for "
+                f"{file_ap or int(owner.nside)}, but this PatchCorrelation asks for "
                 f"aperture_nside={asked_ap}."
             )
         if (asked_k is None and file_k is not None) or (
@@ -323,7 +323,7 @@ class PairIOHandler:
 
     @staticmethod
     def _load_pairs_v2(
-        owner: "Correlation", fp: "h5py.File", start_ind: int, stop_ind: int
+        owner: "PatchCorrelation", fp: "h5py.File", start_ind: int, stop_ind: int
     ) -> None:
         pair_offsets = fp["pair_offsets"][:]
         q_offsets = fp["q_offsets"][:]
@@ -410,7 +410,7 @@ class PairIOHandler:
 
     @staticmethod
     def _load_packed_pairs(
-        owner: "Correlation", fp: "h5py.File", start_ind: int, stop_ind: int
+        owner: "PatchCorrelation", fp: "h5py.File", start_ind: int, stop_ind: int
     ) -> None:
         """Read the packed payload of patches ``start_ind:stop_ind``.
 
@@ -450,7 +450,7 @@ class PairIOHandler:
 
     @staticmethod
     def _load_treecode(
-        owner: "Correlation",
+        owner: "PatchCorrelation",
         gp: "h5py.Group",
         pair_inds_flat: np.ndarray,
         start_ind: int,

@@ -21,7 +21,7 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -51,7 +51,7 @@ KWARGS = dict(
 
 
 def make_setup(preprocess=True, **kwargs):
-    corr = Correlation.from_mask(NSIDE, MASK, 2, **{**KWARGS, **kwargs})
+    corr = PatchCorrelation.from_mask(NSIDE, MASK, 2, **{**KWARGS, **kwargs})
     if preprocess:
         corr.preprocess()
     return corr
@@ -141,9 +141,9 @@ class TestHostPacking(unittest.TestCase):
         n = self.exact.n_active
         shear = rng.normal(size=(2, 2, n)) * 0.3
         w = rng.uniform(0.2, 2.0, size=(2, n))
-        ref = self.device_packed.get_full_tomo_shear(shear, w, return_device=False)
+        ref = self.device_packed.shear(shear, w, return_device=False)
         for corr in (self.host_packed, self.host_only):
-            got = corr.get_full_tomo_shear(shear, w, return_device=False)
+            got = corr.shear(shear, w, return_device=False)
             for x, y in zip(ref, got):
                 self.assertTrue(np.array_equal(np.asarray(x), np.asarray(y)))
 
@@ -242,8 +242,8 @@ class TestPackedPairFile(unittest.TestCase):
         rng = np.random.default_rng(7)
         shear = rng.normal(size=(2, 2, whole.n_active)) * 0.3
         w = rng.uniform(0.2, 2.0, size=(2, whole.n_active))
-        ref = whole.get_full_tomo_shear(shear, w, return_device=False)
-        got = part.get_full_tomo_shear(shear, w, return_device=False)
+        ref = whole.shear(shear, w, return_device=False)
+        got = part.shear(shear, w, return_device=False)
         np.testing.assert_array_equal(got[0], np.asarray(ref[0])[..., start:stop])
         for i in (1, 2):
             np.testing.assert_array_equal(

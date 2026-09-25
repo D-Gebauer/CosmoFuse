@@ -18,7 +18,7 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 
 def build(args):
@@ -27,7 +27,7 @@ def build(args):
     mask[(np.degrees(phi) < 90.0) & (np.abs(90 - np.degrees(theta)) < 40)] = True
     rng = np.random.default_rng(0)
     mask[rng.choice(mask.size, mask.size // 50, replace=False)] = False
-    corr = Correlation.from_mask(
+    corr = PatchCorrelation.from_mask(
         args.nside, mask, args.nside_centers,
         patch_size=args.patch_size, theta_Q=args.theta_Q, f_mask=0.3,
         nbins=args.nbins, theta_min=args.theta_min, theta_max=args.theta_max,
@@ -114,15 +114,15 @@ def main():
 
     # ---- accuracy: the public methods --------------------------------
     cases = {
-        "get_full_tomo_shear": lambda: corr.get_full_tomo_shear(
+        "shear": lambda: corr.shear(
             shear, w, return_device=False),
-        "vectorized_shear_shear": lambda: corr.vectorized_shear_shear(
+        "shear_shear": lambda: corr.shear_shear(
             shear, w, return_device=False),
-        "get_full_tomo_density": lambda: corr.get_full_tomo_density(
+        "density": lambda: corr.density(
             dens, w, return_device=False),
-        "get_full_tomo_ggl": lambda: corr.get_full_tomo_ggl(
+        "ggl": lambda: corr.ggl(
             dens, shear, w, w, return_device=False),
-        "get_3x2pt_tomo": lambda: corr.get_3x2pt_tomo(
+        "three_by_two_pt": lambda: corr.three_by_two_pt(
             shear_maps=shear, density_maps=dens,
             weights={"shear": w, "density": w}, return_device=False),
     }
@@ -167,9 +167,9 @@ def main():
     # ... and end to end, where the aperture kernel's new element stride
     # and the packed gather are also exercised.
     for name, call in (
-        ("get_full_tomo_shear", lambda sh, f: corr.get_full_tomo_shear(
+        ("shear", lambda sh, f: corr.shear(
             sh, w, flip_g1=f, return_device=False)),
-        ("get_3x2pt_tomo", lambda sh, f: corr.get_3x2pt_tomo(
+        ("three_by_two_pt", lambda sh, f: corr.three_by_two_pt(
             shear_maps=sh, density_maps=dens,
             weights={"shear": w, "density": w}, flip_g1=f,
             return_device=False)),
@@ -197,10 +197,10 @@ def main():
             lambda: corr._expand_rows((shear[:, 0], shear[:, 1]), w, "all"),
             cupy, n=args.repeats)
         speed[f"full_tomo_shear_{label}_ms"] = timeit(
-            lambda: corr.get_full_tomo_shear(shear, w, return_device=True),
+            lambda: corr.shear(shear, w, return_device=True),
             cupy, n=args.repeats)
         speed[f"3x2pt_{label}_ms"] = timeit(
-            lambda: corr.get_3x2pt_tomo(
+            lambda: corr.three_by_two_pt(
                 shear_maps=shear, density_maps=dens,
                 weights={"shear": w, "density": w}, return_device=True),
             cupy, n=args.repeats)

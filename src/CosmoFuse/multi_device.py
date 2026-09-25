@@ -2,7 +2,7 @@
 
 Pair geometry is per patch and the estimators are per patch, so patches are
 the natural unit of work: device ``d`` owns a contiguous range of patches and
-a :class:`~CosmoFuse.correlations.Correlation` of its own, measurement calls
+a :class:`~CosmoFuse.correlations.PatchCorrelation` of its own, measurement calls
 run in one thread per device (CuPy's current device is thread-local), and the
 per-patch outputs are concatenated back in patch order.  The result is
 identical to a single-device run -- the patch axis is just assembled from
@@ -12,12 +12,12 @@ Device memory scales as ``n_patches / n_devices`` per GPU, which is the
 other reason to use this: it is how a geometry that does not fit one card
 is measured without coarsening or dropping patches.
 
-Use it through ``Correlation(..., device=[0, 1])`` or directly::
+Use it through ``PatchCorrelation(..., device=[0, 1])`` or directly::
 
-    corr = MultiDeviceCorrelation(nside, phi, theta, devices=[0, 1], mask=mask,
+    corr = MultiDevicePatchCorrelation(nside, phi, theta, devices=[0, 1], mask=mask,
                                   nbins=8, theta_min=15, theta_max=250)
     corr.preprocess()                      # or corr.load_pairs(path)
-    M_a, xi_p, xi_m = corr.get_full_tomo_shear(shear, w)
+    M_a, xi_p, xi_m = corr.shear(shear, w)
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -28,21 +28,23 @@ import numpy as np
 # Aperture outputs are (..., n_patches); pair outputs are
 # (..., n_patches, nbins), hence -1 and -2.
 _PATCH_AXIS: Dict[str, Tuple[int, ...]] = {
-    "get_aperture_shear": (-1,),
-    "get_aperture_density": (-1,),
-    "vectorized_shear_shear": (-2, -2),
-    "vectorized_density_density": (-2,),
-    "vectorized_density_shear": (-2,),
-    "get_full_tomo_shear": (-1, -2, -2),
-    "get_full_tomo_density": (-1, -2),
+    "aperture_shear_single": (-1,),
+    "aperture_density_single": (-1,),
+    "aperture_shear": (-1,),
+    "aperture_density": (-1,),
+    "shear_shear": (-2, -2),
+    "density_density": (-2,),
+    "density_shear": (-2,),
+    "shear": (-1, -2, -2),
+    "density": (-1, -2),
     # xi_t, then the optional N_ap / M_ap aperture outputs
-    "get_full_tomo_ggl": (-2, -1, -1),
-    "get_3x2pt_tomo": (-1, -1, -2, -2, -2, -2),
+    "ggl": (-2, -1, -1),
+    "three_by_two_pt": (-1, -1, -2, -2, -2, -2),
 }
 
 
-class MultiDeviceCorrelation:
-    """A patch-parallel group of :class:`Correlation` objects, one per GPU."""
+class MultiDevicePatchCorrelation:
+    """A patch-parallel group of :class:`PatchCorrelation` objects, one per GPU."""
 
     def __init__(
         self,
@@ -53,9 +55,9 @@ class MultiDeviceCorrelation:
         devices: Sequence[int],
         **kwargs: Any,
     ) -> None:
-        from .correlations import Correlation
+        from .correlations import PatchCorrelation
 
-        # Usually CUDA ids; anything Correlation accepts works, so that the
+        # Usually CUDA ids; anything PatchCorrelation accepts works, so that the
         # splitting can be exercised with ("cpu", "cpu").
         ids = [int(d) if isinstance(d, (int, np.integer)) else d for d in devices]
         if len(ids) == 0:
@@ -78,7 +80,7 @@ class MultiDeviceCorrelation:
             (int(bounds[i]), int(bounds[i + 1])) for i in range(len(ids))
         ]
         self.parts = [
-            Correlation(
+            PatchCorrelation(
                 nside,
                 phi[a:b],
                 theta[a:b],
@@ -142,7 +144,7 @@ class MultiDeviceCorrelation:
             f"{name!r} is not defined for a multi-device group: each part holds "
             f"its own patch range, so the first device's value would be a "
             f"fraction of the answer. Reach for the part you mean "
-            f"(group.parts[i].{name}), or use a single-device Correlation. "
+            f"(group.parts[i].{name}), or use a single-device PatchCorrelation. "
             f"The attributes that are the same on every part are: "
             f"{', '.join(sorted(self._SHARED_ATTRIBUTES))}."
         )
@@ -269,4 +271,4 @@ class MultiDeviceCorrelation:
 
     def __repr__(self) -> str:
         ranges = ", ".join(f"{d}:{a}-{b}" for d, (a, b) in zip(self.devices, self.patch_ranges))
-        return f"<MultiDeviceCorrelation {self.n_patches} patches over {ranges}>"
+        return f"<MultiDevicePatchCorrelation {self.n_patches} patches over {ranges}>"

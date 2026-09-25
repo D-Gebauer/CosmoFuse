@@ -14,14 +14,14 @@ import json
 
 import numpy as np
 
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 from stage7_gpu_tiles import PAIRS_2048, geometry, make_maps, sync, timed, MASK
 
 import healpy as hp
 
 
 def run(corr, shear, w, dens, wd, ncalls, **kw):
-    fn = lambda: corr.get_3x2pt_tomo(shear_maps=shear, density_maps=dens,
+    fn = lambda: corr.three_by_two_pt(shear_maps=shear, density_maps=dens,
                                      weights={"shear": w, "density": wd},
                                      flip_g1=True, return_device=False, **kw)
     out = {}
@@ -53,7 +53,7 @@ def main():
     rng = np.random.default_rng(0)
     if "A" in args.parts:
         for pack in (False, True):
-            corr = Correlation(512, phi, theta, device="gpu", map_precision="float32",
+            corr = PatchCorrelation(512, phi, theta, device="gpu", map_precision="float32",
                                accumulation_precision="float64", pack_pairs=pack, **geo)
             corr.load_pairs(pair_file)
             corr.prepare(release_host_pairs=True)
@@ -70,7 +70,7 @@ def main():
         mask = hp.ud_grade(hp.read_map(MASK).astype(np.float64), 2048) != 0
         edges = np.geomspace(5.0, 250.0, 12)
         edges = edges[edges < 2 * 110 - 5]
-        corr = Correlation(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
+        corr = PatchCorrelation(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
                            theta_max=edges[-1], patch_size=110, theta_Q=110, mask=mask,
                            device="gpu", map_precision="float32", accumulation_precision="float64",
                            resolution_factor=2.9, aperture_nside=512, pack_pairs=True)

@@ -292,7 +292,7 @@ def _use_fused_aperture(module: Any, ntomo: int, npatches: int) -> bool:
 
     It reads the aperture disc geometry once per pixel instead of once per
     tomographic bin: 1.72x on the kernel at nside 512 and 1.83x measured in
-    situ inside ``get_full_tomo_shear`` (the result is bitwise identical
+    situ inside ``shear`` (the result is bitwise identical
     either way).  Two things take it back to the
     per-(patch, bin) kernel: a bin set wide enough for the per-thread
     accumulators to spill, and a patch set small enough that one block per
@@ -2019,7 +2019,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
 def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
     """Builder for the aperture sections (M_ap, M_g) of the fused 3x2pt path
     (``tomo_fused_3x2pt.cu``; AoS inputs, accumulation at ACC).  The pair
-    statistics of ``get_3x2pt_tomo`` run in the tiled pair kernels."""
+    statistics of ``three_by_two_pt`` run in the tiled pair kernels."""
     build = _make_raw_kernel_builder(module, "tomo_fused_3x2pt.cu", "Fused 3x2pt aperture")
     # One non-blocking stream per section, created lazily on first launch
     # (per device: each Backend instance gets its own builder closure).

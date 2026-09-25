@@ -44,7 +44,7 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 
 PROBE_SOURCE = r"""
 __COMMON_CUDA_SOURCE__
@@ -147,7 +147,7 @@ __global__ void probe_fused(
 
 
 def build(args):
-    """A Correlation with the aperture geometry only -- no pair search.
+    """A PatchCorrelation with the aperture geometry only -- no pair search.
 
     The pair search is what makes nside 2048 expensive, and this kernel
     never touches a pair: it walks Q_inds.  So `_ensure_aperture_pairs` +
@@ -159,7 +159,7 @@ def build(args):
     mask[(np.degrees(phi) < 90.0) & (np.abs(90 - np.degrees(theta)) < 40)] = True
     rng = np.random.default_rng(0)
     mask[rng.choice(mask.size, mask.size // 50, replace=False)] = False
-    corr = Correlation.from_mask(
+    corr = PatchCorrelation.from_mask(
         args.nside, mask, args.nside_centers,
         patch_size=args.patch_size, theta_Q=args.theta_Q, f_mask=0.3,
         nbins=args.nbins, theta_min=args.theta_min, theta_max=args.theta_max,
@@ -168,7 +168,7 @@ def build(args):
         aperture_nside=args.aperture_nside,
     )
     t0 = time.time()
-    corr.calculate_pairs_M_a()      # `_ensure_aperture_pairs` needs a
+    corr.find_aperture_pairs()      # `_ensure_aperture_pairs` needs a
     corr._prepare_aperture_flat()   # preprocess() to have run first
     corr._prepare_aperture_device_buffers()
     print(f"aperture geometry: {time.time() - t0:.1f} s", flush=True)

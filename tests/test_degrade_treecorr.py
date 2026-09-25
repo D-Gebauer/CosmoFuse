@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 import treecorr
 
-from CosmoFuse import Correlation
+from CosmoFuse import PatchCorrelation
 from CosmoFuse.utils import pixel2RaDec
 
 from .test_gpu_kernel_emulation import emulated_gpu
@@ -46,7 +46,7 @@ def build():
     mask[rng.choice(NPIX, NPIX // 40, replace=False)] = False
     phi_c = np.array([0.30, 0.52])
     theta_c = np.array([1.48, 1.62])
-    corr = Correlation(
+    corr = PatchCorrelation(
         NSIDE, phi_c, theta_c,
         nbins=NBINS, theta_min=THETA_MIN, theta_max=THETA_MAX,
         patch_size=PATCH_SIZE, theta_Q=PATCH_SIZE / 2,
@@ -86,7 +86,7 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
             (self.shear[:, 0], self.shear[:, 1]), self.w, "pairs")
         if fused:
             with emulated_gpu(corr):
-                with patch.object(Correlation, "_use_fused_degrade",
+                with patch.object(PatchCorrelation, "_use_fused_degrade",
                                   lambda self, w: True):
                     (g1, g2), w_rows = call(corr)
             corr.compute_context.Q_inds_dev = None
@@ -148,9 +148,9 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
 
         with emulated_gpu(self.corr):
             self.corr.compute_context.Q_inds_dev = None
-            with patch.object(Correlation, "_use_fused_degrade",
+            with patch.object(PatchCorrelation, "_use_fused_degrade",
                               lambda self, w: True):
-                xip, xim = self.corr.vectorized_shear_shear(
+                xip, xim = self.corr.shear_shear(
                     self.shear, self.w, flip_g1=True, return_device=False)
         self.corr.compute_context.Q_inds_dev = None
         self.corr.compute_context.degrade_csr = None

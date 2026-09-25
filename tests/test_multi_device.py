@@ -11,8 +11,8 @@ import unittest
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation
-from CosmoFuse.multi_device import MultiDeviceCorrelation
+from CosmoFuse import PatchCorrelation
+from CosmoFuse.multi_device import MultiDevicePatchCorrelation
 
 NSIDE = 16
 NPIX = hp.nside2npix(NSIDE)
@@ -35,7 +35,7 @@ def make_setup(n_patches=4, devices=None):
         rotation_precision="float64",
     )
     device = devices if devices is not None else "cpu"
-    corr = Correlation(NSIDE, phi, theta, device=device, **kwargs)
+    corr = PatchCorrelation(NSIDE, phi, theta, device=device, **kwargs)
     corr.preprocess()
     return corr
 
@@ -61,7 +61,7 @@ class TestMultiDevice(unittest.TestCase):
             self.assertTrue(np.array_equal(x, y))
 
     def test_dispatch(self):
-        self.assertIsInstance(self.multi, MultiDeviceCorrelation)
+        self.assertIsInstance(self.multi, MultiDevicePatchCorrelation)
         self.assertEqual(len(self.multi), 2)
         self.assertEqual(self.multi.n_patches, self.single.n_patches)
         self.assertEqual(self.multi.patch_ranges, [(0, 2), (2, 4)])
@@ -69,28 +69,28 @@ class TestMultiDevice(unittest.TestCase):
         self.assertEqual(self.multi.nbins, self.single.nbins)
 
     def test_single_element_list_is_a_plain_correlation(self):
-        corr = Correlation(NSIDE, np.array([0.5]), np.array([0.9]), device=["cpu"])
-        self.assertIsInstance(corr, Correlation)
+        corr = PatchCorrelation(NSIDE, np.array([0.5]), np.array([0.9]), device=["cpu"])
+        self.assertIsInstance(corr, PatchCorrelation)
 
     def test_measurements_match_single_device(self):
         s, m, w = self.single, self.multi, self.w
         for name, args in (
-            ("get_full_tomo_shear", (self.shear, w)),
-            ("vectorized_shear_shear", (self.shear, w)),
-            ("get_full_tomo_density", (self.dens, w)),
-            ("vectorized_density_density", (self.dens, w)),
-            ("get_full_tomo_ggl", (self.dens, self.shear, w, w)),
-            ("get_3x2pt_tomo", (self.shear, self.dens, w)),
+            ("shear", (self.shear, w)),
+            ("shear_shear", (self.shear, w)),
+            ("density", (self.dens, w)),
+            ("density_density", (self.dens, w)),
+            ("ggl", (self.dens, self.shear, w, w)),
+            ("three_by_two_pt", (self.shear, self.dens, w)),
         ):
             with self.subTest(method=name):
                 ref = getattr(s, name)(*args, return_device=False)
                 self._same(ref, getattr(m, name)(*args))
 
     def test_aperture_matches_single_device(self):
-        ref = self.single.get_aperture_shear(
+        ref = self.single.aperture_shear_single(
             self.shear[0, 0], self.shear[0, 1], self.w[0]
         )
-        got = self.multi.get_aperture_shear(
+        got = self.multi.aperture_shear_single(
             self.shear[0, 0], self.shear[0, 1], self.w[0]
         )
         self._same(np.asarray(ref), got)
@@ -104,19 +104,19 @@ class TestMultiDevice(unittest.TestCase):
         shear = rng.normal(size=(2, 2, n))
         w = rng.uniform(0.5, 2.0, size=(2, n))
         self._same(
-            single.get_full_tomo_shear(shear, w, return_device=False),
-            multi.get_full_tomo_shear(shear, w),
+            single.shear(shear, w, return_device=False),
+            multi.shear(shear, w),
         )
 
     def test_errors(self):
         with self.assertRaisesRegex(ValueError, "at least one device"):
-            MultiDeviceCorrelation(NSIDE, np.array([0.5]), np.array([0.9]), devices=[])
+            MultiDevicePatchCorrelation(NSIDE, np.array([0.5]), np.array([0.9]), devices=[])
         with self.assertRaisesRegex(ValueError, "duplicate device ids"):
-            MultiDeviceCorrelation(
+            MultiDevicePatchCorrelation(
                 NSIDE, np.array([0.5, 0.6]), np.array([0.9, 0.9]), devices=[0, 0]
             )
         with self.assertRaisesRegex(ValueError, "cannot be split"):
-            MultiDeviceCorrelation(
+            MultiDevicePatchCorrelation(
                 NSIDE, np.array([0.5]), np.array([0.9]), devices=["cpu", "cpu"]
             )
         with self.assertRaises(NotImplementedError):
@@ -129,7 +129,7 @@ class TestMultiDevice(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "pairs.h5")
             self.single.save_pairs(path)
-            multi = Correlation(
+            multi = PatchCorrelation(
                 NSIDE,
                 self.single.phi_center,
                 self.single.theta_center,
@@ -146,8 +146,8 @@ class TestMultiDevice(unittest.TestCase):
             multi.load_pairs(path)
             self.assertEqual(multi.ntotpairs, self.single.ntotpairs)
             self._same(
-                self.single.get_full_tomo_shear(self.shear, self.w, return_device=False),
-                multi.get_full_tomo_shear(self.shear, self.w),
+                self.single.shear(self.shear, self.w, return_device=False),
+                multi.shear(self.shear, self.w),
             )
             with self.assertRaisesRegex(ValueError, "holds"):
                 multi.load_pairs(path, start_ind=1)

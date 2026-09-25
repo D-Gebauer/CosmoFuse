@@ -20,8 +20,8 @@ from .correlation_helpers import (
     zeta_g_plus,
     zeta_g_t,
 )
-from .correlations import Correlation
-from .multi_device import MultiDeviceCorrelation
+from .correlations import PatchCorrelation
+from .multi_device import MultiDevicePatchCorrelation
 from .pipeline import MapFileLoader, MapLoader
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
@@ -32,11 +32,11 @@ __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 
 __all__ = [
-    "Correlation",
+    "PatchCorrelation",
     "DEFAULT_RESOLUTION_FACTOR",
     "MapLoader",
     "MapFileLoader",
-    "MultiDeviceCorrelation",
+    "MultiDevicePatchCorrelation",
     "Q_crittenden",
     "Q_schneider",
     "U_crittenden",

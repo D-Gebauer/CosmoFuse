@@ -106,7 +106,7 @@ def main():
 
     # 5. the aperture kernel in both layouts -- this is why the pair
     #    layout is decided by the enclosing call and not per leaf.
-    corr._compute_tomo_aperture_shear(shear, w, return_device=True)  # warm
+    corr.aperture_shear(shear, w, return_device=True)  # warm
     ctx = corr.compute_context
     kern = corr.backend.aperture_tomo_shear_kernel
     map_dt = getattr(module, corr.map_dtype.name)
@@ -126,11 +126,11 @@ def main():
 
     # 6. whole calls, with and without the flip
     for name, call in (
-        ("get_full_tomo_shear", lambda flip: corr.get_full_tomo_shear(
+        ("shear", lambda flip: corr.shear(
             shear, w, flip_g2=flip, return_device=True)),
-        ("vectorized_shear_shear", lambda flip: corr.vectorized_shear_shear(
+        ("shear_shear", lambda flip: corr.shear_shear(
             shear, w, flip_g2=flip, return_device=True)),
-        ("get_3x2pt_tomo", lambda flip: corr.get_3x2pt_tomo(
+        ("three_by_two_pt", lambda flip: corr.three_by_two_pt(
             shear_maps=shear, density_maps=dens,
             weights={"shear": w, "density": w},
             flip_g2=flip, return_device=True)),

@@ -403,7 +403,7 @@ def zeta_g_plus(
     The centre and the annulus are built from **different samples**, so their
     tomographic binnings are independent and the output is one row per
     ``(z_center, annulus_combination)``, centre-major --
-    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    :meth:`PatchCorrelation.zeta_cross_triplets` gives the order.  ``symmetric``
     is inferred from the counts and is only ambiguous when the two samples
     happen to have the same number of bins; pass it explicitly there.
     """
@@ -421,7 +421,7 @@ def zeta_g_minus(
     The centre and the annulus are built from **different samples**, so their
     tomographic binnings are independent and the output is one row per
     ``(z_center, annulus_combination)``, centre-major --
-    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    :meth:`PatchCorrelation.zeta_cross_triplets` gives the order.  ``symmetric``
     is inferred from the counts and is only ambiguous when the two samples
     happen to have the same number of bins; pass it explicitly there.
     """
@@ -463,7 +463,7 @@ def zeta_a_g(
     The centre and the annulus are built from **different samples**, so their
     tomographic binnings are independent and the output is one row per
     ``(z_center, annulus_combination)``, centre-major --
-    :meth:`Correlation.zeta_cross_triplets` gives the order.  ``symmetric``
+    :meth:`PatchCorrelation.zeta_cross_triplets` gives the order.  ``symmetric``
     is inferred from the counts and is only ambiguous when the two samples
     happen to have the same number of bins; pass it explicitly there.
     """
@@ -618,8 +618,8 @@ def calculate_all_zetas(
     and ``M_g`` over lens bins is the 3x2pt case -- and each estimator is then
     laid out accordingly: the upper triangle where the centre and the annulus
     share a sample, one row per ``(z_center, annulus_combination)`` where they
-    do not.  :meth:`Correlation.zeta_triplets` and
-    :meth:`Correlation.zeta_cross_triplets` give the two row orders.
+    do not.  :meth:`PatchCorrelation.zeta_triplets` and
+    :meth:`PatchCorrelation.zeta_cross_triplets` give the two row orders.
 
     ``symmetric`` forces the layout of named estimators, e.g.
     ``{"zeta_a_g": False}``.  Needed only when the counts are ambiguous --

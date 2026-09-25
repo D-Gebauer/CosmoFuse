@@ -1,12 +1,12 @@
 import numpy as np, sys
 sys.path.insert(0, "benchmarks/static_treecode")
 from stage7_gpu_tiles import geometry, make_maps, set_tiled, methods, as_list
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 phi, theta, geo, pair_file = geometry(110)
 n = 48
 res = {}
 for tiled in (True, False):
-    corr = Correlation(512, phi[:n], theta[:n], device="gpu", map_precision="float32",
+    corr = PatchCorrelation(512, phi[:n], theta[:n], device="gpu", map_precision="float32",
                        accumulation_precision="float64", **geo)
     corr.preprocess()
     set_tiled(corr, tiled)

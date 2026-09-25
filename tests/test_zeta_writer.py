@@ -7,7 +7,7 @@ What has to hold:
   the estimator (it cannot: zeta averages over patches, not over maps);
 * the three input routes -- reduce on device, reduce in the writer thread
   (multi-GPU / CPU), and no reduction at all -- agree bitwise;
-* a MultiDeviceCorrelation works unchanged, on the CPU-reduction route;
+* a MultiDevicePatchCorrelation works unchanged, on the CPU-reduction route;
 * the flushed prefix survives a crash, and `resume` continues from it;
 * failures in the writer thread reach the caller instead of being swallowed.
 """
@@ -25,8 +25,8 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Correlation, ZetaWriter, calculate_all_zetas
-from CosmoFuse.multi_device import MultiDeviceCorrelation
+from CosmoFuse import PatchCorrelation, ZetaWriter, calculate_all_zetas
+from CosmoFuse.multi_device import MultiDevicePatchCorrelation
 
 NSIDE = 16
 NPIX = hp.nside2npix(NSIDE)
@@ -38,7 +38,7 @@ def make_corr(devices=None, n_patches=4):
     rng = np.random.default_rng(11)
     phi = rng.uniform(0.2, 1.1, size=n_patches)
     theta = rng.uniform(0.7, 1.05, size=n_patches)
-    corr = Correlation(
+    corr = PatchCorrelation(
         NSIDE, phi, theta,
         nbins=3, theta_min=100, theta_max=400, patch_size=250, theta_Q=250,
         mask=mask, map_precision="float64", rotation_precision="float64",
@@ -99,7 +99,7 @@ class ZetaWriterBase(unittest.TestCase):
         cls.corr = make_corr()
         cls.maps = make_maps(cls.corr)
         cls.results = [
-            cls.corr.get_full_tomo_shear(g, w, return_device=False)
+            cls.corr.shear(g, w, return_device=False)
             for g, w in cls.maps
         ]
         # the reference: every map-set stacked, reduced in one go
@@ -208,10 +208,10 @@ class TestMultiDevice(ZetaWriterBase):
 
     def test_group_matches_single_device(self):
         multi = make_corr(devices=["cpu", "cpu"])
-        self.assertIsInstance(multi, MultiDeviceCorrelation)
+        self.assertIsInstance(multi, MultiDevicePatchCorrelation)
         with ZetaWriter(self.path, multi) as out:
             for g, w in self.maps:
-                out.submit_shear(multi.get_full_tomo_shear(g, w))
+                out.submit_shear(multi.shear(g, w))
         got, attrs, _ = read_zetas(self.path)
         self.assert_matches_reference(got)
         # provenance survives the __getattr__ forwarding of the group
@@ -223,7 +223,7 @@ class TestMultiDevice(ZetaWriterBase):
         with ZetaWriter(self.path, multi) as out:
             item = out._prepare({"M_a": np.zeros((2, self.corr.n_patches))})
             self.assertIn("raw", item)      # not reduced on the calling thread
-            out.submit_shear(multi.get_full_tomo_shear(*self.maps[0]))
+            out.submit_shear(multi.shear(*self.maps[0]))
 
 
 class TestDurability(ZetaWriterBase):
@@ -247,7 +247,7 @@ class TestDurability(ZetaWriterBase):
             corr = make_corr()
             out = ZetaWriter({self.path!r}, corr, flush_every=2)
             for g, w in make_maps(corr):
-                out.submit_shear(corr.get_full_tomo_shear(g, w, return_device=False))
+                out.submit_shear(corr.shear(g, w, return_device=False))
             out._queue.join()
             os._exit(1)                      # no close(), no flush of the tail
         """)
@@ -311,7 +311,7 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
     def test_rejects_bad_tuple_lengths(self):
         with ZetaWriter(self.path, self.corr) as out:
             with self.assertRaisesRegex(ValueError, "6-tuple"):
-                out.submit_3x2pt(self.results[0])
+                out.submit_three_by_two_pt(self.results[0])
             with self.assertRaisesRegex(ValueError, "3-tuple"):
                 out.submit_shear(self.results[0][:2])
             out.submit_shear(self.results[0])

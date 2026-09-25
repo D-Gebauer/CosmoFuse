@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 from CosmoFuse.correlation_helpers import Q_schneider
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 from CosmoFuse.utils import pixel2RaDec, select_patch_centers
 
 
@@ -136,7 +136,7 @@ class TestSelectPatchCenters(unittest.TestCase):
         phi_c, theta_c = select_patch_centers(
             self.mask, nside_centers=8, patch_size=90.0, f_mask=0.05
         )
-        corr = Correlation.from_mask(
+        corr = PatchCorrelation.from_mask(
             self.NSIDE_MASK,
             self.mask,
             nside_centers=8,
@@ -155,7 +155,7 @@ class TestSelectPatchCenters(unittest.TestCase):
 
     def test_from_mask_regrades_mask_resolution(self):
         """Selection may run on a finer mask than the measurement nside."""
-        corr = Correlation.from_mask(
+        corr = PatchCorrelation.from_mask(
             32,
             self.mask,  # nside 64 footprint
             nside_centers=8,
@@ -171,7 +171,7 @@ class TestSelectPatchCenters(unittest.TestCase):
 
     def test_from_mask_raises_when_nothing_accepted(self):
         with self.assertRaises(ValueError):
-            Correlation.from_mask(
+            PatchCorrelation.from_mask(
                 self.NSIDE_MASK,
                 np.zeros_like(self.mask),
                 nside_centers=8,
@@ -364,9 +364,9 @@ class TestFilterWeightedSelection(unittest.TestCase):
         self.assertGreater(self._count_in_band(t_sch, 13.5, 16.5), 0)
 
     def test_schneider_filter_in_aperture_geometry(self):
-        """calculate_pairs_M_a with Q_schneider: pixels beyond theta_Q in
+        """find_aperture_pairs with Q_schneider: pixels beyond theta_Q in
         the 5*theta_Q aperture disc receive exactly zero weight."""
-        corr = Correlation(
+        corr = PatchCorrelation(
             self.NSIDE_MASK,
             np.array([0.3]),
             np.array([np.radians(15.0)]),
@@ -377,7 +377,7 @@ class TestFilterWeightedSelection(unittest.TestCase):
             theta_Q=90.0,
             device="cpu",
         )
-        corr.calculate_pairs_M_a(aperture_filter=Q_schneider)
+        corr.find_aperture_pairs(aperture_filter=Q_schneider)
 
         self.assertNotEqual(corr._aperture_filter_active_key, "Q_crittenden")
         q_val = np.asarray(corr.Q_val[0], dtype=np.float64)
@@ -390,7 +390,7 @@ class TestFilterWeightedSelection(unittest.TestCase):
 
     def test_from_mask_passthrough(self):
         p_wgt, _ = select_patch_centers(self.mask, **self.kwargs)
-        corr = Correlation.from_mask(
+        corr = PatchCorrelation.from_mask(
             self.NSIDE_MASK,
             self.mask,
             nside_centers=32,

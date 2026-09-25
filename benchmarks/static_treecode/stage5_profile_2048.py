@@ -1,9 +1,9 @@
 """Reference workload at nside 2048 (k from --k): build or load the geometry,
-then time get_full_tomo_shear with host row-space inputs, device inputs, and
+then time shear with host row-space inputs, device inputs, and
 the individual phases.  Run under nsys for the kernel split."""
 import argparse, json, os, time
 import healpy as hp, numpy as np
-from CosmoFuse.correlations import Correlation
+from CosmoFuse.correlations import PatchCorrelation
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -23,7 +23,7 @@ def build(args):
     theta = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_theta.dat")
     edges = np.geomspace(args.theta_min, args.theta_max, args.nedges)
     edges = edges[edges < 2 * args.Q - 5]
-    corr = Correlation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
+    corr = PatchCorrelation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
                        patch_size=args.Q, theta_Q=args.Q, mask=mask, device="gpu", map_precision="float32",
                        accumulation_precision="float64", resolution_factor=args.k or None,
                        aperture_nside=args.aperture_nside or None)
@@ -31,7 +31,7 @@ def build(args):
         t0 = time.perf_counter(); corr.load_pairs(args.pairs, release_host_pairs=True)
         print(f"loaded geometry in {time.perf_counter()-t0:.1f}s", flush=True)
     else:
-        t0 = time.perf_counter(); corr.calculate_pairs_M_a(); corr.calculate_pairs_2PCF()
+        t0 = time.perf_counter(); corr.find_aperture_pairs(); corr.find_pairs()
         print(f"geometry in {time.perf_counter()-t0:.1f}s", flush=True)
         if args.pairs:  # --pairs "" keeps the (multi-GB) geometry off disk
             t0 = time.perf_counter(); corr.save_pairs(args.pairs)
@@ -60,7 +60,7 @@ def main():
     maps = [rng.normal(size=(args.nz, 2, corr.n_active)).astype(np.float32) * 0.1 for _ in range(2)]
     w = rng.uniform(0.5, 2.0, size=(args.nz, corr.n_active)).astype(np.float32)
     w.flags.writeable = False
-    corr.get_full_tomo_shear(maps[0], w, flip_g1=True, return_device=False); sync(corr)
+    corr.shear(maps[0], w, flip_g1=True, return_device=False); sync(corr)
 
     def med(fn, n=args.ncalls):
         ts = []
@@ -69,14 +69,14 @@ def main():
         return float(np.median(ts) * 1e3)
 
     out = {"n_pairs": int(corr.ntotpairs), "n_rows": int(corr.n_rows), "n_active": int(corr.n_active)}
-    out["call_host_rows_ms"] = med(lambda i: corr.get_full_tomo_shear(maps[i % 2], w, flip_g1=True, return_device=False))
+    out["call_host_rows_ms"] = med(lambda i: corr.shear(maps[i % 2], w, flip_g1=True, return_device=False))
     g_dev = xp.asarray(maps[0]); w_dev = corr._coerce_map_input_array(w)
-    out["call_device_rows_ms"] = med(lambda i: corr.get_full_tomo_shear(g_dev, w_dev, flip_g1=True, return_device=False))
+    out["call_device_rows_ms"] = med(lambda i: corr.shear(g_dev, w_dev, flip_g1=True, return_device=False))
     out["h2d_ms"] = med(lambda i: xp.asarray(maps[i % 2]))
     out["expand_pairs_ms"] = med(lambda i: corr._expand_shear_rows(g_dev, w_dev, "pairs"))
     out["expand_aperture_ms"] = med(lambda i: corr._expand_shear_rows(g_dev, w_dev, "aperture"))
-    out["aperture_total_ms"] = med(lambda i: corr._compute_tomo_aperture_shear(g_dev, w_dev, flip_g1=True))
-    out["xipm_total_ms"] = med(lambda i: corr.vectorized_shear_shear(g_dev, w_dev, flip_g1=True))
+    out["aperture_total_ms"] = med(lambda i: corr.aperture_shear(g_dev, w_dev, flip_g1=True))
+    out["xipm_total_ms"] = med(lambda i: corr.shear_shear(g_dev, w_dev, flip_g1=True))
     out["device_pool_GB"] = xp.get_default_memory_pool().total_bytes() / 1e9
     print(json.dumps(out, indent=1))
 

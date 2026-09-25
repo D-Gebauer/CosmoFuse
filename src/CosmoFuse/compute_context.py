@@ -3,7 +3,7 @@ Device buffer and cache management for correlation computations.
 
 ComputeContext holds all GPU/CPU device-side arrays and caches needed
 during correlation measurements.  It separates the mutable runtime
-state from the Correlation object, making it easy to invalidate
+state from the PatchCorrelation object, making it easy to invalidate
 buffers when the pair geometry changes (e.g. after a new preprocess()
 call) without touching the rest of the object.
 
@@ -58,7 +58,7 @@ class ComputeContext:
         # aperture ElementwiseKernel numerator/denominator buffers
         ("pair_scratch", None),
         ("aperture_scratch", None),
-        # Cached unit-weight arrays for get_3x2pt_tomo(weights=None)
+        # Cached unit-weight arrays for three_by_two_pt(weights=None)
         ("unit_weights_cache", None),
     )
     # Aperture filter geometry on host: pixel indices within each patch's

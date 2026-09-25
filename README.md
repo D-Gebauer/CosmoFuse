@@ -74,10 +74,10 @@ Note: for GPU execution, install CuPy in your environment.
 
 ## USAGE
 
-First create a Correlation object:
+First create a PatchCorrelation object:
 
-    from CosmoFuse import Correlation
-    correlation = Correlation(
+    from CosmoFuse import PatchCorrelation
+    correlation = PatchCorrelation(
         nside,                              # resolution of healpy maps
         phi_center, theta_center,           # patch centers (radians)
         patch_size=90,                      # patch size (arcminutes)
@@ -123,11 +123,11 @@ Instead of providing patch centers manually, they can be selected automatically 
         f_mask=0.2,              # max masked fraction in the patch disc
         filter_weighting="abs",  # "abs" / "signed"
     )
-    correlation = Correlation(nside, phi_center, theta_center, mask=mask, ...)
+    correlation = PatchCorrelation(nside, phi_center, theta_center, mask=mask, ...)
 
 or, in one step:
 
-    correlation = Correlation.from_mask(
+    correlation = PatchCorrelation.from_mask(
         nside, mask, nside_centers=32,
         patch_size=90, theta_Q=90, f_mask=0.2,
         nbins=10, theta_min=10, theta_max=170,
@@ -168,7 +168,7 @@ Pair files are written in a consolidated layout (format version 2; version 3 wit
 
 `pack_pairs=True` stores the pair geometry on the *device* in 8 instead of 24 bytes per pair, so about three times as many pairs fit on a GPU; host arrays and pair files stay exact. `pack_host_pairs=True` applies the same packing already at pair-finding time, which cuts host RAM and the pair file by the same factor (`pair_inds` / `pair_exp2phi` are then `None`, the payload lives in `packed_pairs`):
 
-    correlation = Correlation(..., pack_pairs=True, pack_host_pairs=True)
+    correlation = PatchCorrelation(..., pack_pairs=True, pack_host_pairs=True)
     correlation.preprocess()
     correlation.save_pairs("/path/to/pairs.h5")   # format version 4
 
@@ -176,7 +176,7 @@ Both are off by default. Packing quantises the pair rotations to $2\pi/65536$, w
 
 ### Aperture filters
 
-The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `calculate_pairs_M_a()`, `select_patch_centers()`, and `Correlation.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
+The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `find_aperture_pairs()`, `select_patch_centers()`, and `PatchCorrelation.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
 
 **`Q_crittenden` (default)** — the exponential compensated filter of [Crittenden et al. (2002)](https://arxiv.org/abs/astro-ph/0012336), as used for the i3PCF in [Halder et al. (2021)](https://arxiv.org/abs/2102.10177):
 
@@ -202,7 +202,7 @@ The package supports 3 main probes: Cosmic Shear, Galaxy Clustering, and Galaxy-
 
 #### Probes & Inputs
 
-| Probe | Aperture Quantity | 2-Point Correlation | Inputs |
+| Probe | Aperture Quantity | 2-Point PatchCorrelation | Inputs |
 | :--- | :--- | :--- | :--- |
 | **Shear** | Aperture Mass ($M_a$) | Shear 2PCF ($\xi_\pm$) | Shear maps ($g_1, g_2$), Weights ($w$) |
 | **Clustering** | Aperture Count ($M_g$) | Angular Clustering ($\xi_g$) | Density maps ($\delta$ or counts), Weights ($w$) |
@@ -219,17 +219,17 @@ map-set, and nothing crosses PCIe that does not have to. Pass
 
 Two things worth knowing:
 
-* **A multi-device group always returns numpy.** `MultiDeviceCorrelation`
+* **A multi-device group always returns numpy.** `MultiDevicePatchCorrelation`
   concatenates the per-device patch ranges on the host, so `return_device` is
   ignored there.
 * **The arrays are yours.** Each call allocates its outputs, so collecting
   results in a list across realisations is safe:
 
   ```python
-  results = [corr.get_3x2pt_tomo(...) for _ in range(n_realisations)]   # fine
+  results = [corr.three_by_two_pt(...) for _ in range(n_realisations)]   # fine
   ```
 
-  (Before 6.3.0 `get_3x2pt_tomo(return_device=True)` returned cached buffers
+  (Before 6.3.0 `three_by_two_pt(return_device=True)` returned cached buffers
   that the next call overwrote in place, so that loop silently produced N
   copies of the last realisation.)
 
@@ -239,11 +239,11 @@ The tomographic outputs are `(ncomb, n_patches, nbins)` and the row order is
 part of the contract, not something to rederive:
 
 ```python
-Correlation.tomo_combinations(4)         # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
-Correlation.tomo_combinations(4, True)   # gc_auto_correlations_only=True: the diagonal only
-Correlation.ggl_combinations(2, 4)       # xi_t rows as (lens_bin, source_bin)
-Correlation.zeta_triplets(4)             # same-sample zeta rows: (z_center, z2, z3)
-Correlation.zeta_cross_triplets(5, 10)   # cross-sample zeta rows: (z_center, annulus_row)
+PatchCorrelation.tomo_combinations(4)         # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
+PatchCorrelation.tomo_combinations(4, True)   # gc_auto_correlations_only=True: the diagonal only
+PatchCorrelation.ggl_combinations(2, 4)       # xi_t rows as (lens_bin, source_bin)
+PatchCorrelation.zeta_triplets(4)             # same-sample zeta rows: (z_center, z2, z3)
+PatchCorrelation.zeta_cross_triplets(5, 10)   # cross-sample zeta rows: (z_center, annulus_row)
 ```
 
 Note that `gc_auto_correlations_only=True` changes the length of the $\xi_g$
@@ -262,25 +262,25 @@ Calculate quantities for a single pair of maps (e.g. one tomographic bin pair).
 **Cosmic Shear**:
 ```python
 # Aperture Mass
-M_a = correlation.get_aperture_shear(g1, g2, w)
+M_a = correlation.aperture_shear_single(g1, g2, w)
 # Shear 2PCF
-xi_p, xi_m = correlation.compute_shear_shear(g1_a, g2_a, g1_b, g2_b, w_a, w_b)
+xi_p, xi_m = correlation.shear_shear_single(g1_a, g2_a, g1_b, g2_b, w_a, w_b)
 ```
 
 **Galaxy Clustering**:
 ```python
 # Aperture Number Count
-M_g = correlation.get_aperture_density(delta, w)
+M_g = correlation.aperture_density_single(delta, w)
 # Angular Clustering
-xi_g, = correlation.compute_density_density(delta_a, delta_b, w_a, w_b)
+xi_g, = correlation.density_density_single(delta_a, delta_b, w_a, w_b)
 ```
 
 **Galaxy-Galaxy Lensing**:
 ```python
 # Aperture Number Count (Lenses)
-M_g = correlation.get_aperture_density(delta_lens, w_lens)
+M_g = correlation.aperture_density_single(delta_lens, w_lens)
 # Tangential Shear
-xi_t, = correlation.compute_density_shear(delta_lens, g1_source, g2_source, w_lens, w_source)
+xi_t, = correlation.density_shear_single(delta_lens, g1_source, g2_source, w_lens, w_source)
 ```
 
 #### 2. Full Tomography (3x2pt)
@@ -292,39 +292,39 @@ Calculate all correlations for all requested tomographic bin combinations at onc
 *Cosmic Shear*:
 ```python
 # Returns: xi_p, xi_m
-xi_p, xi_m = correlation.vectorized_shear_shear(shear_maps, weights)
+xi_p, xi_m = correlation.shear_shear(shear_maps, weights)
 
 # Full shear tomography (includes aperture mass)
-M_a, xi_p, xi_m = correlation.get_full_tomo_shear(shear_maps, weights)
+M_a, xi_p, xi_m = correlation.shear(shear_maps, weights)
 ```
 
 *Galaxy Clustering*:
 ```python
 # Returns: xi_g
-xi_g = correlation.vectorized_density_density(density_maps, weights)
+xi_g = correlation.density_density(density_maps, weights)
 
 # Full clustering tomography (includes aperture counts)
-M_g, xi_g = correlation.get_full_tomo_density(density_maps, weights)
+M_g, xi_g = correlation.density(density_maps, weights)
 ```
 
 *Galaxy-Galaxy Lensing*:
 ```python
 # Returns: xi_t (Lens->Source combinations)
-xi_t = correlation.vectorized_density_shear(
+xi_t = correlation.density_shear(
     density_maps, shear_maps, density_weights, shear_weights
 )
 
 # Full GGL helper; by default returns only xi_t
-xi_t = correlation.get_full_tomo_ggl(
+xi_t = correlation.ggl(
     density_maps, shear_maps, density_weights, shear_weights
 )
 
 # Optional extras: also return M_g and/or M_a
-xi_t, M_g = correlation.get_full_tomo_ggl(
+xi_t, M_g = correlation.ggl(
     density_maps, shear_maps, density_weights, shear_weights,
     return_N_ap=True,
 )
-xi_t, M_g, M_a = correlation.get_full_tomo_ggl(
+xi_t, M_g, M_a = correlation.ggl(
     density_maps, shear_maps, density_weights, shear_weights,
     return_N_ap=True,
     return_M_ap=True,
@@ -338,7 +338,7 @@ xi_t, M_g, M_a = correlation.get_full_tomo_ggl(
 # density_maps: [nzbins_d, npix] or None
 # weights:      dict of weights or None
 
-M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.get_3x2pt_tomo(
+M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.three_by_two_pt(
     shear_maps=shear_maps,
     density_maps=density_maps,
     weights={"shear": shear_w, "density": density_w},
@@ -360,7 +360,7 @@ pipe = MapLoader(correlation, {"shear": (nz, 2, npix), "w": (nz, npix)})
 dev = pipe.wait(pipe.stage({"shear": shear_np[0], "w": w_np[0]}))
 for k in range(nmaps):
     nxt = pipe.stage({"shear": shear_np[k + 1], "w": w_np[k + 1]}) if k + 1 < nmaps else None
-    results.append(correlation.get_full_tomo_shear(dev["shear"], dev["w"]))
+    results.append(correlation.shear(dev["shear"], dev["w"]))
     dev = pipe.wait(nxt)
 ```
 
@@ -380,7 +380,7 @@ loader = MapFileLoader(
     row_pix_hash=correlation.row_pix_hash,   # optional archive/mask check
 )
 for k, dev in loader:
-    results.append(correlation.get_full_tomo_shear(dev["shear"], w))
+    results.append(correlation.shear(dev["shear"], w))
 ```
 
 Store the maps in row space (`correlation.to_row_space(full_sky_maps)`, done
@@ -400,15 +400,15 @@ timing a loop.
 **Several GPUs**:
 
 Passing a list of GPU ids splits the patches across those devices — one
-`Correlation` per GPU, measured in parallel, outputs concatenated in patch
+`PatchCorrelation` per GPU, measured in parallel, outputs concatenated in patch
 order. The result is identical to a single-device run, and each GPU holds only
 its share of the pair geometry, which is how a geometry too large for one card
 is measured. A single device remains the default.
 
 ```python
-correlation = Correlation(nside, phi_center, theta_center, device=[0, 1], ...)
+correlation = PatchCorrelation(nside, phi_center, theta_center, device=[0, 1], ...)
 correlation.preprocess()          # or load_pairs(path): each device takes its own slice
-M_a, xi_p, xi_m = correlation.get_full_tomo_shear(shear_maps, weights)
+M_a, xi_p, xi_m = correlation.shear(shear_maps, weights)
 ```
 
 Write pair files from a single-device instance; a multi-device group only
@@ -424,9 +424,9 @@ the end:
 
     with ZetaWriter("zetas.h5", correlation, flush_every=50) as out:
         for shear, w in map_sets:
-            out.submit_shear(correlation.get_full_tomo_shear(shear, w))
+            out.submit_shear(correlation.shear(shear, w))
 
-`submit_3x2pt()` takes a `get_3x2pt_tomo()` result, and `submit(M_a=..., xi_p=...)`
+`submit_three_by_two_pt()` takes a `three_by_two_pt()` result, and `submit(M_a=..., xi_p=...)`
 any subset of the six fields. `submit()` blocks once `depth` map-sets are queued, so
 memory stays bounded and a writer that falls behind cannot go unnoticed.
 
@@ -439,7 +439,7 @@ be derived from those.
 
 On a GPU the reduction runs on the device before the copy, so only the 9 kB data
 vector crosses PCIe and the writer thread does nothing but I/O. With a
-`MultiDeviceCorrelation` the group returns host arrays, so the reduction runs on the
+`MultiDevicePatchCorrelation` the group returns host arrays, so the reduction runs on the
 CPU in the writer thread — still off the measurement's critical path, and nothing
 about the group changes.
 
