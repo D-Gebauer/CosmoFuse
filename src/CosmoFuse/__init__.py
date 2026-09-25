@@ -1,5 +1,5 @@
 """
-CosmoFuse: A package for efficiently measuring integrated 3-point correlation functions.
+CosmoFuse: GPU/CPU measurement of integrated, two- and three-point correlation functions.
 
 This package provides tools for calculating integrated 3-point correlation functions
 on GPU/CPU, with support for shear measurements and aperture mass calculations.
@@ -21,18 +21,24 @@ from .correlation_helpers import (
     zeta_g_t,
 )
 from .correlations import PatchCorrelation
+from .global_2pcf import Global2PCF
+from .global_3pcf import Component, Global3PCF, ThreePointMultipoles
 from .multi_device import MultiDevicePatchCorrelation
 from .pipeline import MapFileLoader, MapLoader
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 from .zeta_writer import ZetaWriter
 
-__version__ = "6.4.0"
+__version__ = "7.0.0"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 
 __all__ = [
+    "Component",
+    "Global2PCF",
+    "Global3PCF",
     "PatchCorrelation",
+    "ThreePointMultipoles",
     "DEFAULT_RESOLUTION_FACTOR",
     "MapLoader",
     "MapFileLoader",

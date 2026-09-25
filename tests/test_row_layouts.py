@@ -190,13 +190,13 @@ class TestOneExpansionPerCall(FusedDegradeBase):
             self.fused(corr, fn)
         return seen
 
-    def test_get_full_tomo_shear_degrades_once_in_soa(self):
+    def test_shear_degrades_once_in_soa(self):
         corr = self.corr
         seen = self.count_expansions(corr, lambda c: c.shear(
             self.shear, self.w, return_device=False))
         self.assertEqual(seen, ["interleaved"])
 
-    def test_get_full_tomo_density_degrades_once_in_soa(self):
+    def test_density_degrades_once_in_soa(self):
         corr = self.corr
         seen = self.count_expansions(corr, lambda c: c.density(
             self.dens, self.w, return_device=False))

@@ -6,7 +6,17 @@
 
 # CosmoFuse
 
-A package for efficiently measuring integrated 3-point correlation functions on GPU/CPU written in Python 3.
+A package for efficiently measuring integrated 3-point correlation functions on GPU/CPU written in Python 3,
+plus footprint-wide two- and three-point correlation functions (`Global2PCF`, `Global3PCF`) built on the
+same precompute-once / measure-many machinery.
+
+Three estimators share one vocabulary -- the class says *what* is measured, the method *which fields*:
+
+| class | measures | `shear(maps, w)` returns |
+|---|---|---|
+| `PatchCorrelation` | per-patch aperture masses and 2PCFs (i3PCF ingredients) | `(M_a, xi_p, xi_m)` per patch |
+| `Global2PCF` | 2PCFs of the whole footprint | `(xi_p, xi_m)` |
+| `Global3PCF` | 3PCF multipoles of the whole footprint | `ThreePointMultipoles` (Γ₀…Γ₃) |
 
 The integrated 3-point correlation function probes squeezed configurations of the bispectrum without the computational expense of the full 3-point correlation function.
 
@@ -60,6 +70,8 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Calculate pairs for given mask & resolution once
 - Save/Load pairs using hdf5 files
 - Reuse pairs to measure i3PCFs across maps
+- Footprint-wide 2PCFs (ξ±, w(θ), γ_t) with the same kernels, static treecode and packing, per-tile sums for jackknifes
+- Footprint-wide 3PCFs (shear Γ₀…Γ₃, scalar ζ, any mixed spin-0/spin-2 triplet) by multipole decomposition, exact per multipole
 - Optimized backend kernels for Spin-0×Spin-0 ($`w(\theta)`$), Spin-0×Spin-2 ($\gamma_t$), and Spin-2×Spin-2 ($\xi_\pm$) workloads
 - Optimized tomographic kernels for all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
@@ -455,6 +467,62 @@ readers must pass `swmr=True`, HDF5 documents it as unreliable on NFS, and after
 crash the file keeps a stale write lock — an ordinary `h5py.File(path, "r")` then
 fails until someone runs `h5clear -s`. A non-SWMR file survives the same crash and
 opens normally.
+
+## Global (footprint-wide) estimators
+
+Both estimators find their pairs once -- per HEALPix *tile* (`tile_nside`), every pair of the
+footprint exactly once -- and reuse them for every map, on CPU (Numba) or GPU (CUDA).
+
+### Two-point: `Global2PCF`
+
+```python
+from CosmoFuse import Global2PCF
+
+g2 = Global2PCF(nside, mask=mask, nbins=20, theta_min=5, theta_max=250,
+                resolution_factor=None, pack_pairs=False, device="auto")
+g2.preprocess()                      # or g2.load_pairs("g2.h5") after g2.save_pairs(...)
+
+xi_p, xi_m = g2.shear(shear_maps, w, flip_g1=True)     # (nz(nz+1)/2, nbins)
+w_theta    = g2.density(delta_maps, w)                   # (nz(nz+1)/2, nbins)
+gamma_t    = g2.ggl(delta_maps, shear_maps, w_lens, w_source)
+xi_p, xi_m, xi_g, xi_t = g2.three_by_two_pt(shear_maps, delta_maps, w_source, w_lens)
+
+# per-tile numerators and weight sums (delete-one-tile jackknife)
+num_p, num_m, den = g2.shear(shear_maps, w, per_tile=True)   # (ncomb, n_tiles, nbins)
+```
+
+It runs the same pair kernels as `PatchCorrelation` with tiles in the role of patches and forms the
+ratio of sums over the whole footprint.  The static treecode builds its cells over the whole
+footprint (there is no patch window to preserve).
+
+### Three-point: `Global3PCF`
+
+```python
+from CosmoFuse import Component, Global3PCF
+
+g3 = Global3PCF(nside, mask=mask, nbins=12, theta_min=15, theta_max=250, n_max=20, device="auto")
+g3.preprocess()
+
+res = g3.shear(shear_maps, w, flip_g1=True)          # components gamma0..gamma3
+res.num["gamma0"].shape    # (2 n_max + 1, nz, nz, nz, nbins, nbins): n, z_centre, z_leg2, z_leg3, b2, b3
+gamma = res.binned(np.linspace(-np.pi, np.pi, 17))    # label -> (..., nbins, nbins, 16)
+gamma_cen = res.to_centroid(gamma, np.linspace(-np.pi, np.pi, 17))
+
+zeta = g3.density(delta_maps, w)                      # scalar 3PCF
+mixed = g3.measure(                                   # any spin-0 / spin-2 combination
+    {"d": (delta_maps, w_lens, 0), "g": (shear_maps, w_source, 2)},
+    [Component("dgg", ("d", "g", "g")), Component("ggd*", ("g", "g", "d"), (False, False, True))],
+)
+```
+
+A triangle is seen from its centre vertex with legs in radial bins `b2`, `b3` and opening angle
+`phi = phi_3 - phi_2` (position angles from local east towards north).  The multipoles
+`Gamma_n = sum w1 w2 w3 f1 f2 f3 exp(-i n phi)` are **exact** for every `n` (compared against a
+brute-force triplet loop in the tests); only the conversion to opening-angle bins truncates at
+`n_max`.  Spin-2 values are in the x-projection (centre along its first leg, outer vertices along
+their leg to the centre, `Re` = tangential); `to_centroid` converts binned values to the centroid
+projection.  Results are sums (numerators and weight normalisations), so tiles, chunks and devices
+add with `+`.  Full resolution only; one device.
 
 ## Calculating i3PCFs
 

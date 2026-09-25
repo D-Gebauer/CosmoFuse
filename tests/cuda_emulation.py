@@ -819,6 +819,63 @@ def _emulate_degrade_finalize(params, grid, args):
                    + r * v_rows_row] = out_dtype.type(sv * inv)
 
 
+def _emulate_3pcf_multipoles(params, grid, args):
+    """Twin of ``gpu_3pcf_multipoles`` (threepoint_multipoles.cu)."""
+    TV, TR, TA = (_SCALAR_TYPES[p] for p in params[:3])
+    F, E, O, NB, K = (int(p) for p in params[3:])
+    (offsets, c0, nbins, nbr, phi_c, phi_n, vre, vim, wts, n_rows, spin,
+     d_fa, d_fb, d_ca, d_cb, d_e, out) = args
+    c0, nbins, n_rows = int(c0), int(nbins), int(n_rows)
+    # the contract the launch wrapper must honour
+    assert vre.dtype == TV and vim.dtype == TV and wts.dtype == TV
+    assert phi_c.dtype == TR and phi_n.dtype == TR
+    assert nbr.dtype == np.int32 and offsets.dtype == np.int64
+    assert np.dtype(out.dtype) == (np.complex128 if TA is np.float64 else np.complex64)
+    assert int(spin.size) == F and int(d_fa.size) == O
+    assert vre.shape == (F, n_rows)
+    # static shared memory of the block: 2 NB (F + 2E + 1) values of TA
+    assert 2 * NB * (F + 2 * E + 1) * np.dtype(TA).itemsize <= 48 * 1024
+    assert K * 128 >= O
+    P = 2 * E + 1
+    flat = out.reshape(-1, O)
+    for c in range(int(grid[0])):
+        for b in range(nbins):
+            lo = int(offsets[(c0 + c) * nbins + b])
+            hi = int(offsets[(c0 + c) * nbins + b + 1])
+            acc = np.zeros(O, dtype=out.dtype)
+            if hi > lo:
+                j = nbr[lo:hi].astype(np.int64)
+                pn = phi_n[lo:hi].astype(TA)
+                pc = phi_c[lo:hi].astype(TA)
+                c2, s2 = np.cos(TA(2) * pn), np.sin(TA(2) * pn)
+                a = np.empty((hi - lo, F), dtype=out.dtype)
+                for f in range(F):
+                    w = wts[f, j].astype(TA)
+                    gr = vre[f, j].astype(TA)
+                    if int(spin[f]) == 2:
+                        gi = vim[f, j].astype(TA)
+                        a[:, f] = (-w * (gr * c2 + gi * s2)) + 1j * (-w * (gi * c2 - gr * s2))
+                    else:
+                        a[:, f] = w * gr
+                c1, s1 = np.cos(pc), np.sin(pc)
+                pw = np.empty((hi - lo, P), dtype=out.dtype)
+                pr, pi = np.ones_like(pc), np.zeros_like(pc)
+                pw[:, E] = 1.0
+                for e in range(1, E + 1):
+                    pr, pi = pr * c1 + pi * s1, pi * c1 - pr * s1
+                    pw[:, E + e] = pr + 1j * pi
+                    pw[:, E - e] = pr - 1j * pi
+                for o in range(O):
+                    x = a[:, d_fa[o]]
+                    if d_ca[o]:
+                        x = np.conj(x)
+                    if d_fb[o] >= 0:
+                        y = a[:, d_fb[o]]
+                        x = x * (np.conj(y) if d_cb[o] else y)
+                    acc[o] = np.sum(x * pw[:, d_e[o] + E])
+            flat[c * nbins + b] = acc
+
+
 _KERNEL_EMULATORS = {
     "gpu_fused_tomo_reduce_xipm": _emulate_xipm,
     "gpu_tiled_tomo_reduce_xipm": _emulate_xipm_tiled,
@@ -841,4 +898,5 @@ _KERNEL_EMULATORS = {
     ),
     "gpu_degrade_level": _emulate_degrade_level,
     "gpu_degrade_finalize": _emulate_degrade_finalize,
+    "gpu_3pcf_multipoles": _emulate_3pcf_multipoles,
 }

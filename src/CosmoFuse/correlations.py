@@ -448,8 +448,8 @@ class PatchCorrelation:
                 by ~1e-5 of its statistical error and does not bias it.
                 Pair files and host arrays stay exact.  On GPU backends the
                 packed geometry serves every tomographic method
-                (``vectorized_*``, ``get_full_tomo_*``, ``three_by_two_pt``)
-                and the aperture statistics; the single-map ``compute_*``
+                (``shear_shear``, ``density_density``, ``density_shear``, ``shear``, ``density``, ``ggl``, ``three_by_two_pt``)
+                and the aperture statistics; the single-map ``*_single``
                 methods need the unpacked geometry.
             pair_search_precision: Precision of the pair *search*
                 (separations, binning, position angles); the stored
@@ -1795,12 +1795,12 @@ class PatchCorrelation:
 
     def _require_unpacked_pairs(self, what: str) -> None:
         """Paths without a packed kernel need the 24 B device geometry
-        (the single-map ``compute_*`` methods and the explicit
+        (the single-map ``*_single`` methods and the explicit
         sum-of-weights precomputation; every tomographic method has one)."""
         if self.inds_dev is None:
             raise NotImplementedError(
                 f"{what} is not available with pack_pairs=True on a GPU backend; "
-                "use the tomographic methods (vectorized_*, get_full_tomo_*, "
+                "use the tomographic methods (shear_shear, density_density, density_shear, shear, density, ggl, "
                 "three_by_two_pt) or construct the PatchCorrelation with pack_pairs=False."
             )
 
@@ -4316,7 +4316,7 @@ class PatchCorrelation:
         shear_w_dev = self._to_backend_array(shear_w_arr, dtype=self.map_dtype)
 
         # Share one row expansion between the passes, as the other
-        # ``get_full_tomo_*`` methods do.  Without this the density and shear
+        # ``shear``/``density``/``ggl`` methods do.  Without this the density and shear
         # rows are degraded once for the pair pass and again for each
         # aperture pass -- four expansions where two suffice.  The scope is
         # taken only when an aperture output is requested, because it is the

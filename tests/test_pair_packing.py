@@ -175,7 +175,7 @@ class TestPackedMeasurement(unittest.TestCase):
 
     def test_gpu_without_unpacked_geometry(self):
         """On a real GPU the 24 B geometry is not uploaded: no tomographic
-        method may need it; the single-map compute_* methods refuse clearly."""
+        method may need it; the single-map *_single methods refuse clearly."""
         corr, _ = make_setup(pack=True)
         dens = np.ones((2, NPIX)) + 0.1 * self.shear[1, :, 0]
         ref = dict(

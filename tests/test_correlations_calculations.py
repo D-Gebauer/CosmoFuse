@@ -53,7 +53,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.corr.n_patches = 1
 
 
-    def test_get_aperture_shear(self):
+    def test_aperture_shear_single(self):
         """Test the aperture_shear_single method."""
         g1 = np.random.rand(self.npix)
         g2 = np.random.rand(self.npix)
@@ -77,7 +77,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             float(self.corr.backend.to_numpy(M_a)[0]), expected_M_a
         )
 
-    def test_get_aperture_shear_non_numpy_backend_path(self):
+    def test_aperture_shear_single_non_numpy_backend_path(self):
         g1 = np.random.rand(self.npix)
         g2 = np.random.rand(self.npix)
         w = np.ones(self.npix)
@@ -127,7 +127,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
         self.assertAlmostEqual(M_a[0], expected_M_a)
 
-    def test_get_aperture_shear_missing_backend_kernel_raises(self):
+    def test_aperture_shear_single_missing_backend_kernel_raises(self):
         class IncompleteBackend:
             name = "numpy"
 
@@ -139,7 +139,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 np.ones(self.npix),
             )
 
-    def test_get_aperture_density(self):
+    def test_aperture_density_single(self):
         """Test the aperture_density_single method for spin-0 fields."""
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
@@ -160,7 +160,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             float(self.corr.backend.to_numpy(aperture_density)[0]), expected
         )
 
-    def test_get_aperture_density_non_numpy_backend_path(self):
+    def test_aperture_density_single_non_numpy_backend_path(self):
         """Covers non-numpy backend execution path for scalar aperture."""
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
@@ -198,7 +198,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         )
         self.assertAlmostEqual(aperture_density[0], expected)
 
-    def test_get_aperture_density_missing_backend_kernel_raises(self):
+    def test_aperture_density_single_missing_backend_kernel_raises(self):
         """Missing scalar aperture kernel should raise a clear runtime error."""
 
         class IncompleteBackend:
@@ -208,7 +208,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "aperture-density kernel"):
             self.corr.aperture_density_single(np.random.rand(self.npix), np.ones(self.npix))
 
-    def test_get_aperture_density_numpy_backend_path(self):
+    def test_aperture_density_single_numpy_backend_path(self):
         """Explicitly cover numpy backend path for scalar aperture."""
 
         class NumpyBackend:
@@ -345,7 +345,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 np.testing.assert_allclose(self.corr.Q_val[i], new_corr.Q_val[i])
                 np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
                 
-    def test_prepare_and_get_full_tomo_shear(self):
+    def test_prepare_and_shear(self):
         """Test prepare and shear methods."""
         # Calculate pairs first
         with patch('healpy.query_disc') as mock_query_disc, \

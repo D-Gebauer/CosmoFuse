@@ -20,6 +20,7 @@ from typing import Any, Optional, Sequence, Tuple, Union
 import numpy as np
 from numba import njit, prange
 
+from .threepoint_kernels import _cpu_3pcf_multipoles, build_cupy_3pcf_multipoles_kernel
 from .utils import live_object_serial
 
 logger = logging.getLogger(__name__)
@@ -2398,6 +2399,7 @@ class Backend:
         kernel_3x2pt_tomo_aperture: Optional[Any] = None,
         kernel_3x2pt_tomo_pairs: Optional[Any] = None,
         degrade_rows_kernel: Optional[Any] = None,
+        kernel_3pcf_multipoles: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.module = module
@@ -2428,6 +2430,8 @@ class Backend:
         # Fused static-treecode row degrade (None on CPU / without a
         # raw compiler; the sparse chain is then used instead).
         self.degrade_rows_kernel = degrade_rows_kernel
+        # Step 1 of the multipole three-point estimator (Global3PCF).
+        self.kernel_3pcf_multipoles = kernel_3pcf_multipoles
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -2664,6 +2668,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,
             kernel_density_shear_tomo_vectorized=_cpu_density_shear_tomo_vectorized_kernel,
             kernel_3x2pt_tomo_fused=_cpu_3x2pt_tomo_fused_kernel,
+            kernel_3pcf_multipoles=_cpu_3pcf_multipoles,
         )
 
     elif device_type == 'gpu':
@@ -2694,6 +2699,7 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 kernel_3x2pt_tomo_aperture=_build_cupy_3x2pt_tomo_aperture_kernel(cupy),
                 kernel_3x2pt_tomo_pairs=_build_cupy_3x2pt_tomo_pairs_kernel(cupy),
                 degrade_rows_kernel=_build_cupy_degrade_rows_kernel(cupy),
+                kernel_3pcf_multipoles=build_cupy_3pcf_multipoles_kernel(cupy),
             )
         except ImportError:
             if device == 'auto':
