@@ -57,7 +57,7 @@ def pack_patch(
 
     Args:
         rows: (2, npairs) row identifiers, sorted by angular bin.  Device
-            row indices in :meth:`PatchCorrelation.prepare`, global ids (pixel /
+            row indices in :meth:`Integrated3PCF.prepare`, global ids (pixel /
             virtual-row) when packing the host arrays; the global ordering
             of the two agrees, so the packed payload is the same either way
             and only ``blocks`` changes meaning.

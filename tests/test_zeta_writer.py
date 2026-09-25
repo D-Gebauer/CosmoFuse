@@ -7,7 +7,7 @@ What has to hold:
   the estimator (it cannot: zeta averages over patches, not over maps);
 * the three input routes -- reduce on device, reduce in the writer thread
   (multi-GPU / CPU), and no reduction at all -- agree bitwise;
-* a MultiDevicePatchCorrelation works unchanged, on the CPU-reduction route;
+* a MultiDeviceIntegrated3PCF works unchanged, on the CPU-reduction route;
 * the flushed prefix survives a crash, and `resume` continues from it;
 * failures in the writer thread reach the caller instead of being swallowed.
 """
@@ -25,8 +25,8 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import PatchCorrelation, ZetaWriter, calculate_all_zetas
-from CosmoFuse.multi_device import MultiDevicePatchCorrelation
+from CosmoFuse import Integrated3PCF, ZetaWriter, calculate_all_zetas
+from CosmoFuse.multi_device import MultiDeviceIntegrated3PCF
 
 NSIDE = 16
 NPIX = hp.nside2npix(NSIDE)
@@ -38,7 +38,7 @@ def make_corr(devices=None, n_patches=4):
     rng = np.random.default_rng(11)
     phi = rng.uniform(0.2, 1.1, size=n_patches)
     theta = rng.uniform(0.7, 1.05, size=n_patches)
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         NSIDE, phi, theta,
         nbins=3, theta_min=100, theta_max=400, patch_size=250, theta_Q=250,
         mask=mask, map_precision="float64", rotation_precision="float64",
@@ -93,20 +93,26 @@ def read_zetas(path, **kw):
         )
 
 
+def _on_device(result, DeviceArray):
+    """The same result with every array wrapped as a (fake) device array."""
+    import dataclasses
+
+    return dataclasses.replace(
+        result, **{k: np.asarray(v).view(DeviceArray) for k, v in result.fields().items()}
+    )
+
+
 class ZetaWriterBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.corr = make_corr()
         cls.maps = make_maps(cls.corr)
-        cls.results = [
-            cls.corr.shear(g, w, return_device=False)
-            for g, w in cls.maps
-        ]
+        cls.results = [cls.corr.gg(g, w, return_device=False) for g, w in cls.maps]
         # the reference: every map-set stacked, reduced in one go
         cls.reference = calculate_all_zetas(
-            M_a=np.stack([np.asarray(r[0]) for r in cls.results]),
-            xi_p=np.stack([np.asarray(r[1]) for r in cls.results]),
-            xi_m=np.stack([np.asarray(r[2]) for r in cls.results]),
+            M_a=np.stack([np.asarray(r.M_a) for r in cls.results]),
+            xi_p=np.stack([np.asarray(r.xi_p) for r in cls.results]),
+            xi_m=np.stack([np.asarray(r.xi_m) for r in cls.results]),
         )
 
     def setUp(self):
@@ -127,7 +133,7 @@ class TestStreamedReduction(ZetaWriterBase):
     def test_streamed_zeta_equals_a_single_batch_reduction(self):
         with ZetaWriter(self.path, self.corr, flush_every=2) as out:
             for r in self.results:
-                out.submit_shear(r)
+                out.submit(r)
             self.assertEqual(out.n_submitted, len(self.results))
         got, attrs, n_flushed = read_zetas(self.path)
         self.assert_matches_reference(got)
@@ -144,13 +150,13 @@ class TestStreamedReduction(ZetaWriterBase):
         with patch.dict(sys.modules, {"cupy": mod}):
             with ZetaWriter(dev_path, self.corr) as out:
                 for r in self.results:
-                    out.submit_shear(tuple(np.asarray(a).view(DeviceArray) for a in r))
+                    out.submit(_on_device(r, DeviceArray))
         device_got, _, _ = read_zetas(dev_path)
         self.assert_matches_reference(device_got)
 
         with ZetaWriter(self.path, self.corr) as out:
             for r in self.results:
-                out.submit_shear(r)
+                out.submit(r)
         host_got, _, _ = read_zetas(self.path)
         for key in host_got:
             self.assertTrue(np.array_equal(device_got[key], host_got[key]), key)
@@ -165,22 +171,20 @@ class TestStreamedReduction(ZetaWriterBase):
         )[1]
         with patch.dict(sys.modules, {"cupy": mod}):
             with ZetaWriter(self.path, self.corr) as out:
-                out.submit_shear(
-                    tuple(np.asarray(a).view(DeviceArray) for a in self.results[0])
-                )
-        raw_size = sum(np.asarray(a).size for a in self.results[0])
+                out.submit(_on_device(self.results[0], DeviceArray))
+        raw_size = sum(np.asarray(a).size for a in self.results[0].fields().values())
         self.assertGreater(raw_size, 0)
         self.assertLess(sum(copied), raw_size)
 
     def test_raw_mode_stores_the_per_patch_arrays(self):
         with ZetaWriter(self.path, self.corr, reduce="none") as out:
             for r in self.results:
-                out.submit_shear(r)
+                out.submit(r)
         with h5py.File(self.path, "r") as f:
             self.assertNotIn("zeta", f)
-            for name, idx in (("M_a", 0), ("xi_p", 1), ("xi_m", 2)):
+            for name in ("M_a", "xi_p", "xi_m"):
                 stored = f["raw"][name][:]
-                want = np.stack([np.asarray(r[idx]) for r in self.results])
+                want = np.stack([np.asarray(getattr(r, name)) for r in self.results])
                 self.assertTrue(np.array_equal(stored, want), name)
         # ... and zeta is still recoverable from them
         with h5py.File(self.path, "r") as f:
@@ -193,7 +197,7 @@ class TestStreamedReduction(ZetaWriterBase):
 
     def test_provenance_is_written(self):
         with ZetaWriter(self.path, self.corr) as out:
-            out.submit_shear(self.results[0])
+            out.submit(self.results[0])
         _, attrs, _ = read_zetas(self.path)
         for key in ("nside", "nbins", "n_patches", "theta_min", "theta_max",
                     "level_table", "row_pix_hash", "cosmofuse_version"):
@@ -208,10 +212,10 @@ class TestMultiDevice(ZetaWriterBase):
 
     def test_group_matches_single_device(self):
         multi = make_corr(devices=["cpu", "cpu"])
-        self.assertIsInstance(multi, MultiDevicePatchCorrelation)
+        self.assertIsInstance(multi, MultiDeviceIntegrated3PCF)
         with ZetaWriter(self.path, multi) as out:
             for g, w in self.maps:
-                out.submit_shear(multi.shear(g, w))
+                out.submit(multi.gg(g, w))
         got, attrs, _ = read_zetas(self.path)
         self.assert_matches_reference(got)
         # provenance survives the __getattr__ forwarding of the group
@@ -223,14 +227,14 @@ class TestMultiDevice(ZetaWriterBase):
         with ZetaWriter(self.path, multi) as out:
             item = out._prepare({"M_a": np.zeros((2, self.corr.n_patches))})
             self.assertIn("raw", item)      # not reduced on the calling thread
-            out.submit_shear(multi.shear(*self.maps[0]))
+            out.submit(multi.gg(*self.maps[0]))
 
 
 class TestDurability(ZetaWriterBase):
     def test_n_flushed_tracks_the_durable_prefix(self):
         with ZetaWriter(self.path, self.corr, flush_every=2) as out:
             for r in self.results[:3]:
-                out.submit_shear(r)
+                out.submit(r)
             out._queue.join()
             self.assertEqual(out.n_written, 3)
         _, _, n_flushed = read_zetas(self.path)
@@ -247,7 +251,7 @@ class TestDurability(ZetaWriterBase):
             corr = make_corr()
             out = ZetaWriter({self.path!r}, corr, flush_every=2)
             for g, w in make_maps(corr):
-                out.submit_shear(corr.shear(g, w, return_device=False))
+                out.submit(corr.gg(g, w, return_device=False))
             out._queue.join()
             os._exit(1)                      # no close(), no flush of the tail
         """)
@@ -264,7 +268,7 @@ class TestDurability(ZetaWriterBase):
         # resuming truncates anything past the last flush and continues
         with ZetaWriter(self.path, self.corr, flush_every=2, resume=True) as out:
             for r in self.results[n_flushed:]:
-                out.submit_shear(r)
+                out.submit(r)
         got, _, _ = read_zetas(self.path)
         self.assert_matches_reference(got)
 
@@ -273,7 +277,7 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
     def test_backpressure_does_not_deadlock(self):
         with ZetaWriter(self.path, self.corr, depth=1, flush_every=1) as out:
             for r in self.results * 3:
-                out.submit_shear(r)
+                out.submit(r)
         got, _, n = read_zetas(self.path)
         self.assertEqual(n, 3 * len(self.results))
 
@@ -282,18 +286,18 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
         fine but cannot be appended: 3 bins give 10 zeta triplets where the
         file holds 4.  The writer thread must not swallow that."""
         npatch, nbins = self.corr.n_patches, self.corr.nbins
-        other = (
-            np.zeros((3, npatch)),                 # M_a, 3 tomographic bins
-            np.zeros((6, npatch, nbins)),          # xi_p
-            np.zeros((6, npatch, nbins)),          # xi_m
+        other = dict(
+            M_a=np.zeros((3, npatch)),             # 3 tomographic bins
+            xi_p=np.zeros((6, npatch, nbins)),
+            xi_m=np.zeros((6, npatch, nbins)),
         )
         writer = ZetaWriter(self.path, self.corr)
-        writer.submit_shear(self.results[0])
+        writer.submit(self.results[0])
         writer._queue.join()
-        writer.submit_shear(other)                 # fails in the thread
+        writer.submit(**other)               # fails in the thread
         writer._queue.join()
         with self.assertRaisesRegex(RuntimeError, "thread failed"):
-            writer.submit_shear(self.results[1])
+            writer.submit(self.results[1])
         with self.assertRaisesRegex(RuntimeError, "thread failed"):
             writer.close()
         self.assertIsNone(writer._file)            # handle released anyway
@@ -306,25 +310,24 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
                 out.submit(xi_p=np.zeros((3, 4, 3)))
             with self.assertRaisesRegex(ValueError, "annular field"):
                 out.submit(M_a=np.zeros((2, 4)))
-            out.submit_shear(self.results[0])
+            out.submit(self.results[0])
 
-    def test_rejects_bad_tuple_lengths(self):
+    def test_result_or_fields_not_both(self):
         with ZetaWriter(self.path, self.corr) as out:
-            with self.assertRaisesRegex(ValueError, "6-tuple"):
-                out.submit_three_by_two_pt(self.results[0])
-            with self.assertRaisesRegex(ValueError, "3-tuple"):
-                out.submit_shear(self.results[0][:2])
-            out.submit_shear(self.results[0])
+            with self.assertRaisesRegex(ValueError, "not both"):
+                out.submit(self.results[0], M_a=self.results[0].M_a)
+            out.submit(**self.results[0].fields())      # keyword form still works
+            out.submit(self.results[0])
 
 
 class TestSWMR(ZetaWriterBase):
     def test_reader_follows_a_growing_file(self):
         with ZetaWriter(self.path, self.corr, flush_every=1, swmr=True) as out:
-            out.submit_shear(self.results[0])
+            out.submit(self.results[0])
             out._queue.join()
             with h5py.File(self.path, "r", swmr=True, libver="latest") as f:
                 self.assertEqual(int(f["n_flushed"][()]), 1)
-            out.submit_shear(self.results[1])
+            out.submit(self.results[1])
             out._queue.join()
             with h5py.File(self.path, "r", swmr=True, libver="latest") as f:
                 f["n_flushed"].refresh()
@@ -334,7 +337,7 @@ class TestSWMR(ZetaWriterBase):
 
     def test_default_is_off(self):
         with ZetaWriter(self.path, self.corr) as out:
-            out.submit_shear(self.results[0])
+            out.submit(self.results[0])
             self.assertFalse(out.swmr)
         # a plain reader opens it with no special flags
         with h5py.File(self.path, "r") as f:

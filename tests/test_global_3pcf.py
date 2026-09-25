@@ -18,7 +18,7 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse import Component, Global3PCF, ThreePointMultipoles
+from CosmoFuse import Component, Global3PCF, ThreePointResult
 from CosmoFuse.threepoint_kernels import build_cupy_3pcf_multipoles_kernel
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
@@ -74,14 +74,14 @@ class TestBruteForce(unittest.TestCase):
                 self.assertLess(_rel(res.norm[c.label], norm[c.label]), 1e-12)
 
     def test_shear(self):
-        res = self.est.shear(self.g, self.w)
+        res = self.est.ggg(self.g, self.w)
         self.assertEqual([c.label for c in res.components], ["gamma0", "gamma1", "gamma2", "gamma3"])
         self.assertEqual(res.num["gamma0"].shape, (2 * N_MAX + 1, 2, 2, 2, 3, 3))
         self._check(res, {"g": (self.g[:, :, self.pix], self.w[:, self.pix], 2)})
 
     def test_density(self):
-        res = self.est.density(self.d, self.w)
-        self._check(res, {"d": (self.d[:, self.pix], self.w[:, self.pix], 0)})
+        res = self.est.kkk(self.d, self.w)
+        self._check(res, {"k": (self.d[:, self.pix], self.w[:, self.pix], 0)})
 
     def test_mixed_fields(self):
         comps = [
@@ -99,6 +99,15 @@ class TestBruteForce(unittest.TestCase):
                 "g": (self.g[:, :, self.pix], w2[:, self.pix], 2),
             },
         )
+
+    def test_kgg_and_kkg(self):
+        w2 = self.w[::-1].copy()
+        fields = {
+            "k": (self.d[:, self.pix], self.w[:, self.pix], 0),
+            "g": (self.g[:, :, self.pix], w2[:, self.pix], 2),
+        }
+        self._check(self.est.kgg(self.d, self.g, self.w, w2), fields)
+        self._check(self.est.kkg(self.d, self.g, self.w, w2), fields)
 
     def test_position_angle_convention(self):
         """The pair finder's full angles equal the tangent-frame angles."""
@@ -121,37 +130,37 @@ class TestInvariance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mask, cls.g, cls.w, cls.d = _setup()
-        cls.ref = _estimator(cls.mask, tile_nside=1, centre_chunk=4096).shear(cls.g, cls.w)
+        cls.ref = _estimator(cls.mask, tile_nside=1, centre_chunk=4096).ggg(cls.g, cls.w)
 
     def test_tiles_and_chunks(self):
         for tile_nside, chunk in ((2, 5), (4, 1000), (8, 33)):
             with self.subTest(tile_nside=tile_nside, chunk=chunk):
                 est = _estimator(self.mask, tile_nside=tile_nside, centre_chunk=chunk)
-                res = est.shear(self.g, self.w)
+                res = est.ggg(self.g, self.w)
                 for label in res.num:
                     self.assertLess(_rel(res.num[label], self.ref.num[label]), 1e-13)
                     self.assertLess(_rel(res.norm[label], self.ref.norm[label]), 1e-13)
 
     def test_row_space_input(self):
         est = _estimator(self.mask)
-        full = est.shear(self.g, self.w)
-        rows = est.shear(est.to_row_space(self.g), est.to_row_space(self.w))
+        full = est.ggg(self.g, self.w)
+        rows = est.ggg(est.to_row_space(self.g), est.to_row_space(self.w))
         for label in full.num:
             np.testing.assert_array_equal(full.num[label], rows.num[label])
 
     def test_flip_g1(self):
         est = _estimator(self.mask)
-        flipped = est.shear(self.g, self.w, flip_g1=True)
+        flipped = est.ggg(self.g, self.w, flip_g1=True)
         g = self.g.copy()
         g[:, 0] *= -1
-        ref = est.shear(g, self.w)
+        ref = est.ggg(g, self.w)
         for label in ref.num:
             np.testing.assert_array_equal(flipped.num[label], ref.num[label])
 
     def test_norm_cache_follows_weights(self):
         est = _estimator(self.mask)
-        a = est.shear(self.g, self.w)
-        b = est.shear(self.g, self.w * 2.0)
+        a = est.ggg(self.g, self.w)
+        b = est.ggg(self.g, self.w * 2.0)
         np.testing.assert_allclose(b.norm["gamma0"], 8.0 * a.norm["gamma0"], rtol=1e-13)
 
 
@@ -163,7 +172,7 @@ class TestPairFiles(unittest.TestCase):
 
         mask, g, w, _ = _setup()
         est = _estimator(mask)
-        ref = est.shear(g, w)
+        ref = est.ggg(g, w)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "p3.h5")
             est.save_pairs(path)
@@ -172,7 +181,7 @@ class TestPairFiles(unittest.TestCase):
                 other = Global3PCF(NSIDE, mask=mask, nbins=3, theta_min=240, theta_max=900,
                                    n_max=N_MAX, tile_nside=2, device="cpu")
             other.load_pairs(path)
-            res = other.shear(g, w)
+            res = other.ggg(g, w)
             for label in ref.num:
                 np.testing.assert_array_equal(res.num[label], ref.num[label])
             with warnings.catch_warnings():
@@ -189,7 +198,7 @@ class TestBinning(unittest.TestCase):
     def test_coefficients(self):
         n = np.arange(-5, 6)
         edges = np.array([-2.0, 0.3, 1.7])
-        c = ThreePointMultipoles._phi_coefficients(n, edges)
+        c = ThreePointResult._phi_coefficients(n, edges)
         phi = np.linspace(edges[0], edges[1], 200001)
         for i, m in enumerate(n):
             ref = np.trapezoid(np.exp(-1j * m * phi), phi) / (2 * np.pi)
@@ -212,7 +221,7 @@ class TestBinning(unittest.TestCase):
             num = np.sum(vals[None] * np.exp(-1j * n[:, None] * phi_t[None]), axis=1)
             den = np.sum(wts[None] * np.exp(-1j * n[:, None] * phi_t[None]), axis=1)
             shape = (n.size, 1, 1, 1, 1, 1)
-            res = ThreePointMultipoles(
+            res = ThreePointResult(
                 n_max, np.array([1.0, 2.0]), (Component("x", ("a", "a", "a")),), {"a": 0},
                 {"x": num.reshape(shape)}, {"x": den.reshape(shape)},
             )
@@ -223,20 +232,20 @@ class TestBinning(unittest.TestCase):
     def test_centroid_is_a_phase(self):
         mask, g, w, d = _setup()
         est = _estimator(mask)
-        res = est.shear(g, w)
+        res = est.ggg(g, w)
         edges = np.linspace(-np.pi, np.pi, 9)
         b = res.binned(edges)
         cen = res.to_centroid(b, edges)
         for label in b:
             np.testing.assert_allclose(np.abs(cen[label]), np.abs(b[label]), rtol=1e-12, atol=0)
-        dres = est.density(d, w)
+        dres = est.kkk(d, w)
         db = dres.binned(edges)
         np.testing.assert_array_equal(dres.to_centroid(db, edges)["zeta"], db["zeta"])
 
     def test_sum_of_results(self):
         mask, g, w, _ = _setup()
         est = _estimator(mask)
-        a = est.shear(g, w)
+        a = est.ggg(g, w)
         s = a + a
         np.testing.assert_array_equal(s.num["gamma1"], 2 * a.num["gamma1"])
 
@@ -250,8 +259,8 @@ class TestEmulatedGPU(unittest.TestCase):
             with self.subTest(accumulation_precision=acc):
                 est = _estimator(mask, map_precision="float32", rotation_precision="float32",
                                  accumulation_precision=acc)
-                cpu = est.shear(g, w)
-                cpu_d = est.density(d, w)
+                cpu = est.ggg(g, w)
+                cpu_d = est.kkk(d, w)
                 be = est.backend
                 saved = (be.name, be.kernel_3pcf_multipoles, be.to_device, be.to_numpy)
                 be.name = "cupy"
@@ -261,8 +270,8 @@ class TestEmulatedGPU(unittest.TestCase):
                 est._norm_cache.clear()
                 LAUNCH_LOG.clear()
                 try:
-                    gpu = est.shear(g, w)
-                    gpu_d = est.density(d, w)
+                    gpu = est.ggg(g, w)
+                    gpu_d = est.kkk(d, w)
                 finally:
                     be.name, be.kernel_3pcf_multipoles, be.to_device, be.to_numpy = saved
                 self.assertIn("gpu_3pcf_multipoles", LAUNCH_LOG)
@@ -285,7 +294,7 @@ class TestRealGPU(unittest.TestCase):
                 gpu = Global3PCF(NSIDE, mask=mask, nbins=3, theta_min=240, theta_max=900,
                                  n_max=N_MAX, tile_nside=2, device="gpu", **kw)
                 gpu.preprocess()
-                for fn, args in (("shear", (g, w)), ("density", (d, w))):
+                for fn, args in (("ggg", (g, w)), ("kkk", (d, w))):
                     a = getattr(cpu, fn)(*args)
                     b = getattr(gpu, fn)(*args)
                     for label in a.num:

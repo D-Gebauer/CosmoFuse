@@ -25,10 +25,11 @@ import numpy as np
 import pytest
 import treecorr
 
-from CosmoFuse import PatchCorrelation
+from CosmoFuse import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
 
 from .test_gpu_kernel_emulation import emulated_gpu
+from ._results import fields_of
 
 # nside 128 with k = 2 over 100'-400' assigns the three bins to nside
 # 128 / 64 / 32: a base-resolution bin plus the full two-level chain.
@@ -46,7 +47,7 @@ def build():
     mask[rng.choice(NPIX, NPIX // 40, replace=False)] = False
     phi_c = np.array([0.30, 0.52])
     theta_c = np.array([1.48, 1.62])
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         NSIDE, phi_c, theta_c,
         nbins=NBINS, theta_min=THETA_MIN, theta_max=THETA_MAX,
         patch_size=PATCH_SIZE, theta_Q=PATCH_SIZE / 2,
@@ -86,7 +87,7 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
             (self.shear[:, 0], self.shear[:, 1]), self.w, "pairs")
         if fused:
             with emulated_gpu(corr):
-                with patch.object(PatchCorrelation, "_use_fused_degrade",
+                with patch.object(Integrated3PCF, "_use_fused_degrade",
                                   lambda self, w: True):
                     (g1, g2), w_rows = call(corr)
             corr.compute_context.Q_inds_dev = None
@@ -148,10 +149,10 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
 
         with emulated_gpu(self.corr):
             self.corr.compute_context.Q_inds_dev = None
-            with patch.object(PatchCorrelation, "_use_fused_degrade",
+            with patch.object(Integrated3PCF, "_use_fused_degrade",
                               lambda self, w: True):
-                xip, xim = self.corr.shear_shear(
-                    self.shear, self.w, flip_g1=True, return_device=False)
+                xip, xim = fields_of(self.corr.gg(
+                    self.shear, self.w, flip_g1=True, return_device=False, apertures=False), "xi_p", "xi_m")
         self.corr.compute_context.Q_inds_dev = None
         self.corr.compute_context.degrade_csr = None
 

@@ -21,7 +21,12 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -54,12 +59,12 @@ def set_tiled(corr, flag):
 
 def methods(corr, shear, w, dens, wd):
     return {
-        "shear": lambda: corr.shear(shear, w, flip_g1=True, return_device=False),
-        "density": lambda: corr.density(dens, wd, return_device=False),
-        "ggl": lambda: corr.ggl(dens, shear, wd, w, flip_g1=True, return_device=False),
-        "3x2pt": lambda: corr.three_by_two_pt(
-            shear_maps=shear, density_maps=dens, weights={"shear": w, "density": wd},
-            flip_g1=True, return_device=False),
+        "shear": lambda: fields_of(corr.gg(shear, w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"),
+        "density": lambda: fields_of(corr.kk(dens, wd, return_device=False), "M_g", "xi_g"),
+        "ggl": lambda: corr.kg(dens, shear, wd, w, flip_g1=True, return_device=False).xi_t,
+        "3x2pt": lambda: fields_of(corr.three_by_two_pt(
+            shear_maps=shear, k_maps=dens, weights={"shear": w, "density": wd},
+            flip_g1=True, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
     }
 
 
@@ -114,7 +119,7 @@ def part_a(args, out):
     for name, dev, pack in (("cpu", "cpu", False), ("cpu_packed", "cpu", True),
                             ("gpu", "gpu", False), ("gpu_packed", "gpu", True),
                             ("gpu_perrow", "gpu", False)):
-        corr = PatchCorrelation(512, phi[:n_par], theta[:n_par], device=dev, map_precision="float64",
+        corr = Integrated3PCF(512, phi[:n_par], theta[:n_par], device=dev, map_precision="float64",
                            rotation_precision="float64", pack_pairs=pack, **geo)
         corr.preprocess()
         if name == "gpu_perrow":
@@ -135,7 +140,7 @@ def part_a(args, out):
     # ---- timings on the full production patch set ---------------------------
     out["A_speed"] = {}
     for variant, pack in (("per_row", False), ("tiled", False), ("tiled_packed", True)):
-        corr = PatchCorrelation(512, phi, theta, device="gpu", map_precision="float32",
+        corr = Integrated3PCF(512, phi, theta, device="gpu", map_precision="float32",
                            accumulation_precision="float64", pack_pairs=pack, **geo)
         corr.load_pairs(pair_file)
         corr.prepare(release_host_pairs=True)
@@ -161,7 +166,7 @@ def part_b(args, out):
     for variant, pack in (("tiled", False), ("tiled_packed", True)):
         edges = np.geomspace(5.0, 250.0, 12)
         edges = edges[edges < 2 * args.Q - 5]
-        corr = PatchCorrelation(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
+        corr = Integrated3PCF(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
                            theta_max=edges[-1], patch_size=args.Q, theta_Q=args.Q, mask=mask,
                            device="gpu", map_precision="float32", accumulation_precision="float64",
                            resolution_factor=2.9, aperture_nside=512, pack_pairs=pack)

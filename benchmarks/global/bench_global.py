@@ -79,7 +79,7 @@ def main():
         sync()
         t_prep = time.perf_counter() - t
         s_dev, w_dev = cupy.asarray(shear), cupy.asarray(w)
-        _, t_call, _ = timed(lambda: g2.shear(s_dev, w_dev, flip_g1=True), args.reps + 1)
+        _, t_call, _ = timed(lambda: g2.gg(s_dev, w_dev, flip_g1=True), args.reps + 1)
         report["global2pcf"] = {
             "pairs": g2.ntotpairs, "tiles": g2.n_tiles, "tile_nside": g2.tile_nside,
             "levels": g2.level_table["nside"].tolist(),
@@ -103,8 +103,8 @@ def main():
         t_prep = time.perf_counter() - t
         s_dev, w_dev = cupy.asarray(shear), cupy.asarray(w)
         pool = cupy.get_default_memory_pool()
-        _, t_first, _ = timed(lambda: g3.shear(s_dev, w_dev, flip_g1=True), 1)  # + norm
-        _, t_call, ts = timed(lambda: g3.shear(s_dev, w_dev, flip_g1=True), args.reps)
+        _, t_first, _ = timed(lambda: g3.ggg(s_dev, w_dev, flip_g1=True), 1)  # + norm
+        _, t_call, ts = timed(lambda: g3.ggg(s_dev, w_dev, flip_g1=True), args.reps)
         report["global3pcf"] = {
             "ordered_pairs": g3.ntotpairs, "tiles": g3.n_tiles, "tile_nside": g3.tile_nside,
             "n_max": args.n_max, "nbins": args.nbins3, "nz": args.nz, "chunk": args.chunk,

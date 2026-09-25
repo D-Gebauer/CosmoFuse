@@ -31,6 +31,11 @@ import time
 import healpy as hp
 import numpy as np
 
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
+
 MAP_DIR = "/e/ocean1/users/dgebauer/sbi/shear_maps/grid_baryonified/4BINS/"
 W_FILE = "/e/ocean1/users/dgebauer/sbi/shear_maps/SumOfWeights_512.npy"
 CENTER_DIR = "/e/ocean1/users/dgebauer/sbi/CosmoFuse/Q{r}/"
@@ -39,7 +44,7 @@ NSIDE = 512
 
 
 def build_correlation(args, resolution_factor, aperture_nside=None):
-    from CosmoFuse import PatchCorrelation
+    from CosmoFuse import Integrated3PCF
 
     mask = hp.ud_grade(hp.read_map(os.path.expanduser(MASK_FILE)), NSIDE)
     map_inds = np.where(mask != 0)[0]
@@ -50,7 +55,7 @@ def build_correlation(args, resolution_factor, aperture_nside=None):
     edges = np.geomspace(args.theta_min, args.theta_max, args.theta_bins + 1)
     edges = edges[edges < 2 * args.radius - 5]
 
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         NSIDE,
         phi,
         theta,
@@ -105,9 +110,8 @@ def measure(args):
                 if args.f16:   # T11: what a float16 map archive would deliver
                     shear = shear.astype(np.float16).astype(np.float32)
                 t1 = time.time()
-                out = corr.shear(
-                    shear, w, flip_g1=True, return_device=False
-                )
+                out = fields_of(corr.gg(
+                    shear, w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
                 wall += time.time() - t1
                 M_a.append(np.asarray(out[0]))
                 xi_p.append(np.asarray(out[1]))

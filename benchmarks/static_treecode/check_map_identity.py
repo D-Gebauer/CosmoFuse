@@ -1,6 +1,11 @@
 """M_ap must not depend on resolution_factor when the aperture level is the base."""
 import h5py, healpy as hp, numpy as np
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 SBI = "/e/ocean1/users/dgebauer/sbi"
 nside = 512
 des_map = hp.ud_grade(hp.read_map("/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"), nside)
@@ -15,13 +20,13 @@ cut = np.load(f"{SBI}/shear_maps/grid_baryonified/4BINS/gamma_0000.npy").reshape
 w = np.load(f"{SBI}/shear_maps/SumOfWeights_512.npy")
 res = {}
 for name, k, load in (("file", None, True), ("fresh_full", None, False), ("k2.9", 2.9, False)):
-    corr = PatchCorrelation(nside, phi, theta, device="gpu", map_precision="float32", accumulation_precision="float64", resolution_factor=k, **geo)
+    corr = Integrated3PCF(nside, phi, theta, device="gpu", map_precision="float32", accumulation_precision="float64", resolution_factor=k, **geo)
     if load:
         corr.load_pairs(pair_file, stop_ind=60)
     else:
         corr.preprocess()
     ww = np.ascontiguousarray(w[:, corr.row_pix], dtype=np.float32)
-    res[name] = [np.asarray(o, dtype=np.float64) for o in corr.shear(cut, ww, flip_g1=True, return_device=False)]
+    res[name] = [np.asarray(o, dtype=np.float64) for o in fields_of(corr.gg(cut, ww, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")]
 for a, b in (("fresh_full", "k2.9"), ("file", "fresh_full")):
     print(a, "vs", b, "M_a identical:", np.array_equal(res[a][0], res[b][0]), " max rel diff M_a: %.2e" % (np.max(np.abs(res[a][0]-res[b][0]))/np.max(np.abs(res[b][0]))),
           "| xi+ base bins identical:", np.array_equal(res[a][1][..., :3], res[b][1][..., :3]), " max rel diff: %.2e" % (np.max(np.abs(res[a][1][..., :3]-res[b][1][..., :3]))/np.max(np.abs(res[b][1][..., :3]))))

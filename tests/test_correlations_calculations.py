@@ -1,4 +1,4 @@
-"""Tests for the PatchCorrelation class."""
+"""Tests for the Integrated3PCF class."""
 import sys
 import tempfile
 import unittest
@@ -12,11 +12,12 @@ from scipy.special import binom
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+from ._results import fields_of
 
 
 class TestCorrelationCalculations(unittest.TestCase):
-    """Test the PatchCorrelation class calculation methods."""
+    """Test the Integrated3PCF class calculation methods."""
 
     def setUp(self):
         """Set up test fixtures."""
@@ -31,8 +32,8 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.theta_Q = 30.0
         self.npix = 12 * self.nside**2
 
-        # Create a PatchCorrelation instance
-        self.corr = PatchCorrelation(
+        # Create a Integrated3PCF instance
+        self.corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -54,12 +55,12 @@ class TestCorrelationCalculations(unittest.TestCase):
 
 
     def test_aperture_shear_single(self):
-        """Test the aperture_shear_single method."""
+        """Test the _m_a_single method."""
         g1 = np.random.rand(self.npix)
         g2 = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        M_a = self.corr.aperture_shear_single(g1, g2, w)
+        M_a = self.corr._m_a_single(g1, g2, w)
 
         self.assertEqual(M_a.shape, (1,))
         
@@ -116,7 +117,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                 out_den[:] = weights[Q_inds]
 
         self.corr.backend = FakeBackend()
-        M_a = self.corr.aperture_shear_single(g1, g2, w)
+        M_a = self.corr._m_a_single(g1, g2, w)
 
         Q_inds = self.corr.Q_inds[0]
         Q_cos = self.corr.Q_cos[0]
@@ -133,18 +134,18 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = IncompleteBackend()
         with self.assertRaisesRegex(RuntimeError, "aperture-shear kernel"):
-            self.corr.aperture_shear_single(
+            self.corr._m_a_single(
                 np.random.rand(self.npix),
                 np.random.rand(self.npix),
                 np.ones(self.npix),
             )
 
     def test_aperture_density_single(self):
-        """Test the aperture_density_single method for spin-0 fields."""
+        """Test the _m_g_single method for spin-0 fields."""
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        aperture_density = self.corr.aperture_density_single(delta, w)
+        aperture_density = self.corr._m_g_single(delta, w)
 
         self.assertEqual(aperture_density.shape, (1,))
 
@@ -189,7 +190,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = FakeBackend()
 
-        aperture_density = self.corr.aperture_density_single(delta, w)
+        aperture_density = self.corr._m_g_single(delta, w)
         Q_inds = self.corr.Q_inds[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]
@@ -206,7 +207,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = IncompleteBackend()
         with self.assertRaisesRegex(RuntimeError, "aperture-density kernel"):
-            self.corr.aperture_density_single(np.random.rand(self.npix), np.ones(self.npix))
+            self.corr._m_g_single(np.random.rand(self.npix), np.ones(self.npix))
 
     def test_aperture_density_single_numpy_backend_path(self):
         """Explicitly cover numpy backend path for scalar aperture."""
@@ -238,7 +239,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.corr.backend = NumpyBackend()
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
-        result = self.corr.aperture_density_single(delta, w)
+        result = self.corr._m_g_single(delta, w)
         self.assertEqual(result.shape, (1,))
 
     def test_get_pairs_patch_M_a(self):
@@ -321,7 +322,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self.corr.save_pairs(tmp.name)
 
-            new_corr = PatchCorrelation(
+            new_corr = Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -376,7 +377,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         shear_maps = np.random.rand(nzbins, 2, self.npix)
         w = np.ones((nzbins, self.npix))
 
-        M_ap, xip, xim = self.corr.shear(shear_maps, w)
+        M_ap, xip, xim = fields_of(self.corr.gg(shear_maps, w), "M_a", "xi_p", "xi_m")
 
         self.assertEqual(M_ap.shape, (nzbins, self.corr.n_patches))
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))

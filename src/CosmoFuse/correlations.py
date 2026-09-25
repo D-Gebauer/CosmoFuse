@@ -30,6 +30,7 @@ from .correlation_helpers import (
 )
 from .packing import block_edges, decode_angles, pack_patch, unpack_rows
 from .pair_finder import PairFinder
+from .results import IntegratedResult
 from .treecode import (
     TreecodeGeometry,
     assign_levels,
@@ -84,7 +85,7 @@ def _compute_aperture_shear_all_patches(
     Q_patch_area: np.ndarray,
 ) -> np.ndarray:
     n_patches = Q_offsets.size - 1
-    aperture_shear = np.zeros(n_patches, dtype=g1.dtype)
+    m_a = np.zeros(n_patches, dtype=g1.dtype)
     for patch_idx in range(n_patches):
         start = Q_offsets[patch_idx]
         end = Q_offsets[patch_idx + 1]
@@ -96,8 +97,8 @@ def _compute_aperture_shear_all_patches(
             weight = Q_w[idx]
             sum_w += weight
             sum_gtw += weight * gt * Q_val[i]
-        aperture_shear[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
-    return aperture_shear
+        m_a[patch_idx] = Q_patch_area[patch_idx] * sum_gtw / sum_w
+    return m_a
 
 
 def _compute_pairs_impl(
@@ -329,7 +330,7 @@ def _normalize_precision(
     return np.dtype(allowed[precision_name])
 
 
-class PatchCorrelation:
+class Integrated3PCF:
     """Base class for all correlation functions.
 
     This class contains methods for finding pairs and their angles, as well as
@@ -359,11 +360,11 @@ class PatchCorrelation:
         """``device=[0, 1, ...]`` builds a patch-parallel multi-GPU group.
 
         A single device (the default) is unaffected: the instance returned
-        is an ordinary :class:`PatchCorrelation`.
+        is an ordinary :class:`Integrated3PCF`.
         """
         device = kwargs.get("device", args[10] if len(args) > 10 else None)
         if isinstance(device, (list, tuple, set)):
-            from .multi_device import MultiDevicePatchCorrelation
+            from .multi_device import MultiDeviceIntegrated3PCF
 
             devices = list(device)
             kwargs.pop("device", None)
@@ -371,7 +372,7 @@ class PatchCorrelation:
                 args = args[:10]
             if len(devices) == 1:  # a one-element list is just that device
                 return super().__new__(cls)
-            return MultiDevicePatchCorrelation(*args, devices=devices, **kwargs)
+            return MultiDeviceIntegrated3PCF(*args, devices=devices, **kwargs)
         return super().__new__(cls)
 
     def __init__(
@@ -397,7 +398,7 @@ class PatchCorrelation:
         pack_pairs: bool = False,
         pack_host_pairs: bool = False,
     ) -> None:
-        """Initialize the PatchCorrelation class with validation.
+        """Initialize the Integrated3PCF class with validation.
 
         Args:
             nside: HEALPix resolution parameter
@@ -448,9 +449,9 @@ class PatchCorrelation:
                 by ~1e-5 of its statistical error and does not bias it.
                 Pair files and host arrays stay exact.  On GPU backends the
                 packed geometry serves every tomographic method
-                (``shear_shear``, ``density_density``, ``density_shear``, ``shear``, ``density``, ``ggl``, ``three_by_two_pt``)
-                and the aperture statistics; the single-map ``*_single``
-                methods need the unpacked geometry.
+                (``gg``, ``kk``, ``kg``, ``three_by_two_pt``)
+                and the aperture statistics; only the private single-map
+                reference methods need the unpacked geometry.
             pair_search_precision: Precision of the pair *search*
                 (separations, binning, position angles); the stored
                 rotation factors always use ``rotation_precision``.
@@ -592,7 +593,7 @@ class PatchCorrelation:
 
         if isinstance(device, (list, tuple, set)):
             # a single-element device list is just that device; several
-            # devices are handled by MultiDevicePatchCorrelation (see __new__)
+            # devices are handled by MultiDeviceIntegrated3PCF (see __new__)
             device = list(device)[0]
         self.backend = get_backend(device)
         self.device = device
@@ -633,8 +634,8 @@ class PatchCorrelation:
         aperture_filter: Optional[Callable[..., Any]] = None,
         filter_weighting: str = "abs",
         **kwargs: Any,
-    ) -> "PatchCorrelation":
-        """Construct a PatchCorrelation with patch centres selected from a mask.
+    ) -> "Integrated3PCF":
+        """Construct a Integrated3PCF with patch centres selected from a mask.
 
         Convenience wrapper around
         :func:`CosmoFuse.utils.select_patch_centers`: candidate centres on
@@ -919,7 +920,7 @@ class PatchCorrelation:
 
     @staticmethod
     def tomo_combinations(
-        nzbins: int, gc_auto_correlations_only: bool = False
+        nzbins: int, auto_only: bool = False
     ) -> List[Tuple[int, int]]:
         """Row order of the symmetric tomographic outputs.
 
@@ -927,10 +928,10 @@ class PatchCorrelation:
         ``(ncomb, n_patches, nbins)``; this is what row ``k`` means.  The
         order is the upper triangle including the diagonal, row-major::
 
-            >>> PatchCorrelation.tomo_combinations(3)
+            >>> Integrated3PCF.tomo_combinations(3)
             [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
 
-        With ``gc_auto_correlations_only=True`` (``density_density``
+        With ``auto_only=True`` (``kk(auto_only=True)``
         and the ξ_g section of ``three_by_two_pt``) only the diagonal is
         measured and the vector is ``nzbins`` rows, not ``nzbins(nzbins+1)/2``
         -- the silent shape change that makes mislabelling easy.
@@ -938,29 +939,29 @@ class PatchCorrelation:
         Mislabelling a data vector is not caught by any shape check, so this
         is the accessor to index it by rather than to rederive.
         """
-        if gc_auto_correlations_only:
+        if auto_only:
             return [(i, i) for i in range(int(nzbins))]
         return [
             (i, j) for i in range(int(nzbins)) for j in range(i, int(nzbins))
         ]
 
     @staticmethod
-    def ggl_combinations(
+    def kg_combinations(
         nlens_bins: int,
         nsource_bins: int,
-        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
     ) -> List[Tuple[int, int]]:
         """Row order of ``xi_t`` as ``(lens_bin, source_bin)``.
 
         The full cartesian product, lens-major, unless an explicit
-        ``ggl_bin_combinations`` selection is passed -- in which case the
+        ``combinations`` selection is passed -- in which case the
         rows are exactly that selection, in the order given::
 
-            >>> PatchCorrelation.ggl_combinations(2, 3)
+            >>> Integrated3PCF.kg_combinations(2, 3)
             [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
         """
-        if ggl_bin_combinations is not None:
-            return [(int(a), int(b)) for a, b in ggl_bin_combinations]
+        if combinations is not None:
+            return [(int(a), int(b)) for a, b in combinations]
         return [
             (i, j)
             for i in range(int(nlens_bins))
@@ -989,14 +990,14 @@ class PatchCorrelation:
 
         ``(z_center, annulus_row)``, centre-major, where ``annulus_row``
         indexes the 2PCF's own combination list --
-        :meth:`tomo_combinations` for ξ±/ξ_g, :meth:`ggl_combinations` for
+        :meth:`tomo_combinations` for ξ±/ξ_g, :meth:`kg_combinations` for
         ξ_t.  This is the layout of ``zeta_g_plus``, ``zeta_g_minus``,
         ``zeta_a_g``, ``zeta_g_t`` and ``zeta_a_t`` whenever the centre and
         the annulus are built from different samples -- which is every
         6x2pt run with ``n_source != n_lens``, and, with an explicit
         ``symmetric=False``, also when the two counts happen to match::
 
-            >>> PatchCorrelation.zeta_cross_triplets(2, 3)
+            >>> Integrated3PCF.zeta_cross_triplets(2, 3)
             [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
         """
         return [
@@ -1375,7 +1376,7 @@ class PatchCorrelation:
             release_host_pairs=release_host_pairs,
         )
 
-    def aperture_shear_single(
+    def _m_a_single(
         self,
         g1: np.ndarray,
         g2: np.ndarray,
@@ -1403,7 +1404,7 @@ class PatchCorrelation:
             )
 
         if self.backend.name == "numpy":
-            aperture_shear = np.zeros(self.n_patches, dtype=self.map_dtype)
+            m_a = np.zeros(self.n_patches, dtype=self.map_dtype)
             kernel(
                 self._aperture_row_inds(),
                 self.Q_cos_flat,
@@ -1414,9 +1415,9 @@ class PatchCorrelation:
                 g2_arr,
                 w_arr,
                 self.Q_patch_area_flat,
-                aperture_shear,
+                m_a,
             )
-            return aperture_shear
+            return m_a
 
         module = self.backend.module
         backend_dtype = getattr(module, self.map_dtype.name)
@@ -1456,10 +1457,10 @@ class PatchCorrelation:
             )
             if launched:
                 # Numerator is already area-scaled inside the kernel.
-                aperture_shear = self._normalize_by_weights(out_num, out_den)[0]
+                m_a = self._normalize_by_weights(out_num, out_den)[0]
                 if return_device and self.backend.name == "cupy":
-                    return aperture_shear
-                return self.backend.to_numpy(aperture_shear)
+                    return m_a
+                return self.backend.to_numpy(m_a)
 
         weighted_num, weighted_den = self._get_aperture_scratch(
             Q_inds_dev.shape[0], backend_dtype
@@ -1468,12 +1469,12 @@ class PatchCorrelation:
 
         weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
         weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
-        aperture_shear = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        m_a = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
         if return_device and self.backend.name == "cupy":
-            return aperture_shear
-        return self.backend.to_numpy(aperture_shear)
+            return m_a
+        return self.backend.to_numpy(m_a)
 
-    def aperture_density_single(
+    def _m_g_single(
         self,
         map_values: np.ndarray,
         w: np.ndarray,
@@ -1500,7 +1501,7 @@ class PatchCorrelation:
             )
 
         if self.backend.name == "numpy":
-            aperture_density = np.zeros(self.n_patches, dtype=self.map_dtype)
+            m_g = np.zeros(self.n_patches, dtype=self.map_dtype)
             kernel(
                 self._aperture_row_inds(),
                 self.Q_val_flat,
@@ -1508,9 +1509,9 @@ class PatchCorrelation:
                 map_values_arr,
                 w_arr,
                 self.Q_patch_area_flat,
-                aperture_density,
+                m_g,
             )
-            return aperture_density
+            return m_g
 
         module = self.backend.module
         backend_dtype = getattr(module, self.map_dtype.name)
@@ -1542,10 +1543,10 @@ class PatchCorrelation:
             )
             if launched:
                 # Numerator is already area-scaled inside the kernel.
-                aperture_density = self._normalize_by_weights(out_num, out_den)[0]
+                m_g = self._normalize_by_weights(out_num, out_den)[0]
                 if return_device and self.backend.name == "cupy":
-                    return aperture_density
-                return self.backend.to_numpy(aperture_density)
+                    return m_g
+                return self.backend.to_numpy(m_g)
 
         weighted_num, weighted_den = self._get_aperture_scratch(
             Q_inds_dev.shape[0], backend_dtype
@@ -1554,10 +1555,10 @@ class PatchCorrelation:
 
         weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
         weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
-        aperture_density = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
+        m_g = Q_patch_area_dev * weighted_num_patch / weighted_den_patch
         if return_device and self.backend.name == "cupy":
-            return aperture_density
-        return self.backend.to_numpy(aperture_density)
+            return m_g
+        return self.backend.to_numpy(m_g)
 
     def prepare(self, release_host_pairs: bool = False) -> None:
         """Prepares pair arrays for correlation calculations on the backend device.
@@ -1789,19 +1790,19 @@ class PatchCorrelation:
             f"{_MAX_TILED_ACCUMULATORS} available, so at most {max_bins} bins "
             f"fit. There is no packed fallback -- the per-(bin, row) kernels "
             f"read the unpacked geometry, which pack_pairs=True does not "
-            f"upload. Construct the PatchCorrelation with pack_pairs=False (24 B "
+            f"upload. Construct the Integrated3PCF with pack_pairs=False (24 B "
             f"per pair on the device instead of 8 B)."
         )
 
     def _require_unpacked_pairs(self, what: str) -> None:
         """Paths without a packed kernel need the 24 B device geometry
-        (the single-map ``*_single`` methods and the explicit
+        (the private single-map methods ``_gg_single`` & co. and the explicit
         sum-of-weights precomputation; every tomographic method has one)."""
         if self.inds_dev is None:
             raise NotImplementedError(
                 f"{what} is not available with pack_pairs=True on a GPU backend; "
-                "use the tomographic methods (shear_shear, density_density, density_shear, shear, density, ggl, "
-                "three_by_two_pt) or construct the PatchCorrelation with pack_pairs=False."
+                "use the tomographic methods (gg, kk, kg, "
+                "three_by_two_pt) or construct the Integrated3PCF with pack_pairs=False."
             )
 
     def _pair_index_arrays(self) -> Tuple[Any, Any]:
@@ -1817,7 +1818,7 @@ class PatchCorrelation:
             )
         return ctx.inds_i_dev, ctx.inds_j_dev
 
-    def shear_shear_single(
+    def _gg_single(
         self,
         g11: np.ndarray,
         g21: np.ndarray,
@@ -1834,7 +1835,7 @@ class PatchCorrelation:
         checks are bypassed.
         """
         self._ensure_prepared()
-        self._require_unpacked_pairs("shear_shear_single")
+        self._require_unpacked_pairs("_gg_single")
         return_numpy = not (return_device and self.backend.name == "cupy")
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
             return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy)
@@ -1851,7 +1852,7 @@ class PatchCorrelation:
             return_numpy=return_numpy,
         )
 
-    def density_density_single(
+    def _kk_single(
         self,
         density1: np.ndarray,
         density2: np.ndarray,
@@ -1865,11 +1866,11 @@ class PatchCorrelation:
         Ratio-of-sums over both pair orientations, as everywhere else in the
         library.  ``sumofweights``, if given, is the sum for *one*
         orientation and is applied to both -- note that
-        :meth:`density_shear_single` takes its ``sumofweights`` as the
+        :meth:`_kg_single` takes its ``sumofweights`` as the
         already-summed total instead.
         """
         self._ensure_prepared()
-        self._require_unpacked_pairs("density_density_single")
+        self._require_unpacked_pairs("_kk_single")
 
         density1_dev = self._map_to_device(density1)
         density2_dev = self._map_to_device(density2)
@@ -1949,8 +1950,8 @@ class PatchCorrelation:
         # Ratio of sums, not mean of ratios: both orientations of a cross
         # combination are summed and divided once, which is the wrapper
         # contract on both backends (TreeCorr's definition) and what
-        # ``density_density``, ``three_by_two_pt`` and
-        # ``density_shear_single`` already do.  ``0.5 * (N_ab/D_ab +
+        # ``_kk_pairs``, ``three_by_two_pt`` and
+        # ``_kg_single`` already do.  ``0.5 * (N_ab/D_ab +
         # N_ba/D_ba)`` is a different estimator whenever the two orientations
         # carry different weight, i.e. for every cross pair.  The auto case
         # and an explicit ``sumofweights`` (where D_ab == D_ba) are unchanged
@@ -1960,7 +1961,7 @@ class PatchCorrelation:
             return (self.backend.module.real(w_theta),)
         return (np.real(self.backend.to_numpy(w_theta)),)
 
-    def density_shear_single(
+    def _kg_single(
         self,
         density_lens: np.ndarray,
         g1_source: np.ndarray,
@@ -1972,7 +1973,7 @@ class PatchCorrelation:
     ) -> Tuple[np.ndarray]:
         """Compute scalar-shear 2PCF (gamma_t) for one lens/source map pair."""
         self._ensure_prepared()
-        self._require_unpacked_pairs("density_shear_single")
+        self._require_unpacked_pairs("_kg_single")
 
         density_lens_dev = self._map_to_device(density_lens)
         g1_source_dev = self._map_to_device(g1_source)
@@ -2615,7 +2616,7 @@ class PatchCorrelation:
             raise ValueError(
                 "map arrays must have either npix="
                 f"{self.npix} (full sky) or n_active={n_active} (row space, "
-                f"see PatchCorrelation.row_pix) pixels along the last axis; got {n_last}"
+                f"see Integrated3PCF.row_pix) pixels along the last axis; got {n_last}"
             )
         if self._is_backend_native_array(array):
             ctx = self.compute_context
@@ -2697,7 +2698,7 @@ class PatchCorrelation:
 
         The pair scratch is 32 B/pair and the frozen-map memo whole
         map-sets; both live for as long as the object does, which makes a
-        long-lived ``PatchCorrelation`` hard to share a GPU with.  The pair
+        long-lived ``Integrated3PCF`` hard to share a GPU with.  The pair
         geometry and the prepared device buffers are *not* touched -- the
         object still measures, it just rebuilds its scratch on the next
         call.
@@ -3112,7 +3113,7 @@ class PatchCorrelation:
     def _expansion_scope(self, layout: str = "aos") -> Any:
         """Context manager: share virtual-row expansions between the leaf
         computations of one public call (e.g. aperture + 2PCF pass of
-        ``shear``).  Inside the scope every expansion fills
+        ``gg``).  Inside the scope every expansion fills
         *all* blocks once and is memoised on the identity of its inputs;
         the memo is dropped on exit, so reused device buffers (e.g.
         ``MapLoader`` slots) can never produce a stale hit.
@@ -3984,7 +3985,7 @@ class PatchCorrelation:
             )
         return self._finish_xipm_tomo(out_num, out_w, sumofweights_dev, auto_comb, nzbin_combs)
 
-    def shear_shear(
+    def _gg_pairs(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4052,7 +4053,7 @@ class PatchCorrelation:
             return self.backend.module.real(xi_p), self.backend.module.real(xi_m)
         return np.real(self.backend.to_numpy(xi_p)), np.real(self.backend.to_numpy(xi_m))
 
-    def aperture_shear(
+    def m_a(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4138,7 +4139,7 @@ class PatchCorrelation:
             )
         return M_a
 
-    def aperture_density(
+    def m_g(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
@@ -4207,7 +4208,7 @@ class PatchCorrelation:
             )
         return M_g
 
-    def shear(
+    def _gg_full(
         self,
         shear_maps: np.ndarray,
         w: np.ndarray,
@@ -4225,7 +4226,7 @@ class PatchCorrelation:
         shear_dev = self._to_backend_array(shear_maps_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
         with self._expansion_scope(layout="soa"):  # one degrade, both passes
-            M_a = self.aperture_shear(
+            M_a = self.m_a(
                 shear_dev,
                 w_dev,
                 aperture_filter=aperture_filter,
@@ -4233,7 +4234,7 @@ class PatchCorrelation:
                 flip_g2=flip_g2,
                 return_device=return_device,
             )
-            xi_p, xi_m = self.shear_shear(
+            xi_p, xi_m = self._gg_pairs(
                 shear_dev,
                 w_dev,
                 sumofweights=sumofweights,
@@ -4243,7 +4244,7 @@ class PatchCorrelation:
             )
         return M_a, xi_p, xi_m
 
-    def density(
+    def _kk_full(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
@@ -4259,13 +4260,13 @@ class PatchCorrelation:
         density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
         with self._expansion_scope(layout="soa"):  # one degrade, both passes
-            M_g = self.aperture_density(
+            M_g = self.m_g(
                 density_dev,
                 w_dev,
                 aperture_filter=aperture_filter,
                 return_device=return_device,
             )
-            xi_g = self.density_density(
+            xi_g = self._kk_pairs(
                 density_dev,
                 w_dev,
                 sumofweights=sumofweights,
@@ -4274,7 +4275,7 @@ class PatchCorrelation:
             )
         return M_g, xi_g
 
-    def ggl(
+    def _kg_full(
         self,
         density_maps: np.ndarray,
         shear_maps: np.ndarray,
@@ -4316,7 +4317,7 @@ class PatchCorrelation:
         shear_w_dev = self._to_backend_array(shear_w_arr, dtype=self.map_dtype)
 
         # Share one row expansion between the passes, as the other
-        # ``shear``/``density``/``ggl`` methods do.  Without this the density and shear
+        # gg/kk/kg methods do.  Without this the density and shear
         # rows are degraded once for the pair pass and again for each
         # aperture pass -- four expansions where two suffice.  The scope is
         # taken only when an aperture output is requested, because it is the
@@ -4327,7 +4328,7 @@ class PatchCorrelation:
             self._expansion_scope(layout="soa") if want_aperture else nullcontext()
         )
         with scope:
-            xi_t = self.density_shear(
+            xi_t = self._kg_pairs(
                 density_dev,
                 shear_dev,
                 density_w_dev,
@@ -4345,7 +4346,7 @@ class PatchCorrelation:
             outputs: List[Any] = [xi_t]
             if return_N_ap:
                 outputs.append(
-                    self.aperture_density(
+                    self.m_g(
                         density_dev,
                         density_w_dev,
                         aperture_filter=aperture_filter,
@@ -4354,7 +4355,7 @@ class PatchCorrelation:
                 )
             if return_M_ap:
                 outputs.append(
-                    self.aperture_shear(
+                    self.m_a(
                         shear_dev,
                         shear_w_dev,
                         aperture_filter=aperture_filter,
@@ -4631,7 +4632,7 @@ class PatchCorrelation:
 
         return self._finish_pair_sums((num_ab,), sum_total, nzbin_combs)[0]
 
-    def density_density(
+    def _kk_pairs(
         self,
         density_maps: np.ndarray,
         w: np.ndarray,
@@ -4659,7 +4660,7 @@ class PatchCorrelation:
             return self.backend.module.real(wtheta)
         return np.real(self.backend.to_numpy(wtheta))
 
-    def density_shear(
+    def _kg_pairs(
         self,
         density_maps: np.ndarray,
         shear_maps: np.ndarray,
@@ -5155,7 +5156,7 @@ class PatchCorrelation:
         if not (ok_ss and ok_dd and ok_ds):
             raise RuntimeError("Backend declined a 3x2pt pair kernel launch.")
 
-    def three_by_two_pt(
+    def _three_by_two_pt_arrays(
         self,
         shear_maps: Optional[np.ndarray] = None,
         density_maps: Optional[np.ndarray] = None,
@@ -5242,3 +5243,153 @@ class PatchCorrelation:
             return_device=return_device,
         )
 
+
+    # ── public measurements (labelled results) ──────────────────────────────
+
+    def _nz(self, maps: Any) -> int:
+        return int(getattr(maps, "shape")[0])
+
+    def gg(
+        self,
+        shear_maps: Any,
+        w: Any,
+        apertures: bool = True,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+        sumofweights: Optional[np.ndarray] = None,
+        return_device: bool = True,
+    ) -> IntegratedResult:
+        """Shear ξ± in every patch and (``apertures=True``) the aperture mass
+        ``M_a`` at every patch centre -- the ingredients of ζ_{a,±}.
+
+        ``shear_maps``: ``(nz, 2, npix | n_active)``, ``w``: ``(nz, npix |
+        n_active)``.  Returns an :class:`~CosmoFuse.results.IntegratedResult`
+        with ``xi_p``, ``xi_m`` (rows ``gg_combinations``) and ``M_a``.
+        """
+        if apertures:
+            M_a, xi_p, xi_m = self._gg_full(
+                shear_maps, w, sumofweights=sumofweights, aperture_filter=aperture_filter,
+                flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+            )
+        else:
+            M_a = None
+            xi_p, xi_m = self._gg_pairs(
+                shear_maps, w, sumofweights=sumofweights,
+                flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+            )
+        return IntegratedResult(
+            binedges=np.asarray(self.binedges).copy(), M_a=M_a, xi_p=xi_p, xi_m=xi_m,
+            gg_combinations=tuple(self.tomo_combinations(self._nz(shear_maps))),
+        )
+
+    def kk(
+        self,
+        k_maps: Any,
+        w: Any,
+        apertures: bool = True,
+        auto_only: bool = False,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        sumofweights: Optional[np.ndarray] = None,
+        return_device: bool = True,
+    ) -> IntegratedResult:
+        """Scalar-field (overdensity δ) w(θ) in every patch and
+        (``apertures=True``) the aperture ``M_g`` at every patch centre.
+
+        ``xi_g`` is the field estimator ``Σ w w δ δ / Σ w w`` (TreeCorr
+        ``KKCorrelation``); rows ``kk_combinations`` (upper triangle, or the
+        autos with ``auto_only=True``).
+        """
+        if apertures:
+            M_g, xi_g = self._kk_full(
+                k_maps, w, sumofweights=sumofweights, gc_auto_correlations_only=auto_only,
+                aperture_filter=aperture_filter, return_device=return_device,
+            )
+        else:
+            M_g = None
+            xi_g = self._kk_pairs(
+                k_maps, w, sumofweights=sumofweights, gc_auto_correlations_only=auto_only,
+                return_device=return_device,
+            )
+        return IntegratedResult(
+            binedges=np.asarray(self.binedges).copy(), M_g=M_g, xi_g=xi_g,
+            kk_combinations=tuple(self.tomo_combinations(self._nz(k_maps), auto_only)),
+        )
+
+    def kg(
+        self,
+        k_maps: Any,
+        shear_maps: Any,
+        k_weights: Any,
+        shear_weights: Any,
+        m_g: bool = False,
+        m_a: bool = False,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+        sumofweights: Optional[np.ndarray] = None,
+        return_device: bool = True,
+    ) -> IntegratedResult:
+        """γ_t of lens scalar (δ) × source shear in every patch
+        (``Σ w_l w_s δ_l γ_t / Σ w_l w_s``, TreeCorr ``KGCorrelation``), and
+        optionally the apertures ``M_g`` (``m_g=True``) and ``M_a``
+        (``m_a=True``).  Rows ``kg_combinations`` = (lens, source): all,
+        lens-major, or ``combinations`` in the order given.
+        """
+        nl, ns = self._nz(k_maps), self._nz(shear_maps)
+        combos = tuple(self.kg_combinations(nl, ns, combinations))
+        if m_g or m_a:
+            out = self._kg_full(
+                k_maps, shear_maps, k_weights, shear_weights, sumofweights=sumofweights,
+                ggl_bin_combinations=combinations, aperture_filter=aperture_filter,
+                return_N_ap=m_g, return_M_ap=m_a, flip_g1=flip_g1, flip_g2=flip_g2,
+                return_device=return_device,
+            )
+            xi_t, rest = out[0], list(out[1:])
+            M_g = rest.pop(0) if m_g else None
+            M_a = rest.pop(0) if m_a else None
+        else:
+            M_g = M_a = None
+            xi_t = self._kg_pairs(
+                k_maps, shear_maps, k_weights, shear_weights, sumofweights=sumofweights,
+                ggl_bin_combinations=combinations, flip_g1=flip_g1, flip_g2=flip_g2,
+                return_device=return_device,
+            )
+        return IntegratedResult(
+            binedges=np.asarray(self.binedges).copy(), M_a=M_a, M_g=M_g, xi_t=xi_t,
+            kg_combinations=combos,
+        )
+
+    def three_by_two_pt(
+        self,
+        shear_maps: Any,
+        k_maps: Any,
+        weights: Optional[Any] = None,
+        auto_only: bool = False,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        aperture_filter: Optional[Callable[..., Any]] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+        return_device: bool = True,
+    ) -> IntegratedResult:
+        """All six i3PCF ingredients in one fused pass: ``M_a``, ``M_g``,
+        ``xi_p``, ``xi_m``, ``xi_g`` and ``xi_t``.
+
+        ``weights``: ``None`` (unit weights), ``(shear_weights, k_weights)``,
+        ``{"shear": ..., "density": ...}``, or one ``(nz, npix)`` array for
+        both samples when they share the tomography.
+        """
+        M_a, M_g, xi_p, xi_m, xi_g, xi_t = self._three_by_two_pt_arrays(
+            shear_maps, k_maps, weights, gc_auto_correlations_only=auto_only,
+            ggl_bin_combinations=combinations, aperture_filter=aperture_filter,
+            flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+        )
+        ns, nl = self._nz(shear_maps), self._nz(k_maps)
+        return IntegratedResult(
+            binedges=np.asarray(self.binedges).copy(),
+            M_a=M_a, M_g=M_g, xi_p=xi_p, xi_m=xi_m, xi_g=xi_g, xi_t=xi_t,
+            gg_combinations=tuple(self.tomo_combinations(ns)),
+            kk_combinations=tuple(self.tomo_combinations(nl, auto_only)),
+            kg_combinations=tuple(self.kg_combinations(nl, ns, combinations)),
+        )

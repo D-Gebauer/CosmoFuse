@@ -8,7 +8,8 @@ import unittest
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import PatchCorrelation, MapFileLoader
+from CosmoFuse import Integrated3PCF, MapFileLoader
+from ._results import fields_of
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -17,7 +18,7 @@ NPIX = hp.nside2npix(NSIDE)
 def make_corr():
     theta, phi = hp.pix2ang(NSIDE, np.arange(NPIX))
     mask = (np.degrees(phi) < 140.0) & (np.abs(90 - np.degrees(theta)) < 40)
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         NSIDE, np.radians([40.0, 70.0]), np.radians([90.0, 100.0]), nbins=3,
         theta_min=150, theta_max=900, patch_size=500, theta_Q=150, mask=mask,
         device="cpu", rotation_precision="float64", resolution_factor=2.0,
@@ -35,7 +36,7 @@ class TestMapFileLoader(unittest.TestCase):
         cls.archive = rng.normal(size=(cls.nmaps, 2, 2, cls.corr.n_active)) * 0.05
         cls.w = np.ones((2, cls.corr.n_active))
         cls.serial = [
-            cls.corr.shear(m, cls.w, return_device=False) for m in cls.archive
+            fields_of(cls.corr.gg(m, cls.w, return_device=False), "M_a", "xi_p", "xi_m") for m in cls.archive
         ]
 
     def run_loader(self, n_slots, n_readers, jitter):
@@ -64,7 +65,7 @@ class TestMapFileLoader(unittest.TestCase):
             order.append(k)
             if k % 5 == 0:
                 time.sleep(jitter)  # a slow consumer must not lose maps
-            results.append(self.corr.shear(dev["shear"], self.w, return_device=False))
+            results.append(fields_of(self.corr.gg(dev["shear"], self.w, return_device=False), "M_a", "xi_p", "xi_m"))
         self.assertEqual(order, list(range(self.nmaps)))
         for got, want in zip(results, self.serial):
             for a, b in zip(got, want):
@@ -167,7 +168,7 @@ class TestMapFileLoader(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
 
     def test_hash_mismatch_raises(self):
-        other = PatchCorrelation(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
+        other = Integrated3PCF(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
         self.assertNotEqual(other.row_pix_hash, self.corr.row_pix_hash)
         with self.assertRaisesRegex(ValueError, "row_pix hash mismatch"):
             MapFileLoader(

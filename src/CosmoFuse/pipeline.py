@@ -32,11 +32,11 @@ class MapLoader:
                 if k + 1 < nmaps
                 else None
             )
-            results.append(corr.shear(dev["shear"], dev["w"]))
+            results.append(corr.gg(dev["shear"], dev["w"]))
             dev = pipe.wait(nxt)
 
     The measurement methods accept device arrays directly, so no API
-    changes are needed on the ``PatchCorrelation`` side.  Numerically a no-op:
+    changes are needed on the ``Integrated3PCF`` side.  Numerically a no-op:
     ``stage()`` only copies bytes.
     """
 
@@ -124,10 +124,10 @@ class MapFileLoader:
         loader = MapFileLoader(
             corr, {"shear": (nz, 2, corr.n_active)}, sources=files, read_fn=read)
         for k, dev in loader:
-            results.append(corr.shear(dev["shear"], w, flip_g1=True))
+            results.append(corr.gg(dev["shear"], w, flip_g1=True))
 
     Maps should be stored in the row space of the pair geometry
-    (``PatchCorrelation.row_pix`` order, see :meth:`PatchCorrelation.to_row_space`);
+    (``Integrated3PCF.row_pix`` order, see :meth:`Integrated3PCF.to_row_space`);
     pass ``row_pix_hash`` (stored next to the map archive) to fail loudly
     when the archive and the geometry do not belong together.  The device
     arrays handed out are only valid until the next iteration.

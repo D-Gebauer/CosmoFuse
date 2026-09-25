@@ -30,6 +30,11 @@ from multiprocessing import Pool
 
 import h5py, healpy as hp, numpy as np
 
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
+
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
 DATA = os.path.expanduser("~/research/CosmoFuse-treecode-data")
@@ -94,7 +99,7 @@ def run_treecorr(mode, nproc, npatch):
 
 
 def run_cosmofuse(label, k, pack, chunk=None, search="float64", **kw):
-    from CosmoFuse import PatchCorrelation
+    from CosmoFuse import Integrated3PCF
 
     npatch = G["npatch"]
     chunks = [(0, npatch)] if chunk is None else [(a, min(a + chunk, npatch)) for a in range(0, npatch, chunk)]
@@ -103,7 +108,7 @@ def run_cosmofuse(label, k, pack, chunk=None, search="float64", **kw):
     n_pairs = 0
     pool_gb = 0.0
     for a, b in chunks:
-        corr = PatchCorrelation(G["nside"], G["phi_c"][a:b], G["theta_c"][a:b], nbins=len(G["edges"]) - 1,
+        corr = Integrated3PCF(G["nside"], G["phi_c"][a:b], G["theta_c"][a:b], nbins=len(G["edges"]) - 1,
                            theta_min=np.degrees(G["edges"][0]) * 60, theta_max=np.degrees(G["edges"][-1]) * 60,
                            patch_size=G["R"], theta_Q=G["R"], mask=G["mask"], device="gpu",
                            map_precision="float32", accumulation_precision="float64",
@@ -118,11 +123,11 @@ def run_cosmofuse(label, k, pack, chunk=None, search="float64", **kw):
         assert np.array_equal(corr.row_pix, G["row_pix"])
         g = np.ascontiguousarray(G["shear"], dtype=np.float32)
         w = np.ascontiguousarray(G["w"], dtype=np.float32); w.flags.writeable = False
-        out = corr.shear(g, w, flip_g1=True, return_device=False)   # warm-up + result
+        out = fields_of(corr.gg(g, w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")   # warm-up + result
         ts = []
         for _ in range(3 if chunk is None else 1):
             xp.cuda.runtime.deviceSynchronize(); t0 = time.perf_counter()
-            corr.shear(g, w, flip_g1=True, return_device=False)
+            fields_of(corr.gg(g, w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
             xp.cuda.runtime.deviceSynchronize(); ts.append(time.perf_counter() - t0)
         t_meas += float(np.median(ts))
         pool_gb = max(pool_gb, xp.get_default_memory_pool().total_bytes() / 1e9)

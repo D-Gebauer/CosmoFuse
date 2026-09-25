@@ -15,7 +15,7 @@ g3 = Global3PCF(nside, mask=mask, nbins=12, theta_min=15, theta_max=250, n_max=2
                 map_precision="float32", rotation_precision="float32", accumulation_precision="float64",
                 centre_chunk=chunk)
 g3.find_pairs(); g3.prepare()
-g3.shear(shear, w)  # warm up + norm
+g3.ggg(shear, w)  # warm up + norm
 kern = g3.backend.kernel_3pcf_multipoles
 tk = [0.0]
 def timed_kernel(*a, **k):
@@ -27,6 +27,6 @@ g3.backend.kernel_3pcf_multipoles = timed_kernel
 for _ in range(3):
     tk[0] = 0.0
     cupy.cuda.Device().synchronize(); t = time.perf_counter()
-    g3.shear(shear, w)
+    g3.ggg(shear, w)
     cupy.cuda.Device().synchronize(); tot = time.perf_counter() - t
     print(f"nside {nside} chunk {chunk}: total {tot:.3f} s, step-1 kernel {tk[0]:.3f} s, rest {tot - tk[0]:.3f} s, pairs {g3.ntotpairs:.3e}")

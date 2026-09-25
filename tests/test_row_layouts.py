@@ -23,10 +23,11 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from CosmoFuse import PatchCorrelation
+from CosmoFuse import Integrated3PCF
 
 from .test_degrade_kernel import FusedDegradeBase, make_corr
 from .test_gpu_kernel_emulation import emulated_gpu
+from ._results import fields_of
 
 
 def arr(x):
@@ -179,44 +180,44 @@ class TestOneExpansionPerCall(FusedDegradeBase):
 
     def count_expansions(self, corr, fn):
         seen = []
-        real = PatchCorrelation._expand_rows_fused
+        real = Integrated3PCF._expand_rows_fused
 
         def counting(self, *a, **kw):
             out = real(self, *a, **kw)
             seen.append(kw.get("layout", "soa"))
             return out
 
-        with patch.object(PatchCorrelation, "_expand_rows_fused", counting):
+        with patch.object(Integrated3PCF, "_expand_rows_fused", counting):
             self.fused(corr, fn)
         return seen
 
     def test_shear_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.shear(
-            self.shear, self.w, return_device=False))
+        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
+            self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"))
         self.assertEqual(seen, ["interleaved"])
 
     def test_density_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.density(
-            self.dens, self.w, return_device=False))
+        seen = self.count_expansions(corr, lambda c: fields_of(c.kk(
+            self.dens, self.w, return_device=False), "M_g", "xi_g"))
         self.assertEqual(seen, ["soa"])
 
     def test_a_flip_does_not_cost_a_second_expansion(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.shear(
-            self.shear, self.w, flip_g1=True, return_device=False))
+        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
+            self.shear, self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"))
         self.assertEqual(seen, ["interleaved"])
 
     def test_pair_only_calls_take_aos_from_the_degrade(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: c.shear_shear(
-            self.shear, self.w, return_device=False))
+        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
+            self.shear, self.w, return_device=False, apertures=False), "xi_p", "xi_m"))
         self.assertEqual(seen, ["aos"])
-        seen = self.count_expansions(corr, lambda c: c.three_by_two_pt(
-            shear_maps=self.shear, density_maps=self.dens,
+        seen = self.count_expansions(corr, lambda c: fields_of(c.three_by_two_pt(
+            shear_maps=self.shear, k_maps=self.dens,
             weights={"shear": self.w, "density": self.w},
-            return_device=False))
+            return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"))
         self.assertEqual(sorted(seen), ["aos", "aos"])
 
     def test_the_scope_decides_the_pair_layout(self):
@@ -230,7 +231,7 @@ class TestOneExpansionPerCall(FusedDegradeBase):
         """Only the route changes, never what the kernels get."""
         corr = self.corr
         with emulated_gpu(corr):
-            with patch.object(PatchCorrelation, "_use_fused_degrade",
+            with patch.object(Integrated3PCF, "_use_fused_degrade",
                               lambda self, w: True):
                 direct = corr._pair_shear_rows(self.shear, self.w, "pairs")
                 with corr._expansion_scope(layout="soa"):
@@ -249,19 +250,19 @@ class TestPublicFlipsUnchanged(FusedDegradeBase):
 
     def cases(self, corr, shear, flip_g1, flip_g2):
         return {
-            "shear": lambda c: c.shear(
+            "shear": lambda c: fields_of(c.gg(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
-                return_device=False),
-            "shear_shear": lambda c: c.shear_shear(
+                return_device=False), "M_a", "xi_p", "xi_m"),
+            "shear_shear": lambda c: fields_of(c.gg(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
-                return_device=False),
-            "ggl": lambda c: c.ggl(
+                return_device=False, apertures=False), "xi_p", "xi_m"),
+            "ggl": lambda c: c.kg(
                 self.dens, shear, self.w, self.w, flip_g1=flip_g1,
-                flip_g2=flip_g2, return_device=False),
-            "three_by_two_pt": lambda c: c.three_by_two_pt(
-                shear_maps=shear, density_maps=self.dens,
+                flip_g2=flip_g2, return_device=False).xi_t,
+            "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(
+                shear_maps=shear, k_maps=self.dens,
                 weights={"shear": self.w, "density": self.w},
-                flip_g1=flip_g1, flip_g2=flip_g2, return_device=False),
+                flip_g1=flip_g1, flip_g2=flip_g2, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
         }
 
     def test_flip_flags_equal_pre_flipped_maps(self):

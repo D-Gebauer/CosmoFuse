@@ -20,11 +20,11 @@ from .correlation_helpers import (
     zeta_g_plus,
     zeta_g_t,
 )
-from .correlations import PatchCorrelation
+from .correlations import Integrated3PCF
 from .global_2pcf import Global2PCF
-from .global_3pcf import Component, Global3PCF, ThreePointMultipoles
-from .multi_device import MultiDevicePatchCorrelation
+from .global_3pcf import Global3PCF
 from .pipeline import MapFileLoader, MapLoader
+from .results import Component, IntegratedResult, ThreePointResult, TwoPointResult
 from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 from .zeta_writer import ZetaWriter
@@ -37,12 +37,13 @@ __all__ = [
     "Component",
     "Global2PCF",
     "Global3PCF",
-    "PatchCorrelation",
-    "ThreePointMultipoles",
+    "Integrated3PCF",
+    "IntegratedResult",
+    "ThreePointResult",
+    "TwoPointResult",
     "DEFAULT_RESOLUTION_FACTOR",
     "MapLoader",
     "MapFileLoader",
-    "MultiDevicePatchCorrelation",
     "Q_crittenden",
     "Q_schneider",
     "U_crittenden",

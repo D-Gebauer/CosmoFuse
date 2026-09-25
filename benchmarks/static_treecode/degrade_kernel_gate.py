@@ -18,7 +18,12 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import PatchCorrelation
+from CosmoFuse import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 
 
 def build(args):
@@ -27,7 +32,7 @@ def build(args):
     mask[(np.degrees(phi) < 90.0) & (np.abs(90 - np.degrees(theta)) < 40)] = True
     rng = np.random.default_rng(0)
     mask[rng.choice(mask.size, mask.size // 50, replace=False)] = False
-    corr = PatchCorrelation.from_mask(
+    corr = Integrated3PCF.from_mask(
         args.nside, mask, args.nside_centers,
         patch_size=args.patch_size, theta_Q=args.theta_Q, f_mask=0.3,
         nbins=args.nbins, theta_min=args.theta_min, theta_max=args.theta_max,
@@ -114,17 +119,17 @@ def main():
 
     # ---- accuracy: the public methods --------------------------------
     cases = {
-        "shear": lambda: corr.shear(
-            shear, w, return_device=False),
-        "shear_shear": lambda: corr.shear_shear(
-            shear, w, return_device=False),
-        "density": lambda: corr.density(
-            dens, w, return_device=False),
-        "ggl": lambda: corr.ggl(
-            dens, shear, w, w, return_device=False),
-        "three_by_two_pt": lambda: corr.three_by_two_pt(
-            shear_maps=shear, density_maps=dens,
-            weights={"shear": w, "density": w}, return_device=False),
+        "shear": lambda: fields_of(corr.gg(
+            shear, w, return_device=False), "M_a", "xi_p", "xi_m"),
+        "shear_shear": lambda: fields_of(corr.gg(
+            shear, w, return_device=False, apertures=False), "xi_p", "xi_m"),
+        "density": lambda: fields_of(corr.kk(
+            dens, w, return_device=False), "M_g", "xi_g"),
+        "ggl": lambda: corr.kg(
+            dens, shear, w, w, return_device=False).xi_t,
+        "three_by_two_pt": lambda: fields_of(corr.three_by_two_pt(
+            shear_maps=shear, k_maps=dens,
+            weights={"shear": w, "density": w}, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
     }
     methods = {}
     for name, call in cases.items():
@@ -167,12 +172,12 @@ def main():
     # ... and end to end, where the aperture kernel's new element stride
     # and the packed gather are also exercised.
     for name, call in (
-        ("shear", lambda sh, f: corr.shear(
-            sh, w, flip_g1=f, return_device=False)),
-        ("three_by_two_pt", lambda sh, f: corr.three_by_two_pt(
-            shear_maps=sh, density_maps=dens,
+        ("shear", lambda sh, f: fields_of(corr.gg(
+            sh, w, flip_g1=f, return_device=False), "M_a", "xi_p", "xi_m")),
+        ("three_by_two_pt", lambda sh, f: fields_of(corr.three_by_two_pt(
+            shear_maps=sh, k_maps=dens,
             weights={"shear": w, "density": w}, flip_g1=f,
-            return_device=False)),
+            return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")),
     ):
         flagged = call(shear, True)
         pre_flipped = call(
@@ -197,12 +202,12 @@ def main():
             lambda: corr._expand_rows((shear[:, 0], shear[:, 1]), w, "all"),
             cupy, n=args.repeats)
         speed[f"full_tomo_shear_{label}_ms"] = timeit(
-            lambda: corr.shear(shear, w, return_device=True),
+            lambda: fields_of(corr.gg(shear, w, return_device=True), "M_a", "xi_p", "xi_m"),
             cupy, n=args.repeats)
         speed[f"3x2pt_{label}_ms"] = timeit(
-            lambda: corr.three_by_two_pt(
-                shear_maps=shear, density_maps=dens,
-                weights={"shear": w, "density": w}, return_device=True),
+            lambda: fields_of(corr.three_by_two_pt(
+                shear_maps=shear, k_maps=dens,
+                weights={"shear": w, "density": w}, return_device=True), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
             cupy, n=args.repeats)
     for key in ("expand_rows", "full_tomo_shear", "3x2pt"):
         a, b = speed[f"{key}_sparse_ms"], speed[f"{key}_fused_ms"]

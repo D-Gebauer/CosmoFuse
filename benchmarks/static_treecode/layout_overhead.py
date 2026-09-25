@@ -23,6 +23,11 @@ import numpy as np
 from degrade_kernel_gate import build, timeit
 
 
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
+
+
 def sizes_mb(arrs):
     return sum(a.nbytes for a in arrs) / 1e6
 
@@ -106,7 +111,7 @@ def main():
 
     # 5. the aperture kernel in both layouts -- this is why the pair
     #    layout is decided by the enclosing call and not per leaf.
-    corr.aperture_shear(shear, w, return_device=True)  # warm
+    corr.m_a(shear, w, return_device=True)  # warm
     ctx = corr.compute_context
     kern = corr.backend.aperture_tomo_shear_kernel
     map_dt = getattr(module, corr.map_dtype.name)
@@ -126,14 +131,14 @@ def main():
 
     # 6. whole calls, with and without the flip
     for name, call in (
-        ("shear", lambda flip: corr.shear(
-            shear, w, flip_g2=flip, return_device=True)),
-        ("shear_shear", lambda flip: corr.shear_shear(
-            shear, w, flip_g2=flip, return_device=True)),
-        ("three_by_two_pt", lambda flip: corr.three_by_two_pt(
-            shear_maps=shear, density_maps=dens,
+        ("shear", lambda flip: fields_of(corr.gg(
+            shear, w, flip_g2=flip, return_device=True), "M_a", "xi_p", "xi_m")),
+        ("shear_shear", lambda flip: fields_of(corr.gg(
+            shear, w, flip_g2=flip, return_device=True, apertures=False), "xi_p", "xi_m")),
+        ("three_by_two_pt", lambda flip: fields_of(corr.three_by_two_pt(
+            shear_maps=shear, k_maps=dens,
             weights={"shear": w, "density": w},
-            flip_g2=flip, return_device=True)),
+            flip_g2=flip, return_device=True), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")),
     ):
         try:
             noflip = timeit(lambda: call(False), cupy, n=rep)

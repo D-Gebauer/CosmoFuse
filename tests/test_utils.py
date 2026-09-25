@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 from CosmoFuse.correlation_helpers import Q_schneider
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec, select_patch_centers
 
 
@@ -136,7 +136,7 @@ class TestSelectPatchCenters(unittest.TestCase):
         phi_c, theta_c = select_patch_centers(
             self.mask, nside_centers=8, patch_size=90.0, f_mask=0.05
         )
-        corr = PatchCorrelation.from_mask(
+        corr = Integrated3PCF.from_mask(
             self.NSIDE_MASK,
             self.mask,
             nside_centers=8,
@@ -155,7 +155,7 @@ class TestSelectPatchCenters(unittest.TestCase):
 
     def test_from_mask_regrades_mask_resolution(self):
         """Selection may run on a finer mask than the measurement nside."""
-        corr = PatchCorrelation.from_mask(
+        corr = Integrated3PCF.from_mask(
             32,
             self.mask,  # nside 64 footprint
             nside_centers=8,
@@ -171,7 +171,7 @@ class TestSelectPatchCenters(unittest.TestCase):
 
     def test_from_mask_raises_when_nothing_accepted(self):
         with self.assertRaises(ValueError):
-            PatchCorrelation.from_mask(
+            Integrated3PCF.from_mask(
                 self.NSIDE_MASK,
                 np.zeros_like(self.mask),
                 nside_centers=8,
@@ -366,7 +366,7 @@ class TestFilterWeightedSelection(unittest.TestCase):
     def test_schneider_filter_in_aperture_geometry(self):
         """find_aperture_pairs with Q_schneider: pixels beyond theta_Q in
         the 5*theta_Q aperture disc receive exactly zero weight."""
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             self.NSIDE_MASK,
             np.array([0.3]),
             np.array([np.radians(15.0)]),
@@ -390,7 +390,7 @@ class TestFilterWeightedSelection(unittest.TestCase):
 
     def test_from_mask_passthrough(self):
         p_wgt, _ = select_patch_centers(self.mask, **self.kwargs)
-        corr = PatchCorrelation.from_mask(
+        corr = Integrated3PCF.from_mask(
             self.NSIDE_MASK,
             self.mask,
             nside_centers=32,

@@ -36,9 +36,10 @@ from CosmoFuse.backend import (
     _build_cupy_tomo_packed_kernel,
     _build_cupy_tomo_vectorized_kernel,
 )
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
+from ._results import fields_of
 
 _BUILDERS = {
     "xipm_tomo_vectorized_kernel": _build_cupy_tomo_vectorized_kernel,
@@ -123,7 +124,7 @@ def _load_test_setup(rotation_precision):
     phi_center = np.array([0.44178647, 0.73631078, 0.85902924, 0.71176709])
     theta_center = np.array([1.54996149, 1.80201781, 1.9551931, 2.04691539])
 
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         nside,
         phi_center,
         theta_center,
@@ -170,32 +171,27 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
     def setUpClass(cls):
         cls.corr, cls.maps = _load_test_setup("float64")
         corr, m = cls.corr, cls.maps
-        cls.ref_Ma, cls.ref_xip, cls.ref_xim = corr.shear(
-            m["shear"], m["w_shear"], return_device=False
-        )
-        cls.ref_Mg, cls.ref_xig = corr.density(
-            m["density"], m["w_density"], return_device=False
-        )
-        cls.ref_xit = corr.ggl(
-            m["density"], m["shear"], m["w_density"], m["w_shear"], return_device=False
-        )
-        cls.ref_fused = corr.three_by_two_pt(
+        cls.ref_Ma, cls.ref_xip, cls.ref_xim = fields_of(corr.gg(
+            m["shear"], m["w_shear"], return_device=False), "M_a", "xi_p", "xi_m")
+        cls.ref_Mg, cls.ref_xig = fields_of(corr.kk(
+            m["density"], m["w_density"], return_device=False), "M_g", "xi_g")
+        cls.ref_xit = corr.kg(
+            m["density"], m["shear"], m["w_density"], m["w_shear"], return_device=False).xi_t
+        cls.ref_fused = fields_of(corr.three_by_two_pt(
             shear_maps=m["shear"],
-            density_maps=m["density"],
+            k_maps=m["density"],
             weights={"shear": m["w_shear"], "density": m["w_density"]},
-            return_device=False,
-        )
+            return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
         cls.ref_ap_shear = np.asarray(
-            corr.aperture_shear_single(
+            corr._m_a_single(
                 m["shear"][0, 0], m["shear"][0, 1], m["w_shear"][0], return_device=False
             )
         )
         cls.ref_ap_density = np.asarray(
-            corr.aperture_density_single(m["density"][0], m["w_density"][0], return_device=False)
+            corr._m_g_single(m["density"][0], m["w_density"][0], return_device=False)
         )
-        cls.ref_Ma_flipped, cls.ref_xip_flipped, _ = corr.shear(
-            m["shear"], m["w_shear"], flip_g1=True, return_device=False
-        )
+        cls.ref_Ma_flipped, cls.ref_xip_flipped, _ = fields_of(corr.gg(
+            m["shear"], m["w_shear"], flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
 
     def _allclose(self, actual, ref):
         np.testing.assert_allclose(
@@ -205,9 +201,8 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
     def test_full_tomo_shear(self):
         m = self.maps
         with emulated_gpu(self.corr) as calls:
-            M_a, xip, xim = self.corr.shear(
-                m["shear"], m["w_shear"], return_device=False
-            )
+            M_a, xip, xim = fields_of(self.corr.gg(
+                m["shear"], m["w_shear"], return_device=False), "M_a", "xi_p", "xi_m")
         self.assertGreaterEqual(calls["aperture_tomo_shear_kernel"], 1)
         self.assertGreaterEqual(calls["xipm_tomo_vectorized_kernel"], 1)
         self._allclose(M_a, self.ref_Ma)
@@ -225,9 +220,8 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
                 self.assertTrue(wrapper.tiled)  # tiled is the default
                 wrapper.tiled = tiled
                 del LAUNCH_LOG[:]
-                results[tiled] = self.corr.shear_shear(
-                    m["shear"], m["w_shear"], return_device=False
-                )
+                results[tiled] = fields_of(self.corr.gg(
+                    m["shear"], m["w_shear"], return_device=False, apertures=False), "xi_p", "xi_m")
                 self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 1)
                 self.assertEqual(
                     LAUNCH_LOG,
@@ -241,18 +235,16 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
     def test_full_tomo_shear_flip_g1(self):
         m = self.maps
         with emulated_gpu(self.corr):
-            M_a, xip, _xim = self.corr.shear(
-                m["shear"], m["w_shear"], flip_g1=True, return_device=False
-            )
+            M_a, xip, _xim = fields_of(self.corr.gg(
+                m["shear"], m["w_shear"], flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
         self._allclose(M_a, self.ref_Ma_flipped)
         self._allclose(xip, self.ref_xip_flipped)
 
     def test_full_tomo_density(self):
         m = self.maps
         with emulated_gpu(self.corr) as calls:
-            M_g, xi_g = self.corr.density(
-                m["density"], m["w_density"], return_device=False
-            )
+            M_g, xi_g = fields_of(self.corr.kk(
+                m["density"], m["w_density"], return_device=False), "M_g", "xi_g")
         self.assertGreaterEqual(calls["aperture_tomo_density_kernel"], 1)
         self.assertGreaterEqual(calls["kernel_density_density_tomo_vectorized"], 1)
         self._allclose(M_g, self.ref_Mg)
@@ -261,22 +253,20 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
     def test_full_tomo_ggl(self):
         m = self.maps
         with emulated_gpu(self.corr) as calls:
-            xi_t = self.corr.ggl(
+            xi_t = self.corr.kg(
                 m["density"], m["shear"], m["w_density"], m["w_shear"],
-                return_device=False,
-            )
+                return_device=False).xi_t
         self.assertGreaterEqual(calls["kernel_density_shear_tomo_vectorized"], 1)
         self._allclose(xi_t, self.ref_xit)
 
     def test_fused_3x2pt(self):
         m = self.maps
         with emulated_gpu(self.corr) as calls:
-            results = self.corr.three_by_two_pt(
+            results = fields_of(self.corr.three_by_two_pt(
                 shear_maps=m["shear"],
-                density_maps=m["density"],
+                k_maps=m["density"],
                 weights={"shear": m["w_shear"], "density": m["w_density"]},
-                return_device=False,
-            )
+                return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
         self.assertGreaterEqual(calls["kernel_3x2pt_tomo_aperture"], 1)
         # All three pair statistics in one walk over the pairs.
         self.assertEqual(calls["kernel_3x2pt_tomo_pairs"], 1)
@@ -295,13 +285,13 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
         standalone tiles take over."""
         m = self.maps
         kwargs = dict(
-            shear_maps=m["shear"], density_maps=m["density"],
+            shear_maps=m["shear"], k_maps=m["density"],
             weights={"shear": m["w_shear"], "density": m["w_density"]}, return_device=False,
         )
         variants = (
             {},
-            {"gc_auto_correlations_only": True},
-            {"ggl_bin_combinations": [(1, 0), (0, 1)]},
+            {"auto_only": True},
+            {"combinations": [(1, 0), (0, 1)]},
         )
         for extra in variants:
             out = {}
@@ -314,7 +304,7 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
                     if mode == "budget":
                         wrapper.max_accumulators = 1
                     del LAUNCH_LOG[:]
-                    out[mode] = self.corr.three_by_two_pt(**kwargs, **extra)
+                    out[mode] = fields_of(self.corr.three_by_two_pt(**kwargs, **extra), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
                     single = "gpu_tiled_tomo_reduce_3x2pt" in LAUNCH_LOG
                     self.assertEqual(single, mode == "auto")
                     self.assertEqual(
@@ -335,21 +325,17 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
                 calls["_built"]["kernel_density_density_tomo_vectorized"].tiled = tiled
                 calls["_built"]["kernel_density_shear_tomo_vectorized"].tiled = tiled
                 del LAUNCH_LOG[:]
-                xi_g = self.corr.density_density(
-                    m["density"], m["w_density"], return_device=False
-                )
-                xi_g_auto = self.corr.density_density(
-                    m["density"], m["w_density"], gc_auto_correlations_only=True,
-                    return_device=False,
-                )
-                xi_t = self.corr.density_shear(
+                xi_g = self.corr.kk(
+                    m["density"], m["w_density"], return_device=False, apertures=False).xi_g
+                xi_g_auto = self.corr.kk(
+                    m["density"], m["w_density"], auto_only=True,
+                    return_device=False, apertures=False).xi_g
+                xi_t = self.corr.kg(
                     m["density"], m["shear"], m["w_density"], m["w_shear"],
-                    return_device=False,
-                )
-                xi_t_sub = self.corr.density_shear(
+                    return_device=False).xi_t
+                xi_t_sub = self.corr.kg(
                     m["density"], m["shear"], m["w_density"], m["w_shear"],
-                    ggl_bin_combinations=[(1, 0), (0, 0)], return_device=False,
-                )
+                    combinations=[(1, 0), (0, 0)], return_device=False).xi_t
                 expected = (
                     ["gpu_tiled_tomo_reduce_dd"] * 2 + ["gpu_tiled_tomo_reduce_ds"] * 2
                     if tiled
@@ -364,10 +350,10 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
     def test_single_map_aperture_routes_through_tomo_kernel(self):
         m = self.maps
         with emulated_gpu(self.corr) as calls:
-            ap_shear = self.corr.aperture_shear_single(
+            ap_shear = self.corr._m_a_single(
                 m["shear"][0, 0], m["shear"][0, 1], m["w_shear"][0], return_device=False
             )
-            ap_density = self.corr.aperture_density_single(
+            ap_density = self.corr._m_g_single(
                 m["density"][0], m["w_density"][0], return_device=False
             )
         self.assertGreaterEqual(calls["aperture_tomo_shear_kernel"], 1)
@@ -381,13 +367,11 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
         nzbin_combs = 3
         nbins_total = self.corr.n_patches * self.corr.nbins
         explicit = np.full((2, nzbin_combs, nbins_total), 2.0)
-        ref_xip, ref_xim = self.corr.shear_shear(
-            m["shear"], m["w_shear"], sumofweights=explicit, return_device=False
-        )
+        ref_xip, ref_xim = fields_of(self.corr.gg(
+            m["shear"], m["w_shear"], sumofweights=explicit, return_device=False, apertures=False), "xi_p", "xi_m")
         with emulated_gpu(self.corr):
-            xip, xim = self.corr.shear_shear(
-                m["shear"], m["w_shear"], sumofweights=explicit, return_device=False
-            )
+            xip, xim = fields_of(self.corr.gg(
+                m["shear"], m["w_shear"], sumofweights=explicit, return_device=False, apertures=False), "xi_p", "xi_m")
         self._allclose(xip, ref_xip)
         self._allclose(xim, ref_xim)
 
@@ -411,32 +395,28 @@ class TestEmulatedGpuParityFloat32Rotations(unittest.TestCase):
 
     def test_full_tomo_shear(self):
         m = self.maps
-        ref_Ma, ref_xip, ref_xim = self.corr.shear(
-            m["shear"], m["w_shear"], return_device=False
-        )
+        ref_Ma, ref_xip, ref_xim = fields_of(self.corr.gg(
+            m["shear"], m["w_shear"], return_device=False), "M_a", "xi_p", "xi_m")
         with emulated_gpu(self.corr):
-            M_a, xip, xim = self.corr.shear(
-                m["shear"], m["w_shear"], return_device=False
-            )
+            M_a, xip, xim = fields_of(self.corr.gg(
+                m["shear"], m["w_shear"], return_device=False), "M_a", "xi_p", "xi_m")
         self._allclose(M_a, ref_Ma)
         self._allclose(xip, ref_xip)
         self._allclose(xim, ref_xim)
 
     def test_fused_3x2pt(self):
         m = self.maps
-        ref = self.corr.three_by_two_pt(
+        ref = fields_of(self.corr.three_by_two_pt(
             shear_maps=m["shear"],
-            density_maps=m["density"],
+            k_maps=m["density"],
             weights={"shear": m["w_shear"], "density": m["w_density"]},
-            return_device=False,
-        )
+            return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
         with emulated_gpu(self.corr):
-            results = self.corr.three_by_two_pt(
+            results = fields_of(self.corr.three_by_two_pt(
                 shear_maps=m["shear"],
-                density_maps=m["density"],
+                k_maps=m["density"],
                 weights={"shear": m["w_shear"], "density": m["w_density"]},
-                return_device=False,
-            )
+                return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
         for actual, expected, label in zip(
             results, ref, ("M_a", "M_g", "xip", "xim", "xi_g", "xi_t")
         ):

@@ -29,7 +29,12 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 
@@ -67,7 +72,7 @@ def main() -> None:
 
     phi = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_phi.dat")
     theta = np.loadtxt(f"{SBI}/CosmoFuse/Q{args.Q}/patch_center_original_theta.dat")
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         nside,
         phi,
         theta,
@@ -111,7 +116,7 @@ def main() -> None:
 
     # warm-up (kernel compilation, buffer allocation)
     full[:, :, map_inds] = cut[0]
-    corr.shear(full, w_host, flip_g1=True, return_device=False)
+    fields_of(corr.gg(full, w_host, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
     sync(corr)
 
     for k in range(nsets):
@@ -121,7 +126,7 @@ def main() -> None:
 
         sync(corr)
         t0 = time.perf_counter()
-        out = corr.shear(full, w_host, flip_g1=True, return_device=False)
+        out = fields_of(corr.gg(full, w_host, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
         sync(corr)
         t_call_host.append(time.perf_counter() - t0)
         results.append([np.asarray(o, dtype=np.float64) for o in out])
@@ -130,7 +135,7 @@ def main() -> None:
         rows_in = np.ascontiguousarray(cut[k], dtype=dt)
         sync(corr)
         t0 = time.perf_counter()
-        out_rows = corr.shear(rows_in, w_host, flip_g1=True, return_device=False)
+        out_rows = fields_of(corr.gg(rows_in, w_host, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
         sync(corr)
         t_call_rows.append(time.perf_counter() - t0)
         for a, b in zip(out, out_rows):
@@ -141,7 +146,7 @@ def main() -> None:
             w_dev = corr.backend.to_device(w_host)
             sync(corr)
             t0 = time.perf_counter()
-            corr.shear(g_dev, w_dev, flip_g1=True, return_device=False)
+            fields_of(corr.gg(g_dev, w_dev, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
             sync(corr)
             t_call_dev.append(time.perf_counter() - t0)
 

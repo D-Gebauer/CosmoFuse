@@ -19,10 +19,11 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse import PatchCorrelation
+from CosmoFuse import Integrated3PCF
 
 from .cuda_emulation import LAUNCH_LOG
 from .test_gpu_kernel_emulation import emulated_gpu
+from ._results import fields_of
 
 NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
@@ -73,7 +74,7 @@ def _build_corr(k, aperture_nside, map_precision, accumulation_precision,
     mask = (np.degrees(phi) < 200.0) & (np.abs(90 - np.degrees(theta)) < 55)
     rng = np.random.default_rng(1)
     mask[rng.choice(NPIX, NPIX // 30, replace=False)] = False
-    corr = PatchCorrelation.from_mask(
+    corr = Integrated3PCF.from_mask(
         NSIDE, mask, n_side_centers, patch_size=600, theta_Q=200, f_mask=0.3,
         nbins=4, theta_min=120, theta_max=1100, device="cpu",
         map_precision=map_precision, rotation_precision="float64",
@@ -100,7 +101,7 @@ class FusedDegradeBase(unittest.TestCase):
         """Run `fn(corr)` with the fused kernels active."""
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
-            with patch.object(PatchCorrelation, "_use_fused_degrade",
+            with patch.object(Integrated3PCF, "_use_fused_degrade",
                               lambda self, w: True):
                 del LAUNCH_LOG[:]
                 out = fn(corr)
@@ -238,19 +239,19 @@ class TestPublicMethodsMatch(FusedDegradeBase):
     def test_methods(self):
         corr = self.corr
         cases = {
-            "shear": lambda c: c.shear(
-                self.shear, self.w, return_device=False),
-            "shear_shear": lambda c: c.shear_shear(
-                self.shear, self.w, return_device=False),
-            "density": lambda c: c.density(
-                self.dens, self.w, return_device=False),
-            "ggl": lambda c: c.ggl(
-                self.dens, self.shear, self.w, self.w, return_device=False),
-            "three_by_two_pt": lambda c: c.three_by_two_pt(
-                shear_maps=self.shear, density_maps=self.dens,
+            "shear": lambda c: fields_of(c.gg(
+                self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"),
+            "shear_shear": lambda c: fields_of(c.gg(
+                self.shear, self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
+            "density": lambda c: fields_of(c.kk(
+                self.dens, self.w, return_device=False), "M_g", "xi_g"),
+            "ggl": lambda c: c.kg(
+                self.dens, self.shear, self.w, self.w, return_device=False).xi_t,
+            "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(
+                shear_maps=self.shear, k_maps=self.dens,
                 weights={"shear": self.w, "density": self.w},
-                return_device=False),
-            "aperture_shear_single": lambda c: c.aperture_shear_single(
+                return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+            "_m_a_single": lambda c: c._m_a_single(
                 self.shear[0, 0], self.shear[0, 1], self.w[0],
                 return_device=False),
         }

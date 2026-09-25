@@ -14,16 +14,21 @@ import json
 
 import numpy as np
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
 from stage7_gpu_tiles import PAIRS_2048, geometry, make_maps, sync, timed, MASK
 
 import healpy as hp
 
 
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
+
+
 def run(corr, shear, w, dens, wd, ncalls, **kw):
-    fn = lambda: corr.three_by_two_pt(shear_maps=shear, density_maps=dens,
+    fn = lambda: fields_of(corr.three_by_two_pt(shear_maps=shear, k_maps=dens,
                                      weights={"shear": w, "density": wd},
-                                     flip_g1=True, return_device=False, **kw)
+                                     flip_g1=True, return_device=False, **kw), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
     out = {}
     ref = None
     for mode in ("off", "single"):
@@ -53,7 +58,7 @@ def main():
     rng = np.random.default_rng(0)
     if "A" in args.parts:
         for pack in (False, True):
-            corr = PatchCorrelation(512, phi, theta, device="gpu", map_precision="float32",
+            corr = Integrated3PCF(512, phi, theta, device="gpu", map_precision="float32",
                                accumulation_precision="float64", pack_pairs=pack, **geo)
             corr.load_pairs(pair_file)
             corr.prepare(release_host_pairs=True)
@@ -61,7 +66,7 @@ def main():
                 shear, w, dens, wd = make_maps(corr, rng, nz=4)
                 dens = (rng.normal(size=(n_lens, corr.n_active)) * 0.3).astype(np.float32)
                 wd = rng.uniform(0.5, 2.0, size=(n_lens, corr.n_active)).astype(np.float32)
-                for label, kw in (("full", {}), ("gc_auto", {"gc_auto_correlations_only": True})):
+                for label, kw in (("full", {}), ("gc_auto", {"auto_only": True})):
                     key = f"512_{'packed' if pack else 'unpacked'}_{n_lens}lens_{label}"
                     print(key, flush=True)
                     out[key] = run(corr, shear, w, dens, wd, args.ncalls, **kw)
@@ -70,7 +75,7 @@ def main():
         mask = hp.ud_grade(hp.read_map(MASK).astype(np.float64), 2048) != 0
         edges = np.geomspace(5.0, 250.0, 12)
         edges = edges[edges < 2 * 110 - 5]
-        corr = PatchCorrelation(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
+        corr = Integrated3PCF(2048, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
                            theta_max=edges[-1], patch_size=110, theta_Q=110, mask=mask,
                            device="gpu", map_precision="float32", accumulation_precision="float64",
                            resolution_factor=2.9, aperture_nside=512, pack_pairs=True)

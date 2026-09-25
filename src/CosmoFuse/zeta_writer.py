@@ -45,7 +45,7 @@ GPU + ``reduce="none"``       1.06 MB D2H                     HDF5 only
 host (multi-GPU, CPU)         queue the arrays                reduce + HDF5
 ===========================  ==============================  ==================
 
-:class:`~CosmoFuse.multi_device.MultiDevicePatchCorrelation` concatenates the
+:class:`~CosmoFuse.multi_device.MultiDeviceIntegrated3PCF` concatenates the
 per-device outputs on the patch axis and always returns host arrays, so it
 lands in the third row: the reduction runs on the CPU, in the writer
 thread, off the measurement's critical path.  No device code is involved
@@ -64,8 +64,8 @@ import numpy as np
 
 from .correlation_helpers import calculate_all_zetas
 
-# Central (aperture) and annular (2PCF) fields, in the order
-# three_by_two_pt returns them.
+# Central (aperture) and annular (2PCF) fields, in the order of
+# results.INTEGRATED_FIELDS.
 CENTRAL_FIELDS: Tuple[str, ...] = ("M_a", "M_g")
 ANNULAR_FIELDS: Tuple[str, ...] = ("xi_p", "xi_m", "xi_g", "xi_t")
 FIELDS: Tuple[str, ...] = ("M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
@@ -114,8 +114,8 @@ class ZetaWriter:
 
     Args:
         path: Output HDF5 file.
-        corr: The :class:`~CosmoFuse.correlations.PatchCorrelation` (or
-            :class:`~CosmoFuse.multi_device.MultiDevicePatchCorrelation`) that
+        corr: The :class:`~CosmoFuse.correlations.Integrated3PCF` (or
+            :class:`~CosmoFuse.multi_device.MultiDeviceIntegrated3PCF`) that
             produced the measurements.  Read once, for provenance.
         reduce: ``"zeta"`` (default) stores the eight i3PCF variants;
             ``"none"`` stores the raw per-patch arrays.
@@ -196,13 +196,19 @@ class ZetaWriter:
     # submission (calling thread)
     # ------------------------------------------------------------------ #
 
-    def submit(self, **fields: Any) -> None:
+    def submit(self, result: Any = None, **fields: Any) -> None:
         """Queue one map-set.
 
-        Accepts any subset of ``M_a``, ``M_g``, ``xi_p``, ``xi_m``,
-        ``xi_g``, ``xi_t``, shaped exactly as the measurement methods
-        return them (no leading map axis).  Blocks when the queue is full.
+        Pass an :class:`~CosmoFuse.results.IntegratedResult` (what
+        ``Integrated3PCF.gg`` / ``kk`` / ``kg`` / ``three_by_two_pt`` return),
+        or keyword arrays -- any subset of ``M_a``, ``M_g``, ``xi_p``,
+        ``xi_m``, ``xi_g``, ``xi_t`` -- shaped as the measurement returns them
+        (no leading map axis).  Blocks when the queue is full.
         """
+        if result is not None:
+            if fields:
+                raise ValueError("pass either a result or keyword fields, not both")
+            fields = result.fields()
         self._raise_deferred()
         if self._closed:
             raise RuntimeError("ZetaWriter is closed")
@@ -220,23 +226,6 @@ class ZetaWriter:
         self._queue.put(self._prepare(given))
         with self._lock:
             self._n_submitted += 1
-
-    def submit_three_by_two_pt(self, result: Tuple[Any, ...]) -> None:
-        """Queue a :meth:`PatchCorrelation.three_by_two_pt` result
-        ``(M_a, M_g, xi_p, xi_m, xi_g, xi_t)``."""
-        if len(result) != 6:
-            raise ValueError(f"expected a 6-tuple from three_by_two_pt, got {len(result)}")
-        self.submit(**dict(zip(FIELDS, result)))
-
-    def submit_shear(self, result: Tuple[Any, ...]) -> None:
-        """Queue a :meth:`PatchCorrelation.shear` result
-        ``(M_a, xi_p, xi_m)``."""
-        if len(result) != 3:
-            raise ValueError(
-                f"expected a 3-tuple from shear, got {len(result)}"
-            )
-        M_a, xi_p, xi_m = result
-        self.submit(M_a=M_a, xi_p=xi_p, xi_m=xi_m)
 
     def _prepare(self, given: Mapping[str, Any]) -> Dict[str, Any]:
         """Add the map axis and get everything onto the host.

@@ -13,11 +13,12 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse import PatchCorrelation, calculate_all_zetas
+from CosmoFuse import Integrated3PCF, calculate_all_zetas
 from CosmoFuse import packing
 
 from .cuda_emulation import LAUNCH_LOG
 from .test_gpu_kernel_emulation import emulated_gpu
+from ._results import fields_of
 
 NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
@@ -28,7 +29,7 @@ def make_setup(pack, k=2.0, n_side_centers=4):
     mask = (np.degrees(phi) < 200.0) & (np.abs(90 - np.degrees(theta)) < 55)
     rng = np.random.default_rng(1)
     mask[rng.choice(NPIX, NPIX // 30, replace=False)] = False
-    corr = PatchCorrelation.from_mask(
+    corr = Integrated3PCF.from_mask(
         NSIDE, mask, n_side_centers, patch_size=600, theta_Q=200, f_mask=0.3,
         nbins=5, theta_min=120, theta_max=1100, device="cpu",
         map_precision="float64", rotation_precision="float64",
@@ -118,11 +119,11 @@ class TestPackedMeasurement(unittest.TestCase):
 
     def test_emulated_gpu_packed_kernel_equals_cpu(self):
         corr = self.packed
-        cpu = corr.shear(self.shear[0], self.w, flip_g1=True, return_device=False)
+        cpu = fields_of(corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
             del LAUNCH_LOG[:]
-            gpu = corr.shear(self.shear[0], self.w, flip_g1=True, return_device=False)
+            gpu = fields_of(corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
             self.assertEqual(calls["xipm_tomo_packed_kernel"], 1)
             self.assertIn("gpu_tiled_packed_reduce_xipm", LAUNCH_LOG)
             self.assertNotIn("gpu_tiled_tomo_reduce_xipm", LAUNCH_LOG)
@@ -138,17 +139,17 @@ class TestPackedMeasurement(unittest.TestCase):
         dens = np.asarray(self.shear[1, :, 0]) * 3.0
         wd = np.asarray(self.w[::-1])
         calls_ref = dict(
-            dd=lambda: corr.density(dens, wd, return_device=False),
-            dd_auto=lambda: corr.density_density(
-                dens, wd, gc_auto_correlations_only=True, return_device=False),
-            ggl=lambda: corr.ggl(
-                dens, self.shear[0], wd, self.w, return_N_ap=True, return_device=False),
-            ggl_sub=lambda: corr.density_shear(
-                dens, self.shear[0], wd, self.w, ggl_bin_combinations=[(1, 0)],
-                return_device=False),
-            fused=lambda: corr.three_by_two_pt(
-                shear_maps=self.shear[0], density_maps=dens,
-                weights={"shear": self.w, "density": wd}, flip_g1=True, return_device=False),
+            dd=lambda: fields_of(corr.kk(dens, wd, return_device=False), "M_g", "xi_g"),
+            dd_auto=lambda: corr.kk(
+                dens, wd, auto_only=True, return_device=False, apertures=False).xi_g,
+            ggl=lambda: fields_of(corr.kg(
+                dens, self.shear[0], wd, self.w, m_g=True, return_device=False), "xi_t", "M_g"),
+            ggl_sub=lambda: corr.kg(
+                dens, self.shear[0], wd, self.w, combinations=[(1, 0)],
+                return_device=False).xi_t,
+            fused=lambda: fields_of(corr.three_by_two_pt(
+                shear_maps=self.shear[0], k_maps=dens,
+                weights={"shear": self.w, "density": wd}, flip_g1=True, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
         )
         cpu = {k: f() for k, f in calls_ref.items()}
         with emulated_gpu(corr) as calls:
@@ -179,10 +180,10 @@ class TestPackedMeasurement(unittest.TestCase):
         corr, _ = make_setup(pack=True)
         dens = np.ones((2, NPIX)) + 0.1 * self.shear[1, :, 0]
         ref = dict(
-            ss=corr.shear_shear(self.shear[0], self.w, return_device=False),
-            dd=corr.density_density(dens, self.w, return_device=False),
-            ds=corr.density_shear(dens, self.shear[0], self.w, self.w, return_device=False),
-            fused=corr.three_by_two_pt(shear_maps=self.shear[0], density_maps=dens, return_device=False),
+            ss=fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
+            dd=corr.kk(dens, self.w, return_device=False, apertures=False).xi_g,
+            ds=corr.kg(dens, self.shear[0], self.w, self.w, return_device=False).xi_t,
+            fused=fields_of(corr.three_by_two_pt(shear_maps=self.shear[0], k_maps=dens, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
         )
         with emulated_gpu(corr):
             corr.inds_dev = None
@@ -190,10 +191,10 @@ class TestPackedMeasurement(unittest.TestCase):
             corr.compute_context.inds_i_dev = corr.compute_context.inds_j_dev = None
             corr.compute_context.Q_inds_dev = None
             got = dict(
-                ss=corr.shear_shear(self.shear[0], self.w, return_device=False),
-                dd=corr.density_density(dens, self.w, return_device=False),
-                ds=corr.density_shear(dens, self.shear[0], self.w, self.w, return_device=False),
-                fused=corr.three_by_two_pt(shear_maps=self.shear[0], density_maps=dens, return_device=False),
+                ss=fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
+                dd=corr.kk(dens, self.w, return_device=False, apertures=False).xi_g,
+                ds=corr.kg(dens, self.shear[0], self.w, self.w, return_device=False).xi_t,
+                fused=fields_of(corr.three_by_two_pt(shear_maps=self.shear[0], k_maps=dens, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
             )
             as_list = lambda r: list(r) if isinstance(r, tuple) else [r]
             for key in ref:
@@ -201,13 +202,13 @@ class TestPackedMeasurement(unittest.TestCase):
                     x, y = np.asarray(x), np.asarray(y)
                     np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key)
             with self.assertRaisesRegex(NotImplementedError, "pack_pairs=False"):
-                corr.shear_shear_single(
+                corr._gg_single(
                     self.shear[0, 0, 0], self.shear[0, 0, 1], self.shear[0, 0, 0],
                     self.shear[0, 0, 1], self.w[0], self.w[0])
 
     def test_quantisation_errors_average_out(self):
-        exact = [self.exact.shear(m, self.w, return_device=False) for m in self.shear]
-        packed = [self.packed.shear(m, self.w, return_device=False) for m in self.shear]
+        exact = [fields_of(self.exact.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m") for m in self.shear]
+        packed = [fields_of(self.packed.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m") for m in self.shear]
         for idx, name in ((1, "xi+"), (2, "xi-")):
             e = np.array([r[idx] for r in exact])          # (maps, comb, patch, bin)
             p = np.array([r[idx] for r in packed])
@@ -245,14 +246,14 @@ class TestPackedMeasurement(unittest.TestCase):
 
         corr, _ = make_setup(pack=True, k=None, n_side_centers=2)
         ref, _ = make_setup(pack=False, k=None, n_side_centers=2)
-        a = corr.shear_shear(self.shear[0], self.w, return_device=False)
-        b = ref.shear_shear(self.shear[0], self.w, return_device=False)
+        a = fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")
+        b = fields_of(ref.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")
         for x, y in zip(a, b):
             np.testing.assert_allclose(x, y, rtol=0, atol=2e-4 * np.max(np.abs(y)))
         clone = pickle.loads(pickle.dumps(corr))
         self.assertTrue(clone.pack_pairs)
         clone.prepare()
-        for x, y in zip(a, clone.shear_shear(self.shear[0], self.w, return_device=False)):
+        for x, y in zip(a, fields_of(clone.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")):
             self.assertTrue(np.array_equal(x, y))
 
 

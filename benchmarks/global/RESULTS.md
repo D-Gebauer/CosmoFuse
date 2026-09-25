@@ -7,7 +7,7 @@ device-resident inputs, synchronised wall time, median.
 
 ## Global2PCF (ξ±, 20 log bins 15–250′, full resolution, `pack_pairs=True`)
 
-| nside | footprint rows | unique pairs | tiles (nside) | find | prepare | `shear()` |
+| nside | footprint rows | unique pairs | tiles (nside) | find | prepare | `gg()` |
 |---|---|---|---|---|---|---|
 | 256 | 91 k | — | 8 | 5.6 s | 4.8 s | **2.5 ms** |
 | 512 | 365 k | 6.72 × 10⁸ | 135 (8) | 42 s | 158 s | **33 ms** |
@@ -18,7 +18,7 @@ faster before nside 2048.
 
 ## Global3PCF (shear Γ₀…Γ₃, 12 log bins 15–250′, n_max = 20, all 64 ordered z-triplets)
 
-| nside | ordered pairs | find | device memory | first call (+ normalisation) | `shear()` |
+| nside | ordered pairs | find | device memory | first call (+ normalisation) | `ggg()` |
 |---|---|---|---|---|---|
 | 256 | 8.46 × 10⁷ | 4.2 s | 2.5 GB | 1.7 s | **0.29 s** |
 | 512 | 1.34 × 10⁹ | 129 s | 19.1 GB | 3.7 s | **1.94 s** |

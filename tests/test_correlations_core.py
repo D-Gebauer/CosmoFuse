@@ -1,4 +1,4 @@
-"""Tests for the PatchCorrelation class."""
+"""Tests for the Integrated3PCF class."""
 import sys
 import unittest
 from pathlib import Path
@@ -12,11 +12,12 @@ from scipy.special import binom
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 import CosmoFuse.correlations as correlations_module
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+from ._results import fields_of
 
 
 class TestCorrelation(unittest.TestCase):
-    """Test the PatchCorrelation class."""
+    """Test the Integrated3PCF class."""
 
     def setUp(self):
         """Set up test fixtures."""
@@ -31,7 +32,7 @@ class TestCorrelation(unittest.TestCase):
 
     def test_init_valid_params(self):
         """Test initialization with valid parameters."""
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -49,14 +50,14 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_nside(self):
         """Test initialization with invalid nside."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=0, phi_center=self.phi_center, theta_center=self.theta_center
             )
 
     def test_init_invalid_nbins(self):
         """Test initialization with invalid nbins."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -66,7 +67,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_theta_range(self):
         """Test initialization with invalid theta range."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -77,7 +78,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_patch_size(self):
         """Test initialization with invalid patch_size."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -87,7 +88,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_theta_Q(self):
         """Test initialization with invalid theta_Q."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -97,7 +98,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_mismatched_centers(self):
         """Test initialization with mismatched center arrays."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=np.array([0.0, np.pi / 2]),  # Different length
@@ -108,7 +109,7 @@ class TestCorrelation(unittest.TestCase):
         mask = np.ones(12 * self.nside**2, dtype=bool)
         mask[::2] = False  # Set every other pixel to False
 
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -122,7 +123,7 @@ class TestCorrelation(unittest.TestCase):
         mask = np.ones(100, dtype=bool)  # Wrong length
 
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -131,7 +132,7 @@ class TestCorrelation(unittest.TestCase):
 
     def test_init_precision_configuration(self):
         """Test initialization with custom precision configuration."""
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -146,7 +147,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_map_precision(self):
         """Test initialization with invalid map precision."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -156,7 +157,7 @@ class TestCorrelation(unittest.TestCase):
     def test_init_invalid_rotation_precision(self):
         """Test initialization with invalid rotation precision."""
         with self.assertRaises(ValueError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -164,9 +165,9 @@ class TestCorrelation(unittest.TestCase):
             )
 
     def test_init_rejects_removed_index_precision_kwarg(self):
-        """index_precision has been removed from the public PatchCorrelation API."""
+        """index_precision has been removed from the public Integrated3PCF API."""
         with self.assertRaises(TypeError):
-            PatchCorrelation(
+            Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -175,7 +176,7 @@ class TestCorrelation(unittest.TestCase):
 
     def test_get_pairs_patch(self):
         """Test get_pairs_patch method."""
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -194,7 +195,7 @@ class TestCorrelation(unittest.TestCase):
 
     def test_get_pairs_patch_single_pixel_returns_empty(self):
         """Test get_pairs_patch early return when fewer than 2 pixels are provided."""
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -219,7 +220,7 @@ class TestCorrelation(unittest.TestCase):
             "_get_pairs_numba_kernel",
             wraps=correlations_module._get_pairs_numba_kernel,
         ) as spy_getter:
-            corr = PatchCorrelation(
+            corr = Integrated3PCF(
                 nside=self.nside,
                 phi_center=self.phi_center,
                 theta_center=self.theta_center,
@@ -430,7 +431,7 @@ class TestCorrelation(unittest.TestCase):
         self.assertEqual(outputs[0].size, 0)
 
     def test_to_backend_array_bypasses_transfer_for_backend_native_arrays(self):
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -476,7 +477,7 @@ class TestCorrelation(unittest.TestCase):
         self.assertEqual(calls["to_device"], 1)
 
     def test_shear_shear_accepts_backend_native_arrays_without_transfer(self):
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -535,18 +536,17 @@ class TestCorrelation(unittest.TestCase):
         )
 
         with patch.object(corr, "_xipm_tomo_vectorized", return_value=(xip_dev, xim_dev)):
-            xip, xim = corr.shear_shear(
+            xip, xim = fields_of(corr.gg(
                 shear_maps,
                 weights,
-                sumofweights=sumofweights,
-            )
+                sumofweights=sumofweights, apertures=False), "xi_p", "xi_m")
 
         self.assertEqual(calls["to_device"], 0)
         self.assertEqual(xip.shape, (nzbin_combs, corr.n_patches, corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, corr.n_patches, corr.nbins))
 
     def test_backend_native_array_device_checks_and_native_fingerprint(self):
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -598,7 +598,7 @@ class TestCorrelation(unittest.TestCase):
         )
 
     def test_get_aperture_methods_accept_backend_native_arrays_without_input_transfer(self):
-        corr = PatchCorrelation(
+        corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
             theta_center=self.theta_center,
@@ -702,8 +702,8 @@ class TestCorrelation(unittest.TestCase):
         w = FakeGPUArray(np.full(npix, 1.0, dtype=np.float64), device_id=0)
         density = FakeGPUArray(np.full(npix, 2.0, dtype=np.float64), device_id=0)
 
-        shear_out = corr.aperture_shear_single(g1, g2, w, aperture_filter=None)
-        density_out = corr.aperture_density_single(density, w, aperture_filter=None)
+        shear_out = corr._m_a_single(g1, g2, w, aperture_filter=None)
+        density_out = corr._m_g_single(density, w, aperture_filter=None)
 
         self.assertEqual(calls["native_input_to_device"], 0)
         self.assertEqual(shear_out.shape, (corr.Q_patch_area_flat.shape[0],))
@@ -716,7 +716,7 @@ class TestCrossOrientationEstimator(unittest.TestCase):
     A cross-bin pair contributes in both orientations.  CosmoFuse takes the
     ratio of the summed orientations, (N_ab + N_ba) / (W_ab + W_ba) -- the
     standard weighted estimator, TreeCorr's definition.  The single-map
-    ``shear_shear_single`` used to average the two orientation *ratios*
+    ``_gg_single`` used to average the two orientation *ratios*
     instead; both paths must now agree exactly.
     """
 
@@ -728,7 +728,7 @@ class TestCrossOrientationEstimator(unittest.TestCase):
         npix = hp.nside2npix(nside)
         theta_pix, _ = hp.pix2ang(nside, np.arange(npix))
         mask = theta_pix < 1.3
-        cls.corr = PatchCorrelation(
+        cls.corr = Integrated3PCF(
             nside,
             np.array([0.4, 0.9]),
             np.array([0.9, 1.0]),
@@ -752,8 +752,8 @@ class TestCrossOrientationEstimator(unittest.TestCase):
 
     def test_single_map_matches_the_tomographic_wrapper(self):
         c, g, w = self.corr, self.shear, self.w
-        xip_t, xim_t = c.shear_shear(g, w, return_device=False)
-        xip_s, xim_s = c.shear_shear_single(
+        xip_t, xim_t = fields_of(c.gg(g, w, return_device=False, apertures=False), "xi_p", "xi_m")
+        xip_s, xim_s = c._gg_single(
             g[0, 0], g[0, 1], g[1, 0], g[1, 1], w[0], w[1], return_device=False
         )
         # combination order is (0,0), (0,1), (1,1) -> the cross entry is 1
@@ -762,10 +762,10 @@ class TestCrossOrientationEstimator(unittest.TestCase):
 
     def test_symmetric_under_swapping_the_two_fields(self):
         c, g, w = self.corr, self.shear, self.w
-        xip, xim = c.shear_shear_single(
+        xip, xim = c._gg_single(
             g[0, 0], g[0, 1], g[1, 0], g[1, 1], w[0], w[1], return_device=False
         )
-        swapped = c.shear_shear_single(
+        swapped = c._gg_single(
             g[1, 0], g[1, 1], g[0, 0], g[0, 1], w[1], w[0], return_device=False
         )
         np.testing.assert_allclose(xip, swapped[0], rtol=0, atol=1e-14)

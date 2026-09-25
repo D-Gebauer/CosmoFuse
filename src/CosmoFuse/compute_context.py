@@ -3,7 +3,7 @@ Device buffer and cache management for correlation computations.
 
 ComputeContext holds all GPU/CPU device-side arrays and caches needed
 during correlation measurements.  It separates the mutable runtime
-state from the PatchCorrelation object, making it easy to invalidate
+state from the Integrated3PCF object, making it easy to invalidate
 buffers when the pair geometry changes (e.g. after a new preprocess()
 call) without touching the rest of the object.
 

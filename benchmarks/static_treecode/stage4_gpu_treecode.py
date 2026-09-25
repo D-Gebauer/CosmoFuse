@@ -17,7 +17,12 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -44,13 +49,13 @@ def scale_rel(a, b):
 
 
 def timed_calls(corr, maps, w, n):
-    corr.shear(maps[0], w, flip_g1=True, return_device=False)
+    fields_of(corr.gg(maps[0], w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
     sync(corr)
     times, results = [], []
     for k in range(n):
         sync(corr)
         t0 = time.perf_counter()
-        out = corr.shear(maps[k % len(maps)], w, flip_g1=True, return_device=False)
+        out = fields_of(corr.gg(maps[k % len(maps)], w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
         sync(corr)
         times.append(time.perf_counter() - t0)
         if k < len(maps):
@@ -87,14 +92,14 @@ def part_a(args, out):
         ("gpu_f64", "gpu", "float64", "same"),
         ("gpu_f32_acc64", "gpu", "float32", "float64"),
     ):
-        corr = PatchCorrelation(nside, phi[:n_par], theta[:n_par], device=dev, map_precision=mp,
+        corr = Integrated3PCF(nside, phi[:n_par], theta[:n_par], device=dev, map_precision=mp,
                            accumulation_precision=acc, rotation_precision="float64",
                            resolution_factor=args.k_parity, aperture_nside=256, **geo)
         corr.preprocess()
         rows = np.ascontiguousarray(cut[0], dtype=mp)
         w = np.ascontiguousarray(w_full[:, corr.row_pix], dtype=mp)
         res[name] = [np.asarray(o, dtype=np.float64) for o in
-                     corr.shear(rows, w, flip_g1=True, return_device=False)]
+                     fields_of(corr.gg(rows, w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")]
         levels = corr.level_table["nside"].tolist()
         del corr
     out["A_parity"] = {
@@ -108,7 +113,7 @@ def part_a(args, out):
     out["A_speed"] = {}
     ref = None
     for k in [None] + list(args.k):
-        corr = PatchCorrelation(nside, phi, theta, device="gpu", map_precision="float32",
+        corr = Integrated3PCF(nside, phi, theta, device="gpu", map_precision="float32",
                            accumulation_precision="float64", resolution_factor=k, **geo)
         t0 = time.perf_counter()
         if k is None:
@@ -154,7 +159,7 @@ def part_b(args, out):
     edges = edges[edges < 2 * Q - 5]
     out["B"] = {}
     for k in args.k2048:
-        corr = PatchCorrelation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
+        corr = Integrated3PCF(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0],
                            theta_max=edges[-1], patch_size=Q, theta_Q=Q, mask=mask,
                            device="gpu", map_precision="float32", accumulation_precision="float64",
                            resolution_factor=k, aperture_nside=512)

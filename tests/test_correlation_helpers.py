@@ -595,13 +595,13 @@ def test_symmetric_override_beats_xi_t_symmetric():
 
 def test_zeta_cross_triplets_is_the_row_order():
     from CosmoFuse.correlation_helpers import _cross_indices
-    from CosmoFuse.correlations import PatchCorrelation
+    from CosmoFuse.correlations import Integrated3PCF
 
     for n_centre, n_comb in ((5, 10), (4, 15), (5, 20), (4, 20), (1, 1)):
         indices = _cross_indices(n_centre, n_comb)
         assert list(
             zip(indices.centers.tolist(), indices.pairs.tolist())
-        ) == PatchCorrelation.zeta_cross_triplets(n_centre, n_comb)
-    assert PatchCorrelation.zeta_cross_triplets(2, 3) == [
+        ) == Integrated3PCF.zeta_cross_triplets(n_centre, n_comb)
+    assert Integrated3PCF.zeta_cross_triplets(2, 3) == [
         (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)
     ]

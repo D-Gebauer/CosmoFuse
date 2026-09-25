@@ -4,7 +4,12 @@ Interleaved A/B rounds on (a) the production nside-512 full-resolution
 geometry with real maps and (b) the nside-2048 treecode geometry."""
 import argparse, json, time
 import h5py, healpy as hp, numpy as np
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+
+
+def fields_of(result, *names):
+    return tuple(getattr(result, n) for n in names)
+
 
 SBI = "/e/ocean1/users/dgebauer/sbi"
 MASK = "/home/moon/dgebauer/research/lfi/local/DESY3_Mask.fits"
@@ -19,14 +24,14 @@ def ab(corr, shear_dev, w_dev, rounds, calls):
     res, times = {}, {True: [], False: []}
     for tiled in (True, False):  # warm-up / compile
         kern.tiled = tiled
-        res[tiled] = [np.asarray(o.get(), dtype=np.float64) for o in corr.shear_shear(shear_dev, w_dev, flip_g1=True)]
+        res[tiled] = [np.asarray(o.get(), dtype=np.float64) for o in fields_of(corr.gg(shear_dev, w_dev, flip_g1=True, apertures=False), "xi_p", "xi_m")]
     for _ in range(rounds):
         for tiled in (True, False):
             kern.tiled = tiled
             ts = []
             for _ in range(calls):
                 sync(corr); t0 = time.perf_counter()
-                corr.shear_shear(shear_dev, w_dev, flip_g1=True)
+                fields_of(corr.gg(shear_dev, w_dev, flip_g1=True, apertures=False), "xi_p", "xi_m")
                 sync(corr); ts.append(time.perf_counter() - t0)
             times[tiled].append(np.median(ts))
     kern.tiled = True
@@ -58,7 +63,7 @@ def main():
         cut = np.load(f"{SBI}/shear_maps/grid_baryonified/4BINS/gamma_0000.npy").reshape(-1, 4, 2, 369190)[0]
         w = np.load(f"{SBI}/shear_maps/SumOfWeights_512.npy")
         for mp, acc in (("float32", "float64"), ("float64", "same")):
-            corr = PatchCorrelation(nside, phi, theta, nbins=int(attrs["nbins"]),
+            corr = Integrated3PCF(nside, phi, theta, nbins=int(attrs["nbins"]),
                                theta_min=float(np.degrees(attrs["theta_min"]) * 60),
                                theta_max=float(np.degrees(attrs["theta_max"]) * 60),
                                patch_size=110., theta_Q=110., mask=des_map, device="gpu",
@@ -79,7 +84,7 @@ def main():
         phi = np.loadtxt(f"{SBI}/CosmoFuse/Q110/patch_center_original_phi.dat")
         theta = np.loadtxt(f"{SBI}/CosmoFuse/Q110/patch_center_original_theta.dat")
         edges = np.geomspace(5.0, 250.0, 12); edges = edges[edges < 215]
-        corr = PatchCorrelation(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
+        corr = Integrated3PCF(nside, phi, theta, nbins=len(edges) - 1, theta_min=edges[0], theta_max=edges[-1],
                            patch_size=110, theta_Q=110, mask=mask, device="gpu", map_precision="float32",
                            accumulation_precision="float64", resolution_factor=2.9, aperture_nside=512)
         corr.load_pairs(args.pairs2048, release_host_pairs=True)

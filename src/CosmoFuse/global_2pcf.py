@@ -1,5 +1,6 @@
 """
-Footprint-wide two-point correlation functions (ξ±, ξ_g = w(θ), ξ_t = γ_t).
+Footprint-wide two-point correlation functions: ``gg`` (ξ±), ``kk`` (w(θ) of
+overdensity maps) and ``kg`` (γ_t), in TreeCorr's field-code vocabulary.
 
 :class:`Global2PCF` measures the 2PCFs of the whole footprint -- every pixel
 pair once -- with the same precompute-once / measure-many workflow as the
@@ -8,15 +9,15 @@ patch estimator:
 1. ``preprocess()`` finds the pairs once (per tile, see
    :mod:`CosmoFuse.global_geometry`) and prepares them on the device;
 2. every measurement call runs the **same pair kernels** as
-   :class:`~CosmoFuse.correlations.PatchCorrelation` (CPU Numba and GPU
+   :class:`~CosmoFuse.correlations.Integrated3PCF` (CPU Numba and GPU
    tiled / packed CUDA kernels, static treecode, row space, sign flips),
    with tiles in the role of patches;
-3. the per-tile numerators and weight sums are added up and divided once:
-   the ratio-of-sums estimator over the whole footprint (TreeCorr's
-   definition).  ``per_tile=True`` returns the per-tile sums instead -- the
-   raw material of a delete-one-tile jackknife.
+3. the result (:class:`~CosmoFuse.results.TwoPointResult`) holds the
+   per-tile numerators and weight sums; the estimate is their ratio over the
+   whole footprint (ratio of sums, TreeCorr's definition), and
+   ``jackknife()`` gives the delete-one-tile estimates.
 
-Internally the tile pairs are handed to a :class:`PatchCorrelation` whose
+Internally the tile pairs are handed to an :class:`Integrated3PCF` whose
 groups are tiles (:class:`_TileEngine`); it only overrides the normalisation
 seam ``_finish_pair_sums`` to keep the sums.  Everything that makes the patch
 path fast is therefore shared, not duplicated.
@@ -28,8 +29,7 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from .backend import safe_divide
-from .correlations import PatchCorrelation
+from .correlations import Integrated3PCF
 from .global_geometry import (
     LevelElements,
     TileSet,
@@ -37,6 +37,7 @@ from .global_geometry import (
     radec_to_xyz,
     unique_pairs,
 )
+from .results import TwoPointResult
 from .treecode import TreecodeGeometry, build_patch_cells, level_groups
 from .utils import pixel2RaDec
 
@@ -44,8 +45,8 @@ FORMAT_KIND = "CosmoFuse.Global2PCF"
 FORMAT_VERSION = 1
 
 
-class _TileEngine(PatchCorrelation):
-    """A :class:`PatchCorrelation` whose groups are tiles.
+class _TileEngine(Integrated3PCF):
+    """A :class:`Integrated3PCF` whose groups are tiles.
 
     Pairs are injected by :class:`Global2PCF`; the normalisation seam keeps
     the per-tile sums (``captured``) instead of dividing per group.
@@ -85,7 +86,7 @@ class Global2PCF:
             pass a larger ``tile_nside`` if it does not.
         device, map_precision, rotation_precision, accumulation_precision,
         resolution_factor, pair_search_precision, pack_pairs, fastmath:
-            as for :class:`~CosmoFuse.correlations.PatchCorrelation`.  The
+            as for :class:`~CosmoFuse.correlations.Integrated3PCF`.  The
             static treecode builds its cells over the whole footprint (there
             is no patch window to preserve), from the binary mask.
     """
@@ -120,7 +121,7 @@ class Global2PCF:
             auto_tiles = True
         else:
             auto_tiles = False
-        # The engine is a PatchCorrelation over *tiles*; its patch centres are
+        # The engine is a Integrated3PCF over *tiles*; its patch centres are
         # the tile centres and its patch_size/theta_Q are never used (no
         # patch search, no aperture).
         self._engine = _TileEngine(
@@ -452,49 +453,45 @@ class Global2PCF:
     # measurements
     # ------------------------------------------------------------------ #
 
-    def _reduce(
+    def _result(
         self,
-        captured: Tuple[Tuple[Any, ...], Any, int],
-        per_tile: bool,
+        statistic: str,
+        names: Tuple[str, ...],
+        combinations: Sequence[Tuple[int, int]],
         return_device: bool,
-    ) -> Tuple[Any, ...]:
-        nums, den, ncomb = captured
+    ) -> TwoPointResult:
         e = self._engine
+        nums, den, ncomb = e.take_captured()
         xp = e.backend.module
         shape = (ncomb, self.n_tiles, self.nbins)
-        nums = tuple(xp.real(n).reshape(shape) for n in nums)
-        den = xp.real(den).reshape(shape)
-        if per_tile:
-            out: Tuple[Any, ...] = nums + (den,)
-        else:
-            den_sum = den.astype(xp.float64).sum(axis=1)
-            map_dt = getattr(xp, e.map_dtype.name)
-            out = tuple(
-                safe_divide(xp, n.astype(xp.float64).sum(axis=1), den_sum).astype(
-                    map_dt, copy=False
-                )
-                for n in nums
-            )
+        acc = getattr(xp, e.acc_dtype.name)
+        tile_num = {n: xp.real(a).reshape(shape).astype(acc, copy=False) for n, a in zip(names, nums)}
+        tile_weight = xp.real(den).reshape(shape).astype(acc, copy=False)
+        res = TwoPointResult(
+            statistic, np.asarray(self.binedges).copy(),
+            tuple((int(a), int(b)) for a, b in combinations), tile_num, tile_weight,
+        )
         if return_device and e.backend.name == "cupy":
-            return out
-        return tuple(np.asarray(e.backend.to_numpy(a)) for a in out)
+            return res
+        return TwoPointResult(
+            res.statistic, res.binedges, res.combinations,
+            {k: np.asarray(e.backend.to_numpy(v)) for k, v in tile_num.items()},
+            np.asarray(e.backend.to_numpy(tile_weight)),
+        )
 
-    def shear(
+    def gg(
         self,
         shear_maps: Any,
         w: Any,
         flip_g1: bool = False,
         flip_g2: bool = False,
-        per_tile: bool = False,
         return_device: bool = True,
-    ) -> Tuple[Any, ...]:
-        """Tomographic ξ+ and ξ- of the footprint.
+    ) -> TwoPointResult:
+        """Tomographic ξ± of the footprint (TreeCorr ``GGCorrelation``).
 
         ``shear_maps``: ``(nz, 2, npix | n_active)``; ``w``: ``(nz, npix |
-        n_active)``.  Returns ``(xi_p, xi_m)``, each ``(nz(nz+1)/2, nbins)``
-        in upper-triangle combination order.  ``per_tile=True`` returns
-        ``(num_p, num_m, den)``, each ``(ncomb, n_tiles, nbins)``: the
-        per-tile sums whose totals give the estimate.
+        n_active)``.  Returns a ``"gg"`` :class:`TwoPointResult` with
+        ``.xi_p``, ``.xi_m``, rows = upper-triangle ``combinations``.
         """
         e = self._engine
         e._ensure_prepared()
@@ -514,101 +511,93 @@ class Global2PCF:
         )
         if res is None:
             raise RuntimeError("the tomographic ξ± kernel is unavailable on this backend")
-        return self._reduce(e.take_captured(), per_tile, return_device)
+        return self._result("gg", ("xi_p", "xi_m"), Integrated3PCF.tomo_combinations(nz), return_device)
 
-    def density(
+    def kk(
         self,
-        density_maps: Any,
+        k_maps: Any,
         w: Any,
         auto_only: bool = False,
-        per_tile: bool = False,
         return_device: bool = True,
-    ) -> Any:
-        """Tomographic w(θ) of the footprint: the *field* estimator
-        ``Σ w_i w_j δ_i δ_j / Σ w_i w_j`` on overdensity maps, like the patch
-        estimator (TreeCorr's ``KKCorrelation`` with ``k = δ``, not the
-        pair-count ``NNCorrelation``).
+    ) -> TwoPointResult:
+        """Tomographic correlation of scalar fields -- w(θ) for overdensity
+        maps: ``Σ w_i w_j δ_i δ_j / Σ w_i w_j`` (TreeCorr ``KKCorrelation``
+        with ``k = δ``; equal to Landy-Szalay with randoms at the pixel
+        centres when ``w`` is the pixel coverage).
 
-        Returns ``(ncomb, nbins)`` -- upper-triangle combinations, or the
-        ``nz`` auto-correlations with ``auto_only=True``.  ``per_tile=True``
-        returns ``(num, den)``, each ``(ncomb, n_tiles, nbins)``.
+        Returns a ``"kk"`` :class:`TwoPointResult` with ``.xi``; rows = upper
+        triangle, or the ``nz`` auto-correlations with ``auto_only=True``.
         """
         e = self._engine
         e._ensure_prepared()
-        arr = e._coerce_map_input_array(density_maps)
+        arr = e._coerce_map_input_array(k_maps)
         if arr.ndim != 2:
-            raise ValueError(f"density_maps must be (nz, npix); got {arr.shape}")
-        e._density_density_tomo_vectorized(
-            arr, w, None, int(arr.shape[0]), gc_auto_correlations_only=auto_only
+            raise ValueError(f"k_maps must be (nz, npix); got {arr.shape}")
+        nz = int(arr.shape[0])
+        e._density_density_tomo_vectorized(arr, w, None, nz, gc_auto_correlations_only=auto_only)
+        return self._result(
+            "kk", ("xi",), Integrated3PCF.tomo_combinations(nz, auto_only), return_device
         )
-        out = self._reduce(e.take_captured(), per_tile, return_device)
-        return out if per_tile else out[0]
 
-    def ggl(
+    def kg(
         self,
-        density_maps: Any,
+        k_maps: Any,
         shear_maps: Any,
-        density_weights: Any,
+        k_weights: Any,
         shear_weights: Any,
-        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
-        per_tile: bool = False,
         return_device: bool = True,
-    ) -> Any:
-        """Tomographic γ_t (lens density × source shear) of the footprint:
-        ``Σ w_l w_s δ_l γ_t / Σ w_l w_s`` (TreeCorr's ``KGCorrelation`` with
-        ``k = δ``, not ``NGCorrelation``).
+    ) -> TwoPointResult:
+        """Tomographic γ_t of scalar (lens δ) × shear (source) maps:
+        ``Σ w_l w_s δ_l γ_t / Σ w_l w_s`` (TreeCorr ``KGCorrelation``).
 
-        All ``(lens, source)`` combinations in row-major order, or the given
-        ``ggl_bin_combinations``.  Returns ``(ncomb, nbins)``;
-        ``per_tile=True`` returns ``(num, den)``.
+        Rows: all ``(lens, source)`` combinations, lens-major, or the given
+        ``combinations`` in order.  Returns a ``"kg"`` :class:`TwoPointResult`
+        with ``.xi``.
         """
         e = self._engine
         e._ensure_prepared()
-        d_arr = e._coerce_map_input_array(density_maps)
+        d_arr = e._coerce_map_input_array(k_maps)
         s_arr = e._coerce_map_input_array(shear_maps)
-        wd = e._coerce_map_input_array(density_weights)
+        wd = e._coerce_map_input_array(k_weights)
         ws = e._coerce_map_input_array(shear_weights)
         if d_arr.ndim != 2 or wd.shape != d_arr.shape:
-            raise ValueError("density_maps and density_weights must both be (n_lens, npix)")
+            raise ValueError("k_maps and k_weights must both be (n_lens, npix)")
         if s_arr.ndim != 3 or s_arr.shape[1] != 2 or tuple(ws.shape) != (s_arr.shape[0], s_arr.shape[2]):
             raise ValueError("shear_maps must be (n_source, 2, npix), shear_weights (n_source, npix)")
+        nl, ns = int(d_arr.shape[0]), int(s_arr.shape[0])
         e._density_shear_tomo_vectorized(
-            d_arr, s_arr, wd, ws, None, int(d_arr.shape[0]), int(s_arr.shape[0]),
-            ggl_bin_combinations=ggl_bin_combinations,
+            d_arr, s_arr, wd, ws, None, nl, ns,
+            ggl_bin_combinations=combinations,
             shear_signs=(-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0),
         )
-        out = self._reduce(e.take_captured(), per_tile, return_device)
-        return out if per_tile else out[0]
+        return self._result(
+            "kg", ("xi",), Integrated3PCF.kg_combinations(nl, ns, combinations), return_device
+        )
 
     def three_by_two_pt(
         self,
         shear_maps: Any,
-        density_maps: Any,
+        k_maps: Any,
         shear_weights: Any,
-        density_weights: Any,
+        k_weights: Any,
         auto_only: bool = False,
-        ggl_bin_combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-    ) -> Tuple[Any, Any, Any, Any]:
-        """``(xi_p, xi_m, xi_g, xi_t)`` of the footprint in one call (the
-        three pair statistics share one row expansion)."""
+    ) -> Dict[str, TwoPointResult]:
+        """``{"gg": ..., "kk": ..., "kg": ...}`` in one call (the three pair
+        statistics share one row expansion)."""
         e = self._engine
         with e._expansion_scope():
-            xi_p, xi_m = self.shear(
-                shear_maps, shear_weights, flip_g1=flip_g1, flip_g2=flip_g2,
-                return_device=return_device,
-            )
-            xi_g = self.density(
-                density_maps, density_weights, auto_only=auto_only,
-                return_device=return_device,
-            )
-            xi_t = self.ggl(
-                density_maps, shear_maps, density_weights, shear_weights,
-                ggl_bin_combinations=ggl_bin_combinations,
-                flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
-            )
-        return xi_p, xi_m, xi_g, xi_t
+            return {
+                "gg": self.gg(shear_maps, shear_weights, flip_g1=flip_g1, flip_g2=flip_g2,
+                              return_device=return_device),
+                "kk": self.kk(k_maps, k_weights, auto_only=auto_only, return_device=return_device),
+                "kg": self.kg(k_maps, shear_maps, k_weights, shear_weights,
+                              combinations=combinations, flip_g1=flip_g1, flip_g2=flip_g2,
+                              return_device=return_device),
+            }

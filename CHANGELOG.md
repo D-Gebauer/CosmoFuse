@@ -2,47 +2,65 @@
 
 ## 7.0.0 (2026-09-25)
 
-**Breaking.** A new public vocabulary shared by three estimators, and two new
-estimators that measure the whole footprint instead of patches.  There are no
-aliases for the old names.
+**Breaking.** One vocabulary for three estimators, labelled results instead
+of positional tuples, and two new estimators that measure the whole footprint
+instead of patches.  There are no aliases for the old names.
 
-### Renamed (patch estimator)
+- **Classes are named after the statistic they deliver**: `Integrated3PCF`
+  (was `Correlation`), `Global2PCF`, `Global3PCF`.  The multi-GPU class is
+  internal; `Integrated3PCF(..., device=[0, 1])` builds it.
+- **Methods are TreeCorr's field codes** -- `g` = shear, `k` = scalar field
+  (overdensity δ or convergence): `gg`, `kk`, `kg`, `three_by_two_pt` on the
+  2-point estimators, `ggg`, `kkk`, `kgg`, `kkg`, `measure` on `Global3PCF`.
+  The density statistics are field estimators (TreeCorr `KK`/`KG` with
+  `k = δ`), which the names now say.
+- **Results are labelled objects**: `IntegratedResult` (`M_a`, `M_g`, `xi_p`,
+  `xi_m`, `xi_g`, `xi_t` + `gg/kk/kg_combinations`, `theta`, `zetas()`),
+  `TwoPointResult` (per-tile sums, `xi_p`/`xi_m`/`xi`, `combinations`,
+  `jackknife()`, `+`), `ThreePointResult` (multipole sums, `binned()`,
+  `to_centroid()`, `+`).
 
 | before | after |
 |---|---|
-| `Correlation` | `PatchCorrelation` |
-| `MultiDeviceCorrelation` | `MultiDevicePatchCorrelation` |
-| `get_full_tomo_shear` / `_density` / `_ggl` | `shear` / `density` / `ggl` |
-| `get_3x2pt_tomo` | `three_by_two_pt` |
-| `vectorized_shear_shear` / `_density_density` / `_density_shear` | `shear_shear` / `density_density` / `density_shear` |
-| `_compute_tomo_aperture_shear` / `_density` (private) | `aperture_shear` / `aperture_density` (public) |
-| `get_aperture_shear` / `_density`, `compute_shear_shear` / `_density_density` / `_density_shear` | `aperture_shear_single`, ..., `density_shear_single` (one map / one map pair) |
+| `Correlation` | `Integrated3PCF` |
+| `MultiDeviceCorrelation` | internal (`Integrated3PCF(..., device=[...])`) |
+| `get_full_tomo_shear(...)` → `(M_a, xi_p, xi_m)` | `gg(...)` → `IntegratedResult` |
+| `vectorized_shear_shear(...)` → `(xi_p, xi_m)` | `gg(..., apertures=False)` |
+| `get_full_tomo_density(...)` → `(M_g, xi_g)` | `kk(...)` |
+| `vectorized_density_density(...)` → `xi_g` | `kk(..., apertures=False)` |
+| `get_full_tomo_ggl(..., return_N_ap, return_M_ap)` | `kg(..., m_g=, m_a=)` |
+| `vectorized_density_shear(...)` → `xi_t` | `kg(...)` |
+| `get_3x2pt_tomo(...)` → 6-tuple | `three_by_two_pt(...)` → `IntegratedResult` |
+| `_compute_tomo_aperture_shear` / `_density` (private) | `m_a` / `m_g` (public) |
+| `get_aperture_*`, `compute_*` (single map / map pair) | removed from the public API (private `_*_single` references remain) |
 | `calculate_pairs_2PCF` / `calculate_pairs_M_a` | `find_pairs` / `find_aperture_pairs` |
 | `_aperture_filter_key` (private) | `aperture_filter_key` (public) |
-| `ZetaWriter.submit_3x2pt` | `ZetaWriter.submit_three_by_two_pt` |
+| `ggl_combinations(..., ggl_bin_combinations=)` | `kg_combinations(..., combinations=)` |
+| keyword `gc_auto_correlations_only` / `ggl_bin_combinations` | `auto_only` / `combinations` |
+| `ZetaWriter.submit_shear(tuple)` / `submit_3x2pt(tuple)` | `ZetaWriter.submit(result)` (keyword arrays still accepted) |
 
-The class says *what* is measured, the method *which fields*: `shear(maps, w)`
-exists on every estimator and returns that estimator's statistic.  Results of
-the patch estimator are bitwise unchanged; its three pair statistics now
+Numbers are bitwise unchanged: the public methods wrap the unchanged
+implementations and only label their outputs.  The three pair statistics now
 normalise through one method (`_finish_pair_sums`).
 
 ### New: `Global2PCF`
 
-Tomographic ξ±, w(θ) and γ_t of the whole footprint, every pixel pair once,
-ratio of sums over the footprint.  Pairs are found once per HEALPix tile
+`gg` (ξ±), `kk` (w(θ)) and `kg` (γ_t) of the whole footprint, every pixel
+pair once, ratio of sums over the footprint; equal to TreeCorr `brute=True`
+with `metric="Arc"` on the pixel centres up to TreeCorr's rounding (~1e-8).  Pairs are found once per HEALPix tile
 (`tile_nside`) and measured with the patch estimator's own kernels (CPU Numba,
 GPU tiled/packed CUDA, row space, static treecode with footprint-wide cells,
-payload packing).  `per_tile=True` returns the per-tile sums (jackknife).
-Gate: equals a `PatchCorrelation` whose one patch holds the whole footprint to
+payload packing).  The result keeps the per-tile sums (`jackknife()`).
+Gate: equals an `Integrated3PCF` whose one patch holds the whole footprint to
 <= 1e-12, for any tiling, with the treecode and with packing.
 
 ### New: `Global3PCF`
 
 Footprint-wide three-point functions by multipole decomposition: shear
-Γ₀…Γ₃ (`shear`), the scalar ζ (`density`), and any spin-0/spin-2 triplet with
-any conjugations (`measure` + `Component`).  Returns `ThreePointMultipoles`
-(numerator and weight multipoles, `binned()` into opening-angle bins,
-`to_centroid()`).  New CUDA kernel `cuda/threepoint_multipoles.cu` (+ numpy
+Γ₀…Γ₃ (`ggg`), the scalar ζ (`kkk`), `kgg`, `kkg`, and any spin-0/spin-2
+triplet with any conjugations (`measure` + `Component`).  Returns a
+`ThreePointResult` (numerator and weight multipoles, `binned()` into
+opening-angle bins, `to_centroid()`).  New CUDA kernel `cuda/threepoint_multipoles.cu` (+ numpy
 twin); step 2 is batched GEMMs on the device.  Gate: every component equals an
 explicit triplet loop with independent geometry to <= 1e-12.  Full resolution
 and one device only.  Measured cost: `benchmarks/global/RESULTS.md` (nside 512

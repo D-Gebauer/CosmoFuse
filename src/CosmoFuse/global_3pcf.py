@@ -30,7 +30,7 @@ bins is the ratio of the angle-binned sums,
     c_n^k = (1/2pi) int_{bin k} exp(-i n phi) dphi,
 
 which converges to the brute-force binned estimator as ``n_max`` grows
-(:meth:`ThreePointMultipoles.binned`).  ``to_centroid`` converts to the
+(:meth:`~CosmoFuse.results.ThreePointResult.binned`).  ``to_centroid`` converts to the
 centroid projection (flat-sky triangle geometry at the bin centres).
 
 Algorithm
@@ -65,133 +65,13 @@ import numpy as np
 
 from .backend import get_backend
 from .global_geometry import TileSet, default_tile_nside, ordered_pairs, radec_to_xyz
+from .results import Component, ThreePointResult
 from .utils import live_object_serial, pixel2RaDec
 
 FORMAT_KIND = "CosmoFuse.Global3PCF"
 FORMAT_VERSION = 1
 
 _FLOATS = {"float32": np.float32, "float64": np.float64}
-
-
-# ── results ───────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class Component:
-    """One three-point function: which field sits at which vertex, and which
-    vertices are complex conjugated.  ``fields = (centre, leg 2, leg 3)``."""
-
-    label: str
-    fields: Tuple[str, str, str]
-    conj: Tuple[bool, bool, bool] = (False, False, False)
-
-
-@dataclass
-class ThreePointMultipoles:
-    """Multipoles of one or more three-point functions.
-
-    ``num[label]`` and ``norm[label]``: complex arrays of shape
-    ``(2 n_max + 1, nz_centre, nz_leg2, nz_leg3, nbins, nbins)`` -- axis 0 is
-    ``n = -n_max .. n_max``, the last two are the radial bins of legs 2 and
-    3.  Sums, not ratios: results of different tiles, chunks or devices add
-    (``+``), and the estimate is formed in opening-angle bins
-    (:meth:`binned`).
-    """
-
-    n_max: int
-    binedges: np.ndarray
-    components: Tuple[Component, ...]
-    spins: Dict[str, int]
-    num: Dict[str, np.ndarray]
-    norm: Dict[str, np.ndarray]
-
-    @property
-    def n(self) -> np.ndarray:
-        return np.arange(-self.n_max, self.n_max + 1)
-
-    @property
-    def bincenters(self) -> np.ndarray:
-        """Geometric radial bin centres (arcmin)."""
-        e = np.degrees(np.asarray(self.binedges)) * 60.0
-        return np.sqrt(e[1:] * e[:-1])
-
-    def __add__(self, other: "ThreePointMultipoles") -> "ThreePointMultipoles":
-        if (
-            other.n_max != self.n_max
-            or other.components != self.components
-            or not np.array_equal(other.binedges, self.binedges)
-        ):
-            raise ValueError("can only add multipoles of the same definition")
-        return ThreePointMultipoles(
-            self.n_max,
-            self.binedges,
-            self.components,
-            dict(self.spins),
-            {k: self.num[k] + other.num[k] for k in self.num},
-            {k: self.norm[k] + other.norm[k] for k in self.norm},
-        )
-
-    @staticmethod
-    def _phi_coefficients(n: np.ndarray, phi_edges: np.ndarray) -> np.ndarray:
-        """``c_n^k = (1/2pi) int_{bin k} exp(-i n phi) dphi``, shape (nphi, n)."""
-        a = np.asarray(phi_edges[:-1], dtype=np.float64)[:, None]
-        b = np.asarray(phi_edges[1:], dtype=np.float64)[:, None]
-        nn = n[None, :].astype(np.float64)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            c = (np.exp(-1j * nn * a) - np.exp(-1j * nn * b)) / (2j * np.pi * nn)
-        c[:, n == 0] = (b - a) / (2.0 * np.pi)
-        return c
-
-    def binned(
-        self, phi_edges: Optional[np.ndarray] = None, nphi: int = 16
-    ) -> Dict[str, np.ndarray]:
-        """Estimate in opening-angle bins (x-projection).
-
-        ``phi_edges`` default: ``nphi`` equal bins on ``[-pi, pi]``.  Returns
-        ``label -> (nz1, nz2, nz3, nbins, nbins, nphi)``; bins without
-        triangles are 0.
-        """
-        if phi_edges is None:
-            phi_edges = np.linspace(-np.pi, np.pi, nphi + 1)
-        c = self._phi_coefficients(self.n, np.asarray(phi_edges))
-        out = {}
-        for comp in self.components:
-            # sum_n c_n Gamma_{-n}: reverse the n axis
-            num = np.einsum("kn,n...->...k", c, self.num[comp.label][::-1])
-            den = np.einsum("kn,n...->...k", c, self.norm[comp.label][::-1])
-            with np.errstate(divide="ignore", invalid="ignore"):
-                val = np.where(den != 0, num / den, 0.0)
-            out[comp.label] = val
-        return out
-
-    def to_centroid(
-        self, binned: Mapping[str, np.ndarray], phi_edges: Optional[np.ndarray] = None,
-        nphi: int = 16,
-    ) -> Dict[str, np.ndarray]:
-        """Convert :meth:`binned` values from the x- to the centroid
-        projection (every spin-2 value projected along the line from the
-        triangle's centroid).  Flat-sky triangle at the bin centres."""
-        if phi_edges is None:
-            phi_edges = np.linspace(-np.pi, np.pi, nphi + 1)
-        phi = 0.5 * (np.asarray(phi_edges[:-1]) + np.asarray(phi_edges[1:]))
-        t = self.bincenters
-        t2 = t[:, None, None]
-        t3 = t[None, :, None]
-        v1 = np.zeros((t.size, t.size, phi.size), dtype=np.complex128)
-        v2 = t2 + 0j * t3 * phi
-        v3 = t3 * np.exp(1j * phi)[None, None, :] + 0 * t2
-        cen = (v1 + v2 + v3) / 3.0
-        alpha = [np.angle(v - cen) for v in (v1, v2, v3)]
-        beta = [np.zeros_like(alpha[0]), np.zeros_like(alpha[0]), np.broadcast_to(phi, alpha[0].shape)]
-        out = {}
-        for comp in self.components:
-            phase = np.zeros(alpha[0].shape)
-            for v in range(3):
-                s = self.spins[comp.fields[v]]
-                sign = -1.0 if comp.conj[v] else 1.0
-                phase = phase - sign * s * (alpha[v] - beta[v])
-            out[comp.label] = binned[comp.label] * np.exp(1j * phase)
-        return out
 
 
 # ── the estimator ─────────────────────────────────────────────────────────
@@ -687,7 +567,7 @@ class Global3PCF:
         components: Sequence[Component],
         flip_g1: bool = False,
         flip_g2: bool = False,
-    ) -> ThreePointMultipoles:
+    ) -> ThreePointResult:
         """General entry point.
 
         ``fields``: ``name -> (values, weights, spin)`` with values ``(nz,
@@ -727,13 +607,13 @@ class Global3PCF:
             jobs.append((comp.label, ckey, comp.fields[1], comp.fields[2], bool(c2), bool(c3), sigma1))
         num = self._accumulate(flist, centre_values, jobs, sorted(sigmas))
         norm = self._norms(flist, components)
-        return ThreePointMultipoles(
+        return ThreePointResult(
             self.n_max, self.binedges.copy(), tuple(components), spins, num, norm
         )
 
-    def shear(
+    def ggg(
         self, shear_maps: Any, w: Any, flip_g1: bool = False, flip_g2: bool = False
-    ) -> ThreePointMultipoles:
+    ) -> ThreePointResult:
         """Shear three-point function: the natural components ``gamma0`` =
         <g g g>, ``gamma1`` = <g* g g>, ``gamma2`` = <g g* g>, ``gamma3`` =
         <g g g*> (x-projection), for all ordered tomographic triplets."""
@@ -745,9 +625,34 @@ class Global3PCF:
         )
         return self.measure({"g": (shear_maps, w, 2)}, comps, flip_g1=flip_g1, flip_g2=flip_g2)
 
-    def density(self, density_maps: Any, w: Any) -> ThreePointMultipoles:
-        """Scalar three-point function ``zeta`` of density (or convergence)
-        maps, for all ordered tomographic triplets."""
+    def kkk(self, k_maps: Any, w: Any) -> ThreePointResult:
+        """Scalar three-point function ``zeta`` of density (as a field, δ) or
+        convergence maps, for all ordered tomographic triplets."""
+        return self.measure({"k": (k_maps, w, 0)}, (Component("zeta", ("k", "k", "k")),))
+
+    def kgg(
+        self, k_maps: Any, shear_maps: Any, k_weights: Any, shear_weights: Any,
+        flip_g1: bool = False, flip_g2: bool = False,
+    ) -> ThreePointResult:
+        """Scalar at the centre, shear at both legs: ``kgg`` = <k g g> and
+        ``kg*g`` = <k g* g> (the two independent shear-pair products), for all
+        ordered (k bin, g bin, g bin) triplets."""
+        comps = (
+            Component("kgg", ("k", "g", "g")),
+            Component("kg*g", ("k", "g", "g"), (False, True, False)),
+        )
         return self.measure(
-            {"d": (density_maps, w, 0)}, (Component("zeta", ("d", "d", "d")),)
+            {"k": (k_maps, k_weights, 0), "g": (shear_maps, shear_weights, 2)},
+            comps, flip_g1=flip_g1, flip_g2=flip_g2,
+        )
+
+    def kkg(
+        self, k_maps: Any, shear_maps: Any, k_weights: Any, shear_weights: Any,
+        flip_g1: bool = False, flip_g2: bool = False,
+    ) -> ThreePointResult:
+        """Scalars at the centre and leg 2, shear at leg 3: ``kkg`` = <k k g>,
+        for all ordered (k bin, k bin, g bin) triplets."""
+        return self.measure(
+            {"k": (k_maps, k_weights, 0), "g": (shear_maps, shear_weights, 2)},
+            (Component("kkg", ("k", "k", "g")),), flip_g1=flip_g1, flip_g2=flip_g2,
         )

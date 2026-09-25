@@ -6,7 +6,7 @@ what it had keyed, so a *different* object at the same address was taken for
 the cached one and the library returned the previous call's answer:
 
 - the aperture filter (``PairGeometry.aperture_filter_key``)
-- device weight maps (``PatchCorrelation._fingerprint_weights``)
+- device weight maps (``Integrated3PCF._fingerprint_weights``)
 - frozen host weight maps (``_FINGERPRINT_MEMO``)
 
 These gates hold the addresses deliberately recycled, which is the only way
@@ -87,9 +87,9 @@ class TestApertureFilterKey(unittest.TestCase):
 
 
 def _small_cpu_corr():
-    from CosmoFuse.correlations import PatchCorrelation
+    from CosmoFuse.correlations import Integrated3PCF
 
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         nside=1,
         phi_center=np.array([0.0]),
         theta_center=np.array([0.0]),

@@ -293,7 +293,7 @@ def _use_fused_aperture(module: Any, ntomo: int, npatches: int) -> bool:
 
     It reads the aperture disc geometry once per pixel instead of once per
     tomographic bin: 1.72x on the kernel at nside 512 and 1.83x measured in
-    situ inside ``shear`` (the result is bitwise identical
+    situ inside ``gg`` (the result is bitwise identical
     either way).  Two things take it back to the
     per-(patch, bin) kernel: a bin set wide enough for the per-thread
     accumulators to spill, and a patch set small enough that one block per

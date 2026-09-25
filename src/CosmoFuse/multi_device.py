@@ -2,7 +2,7 @@
 
 Pair geometry is per patch and the estimators are per patch, so patches are
 the natural unit of work: device ``d`` owns a contiguous range of patches and
-a :class:`~CosmoFuse.correlations.PatchCorrelation` of its own, measurement calls
+a :class:`~CosmoFuse.correlations.Integrated3PCF` of its own, measurement calls
 run in one thread per device (CuPy's current device is thread-local), and the
 per-patch outputs are concatenated back in patch order.  The result is
 identical to a single-device run -- the patch axis is just assembled from
@@ -12,39 +12,31 @@ Device memory scales as ``n_patches / n_devices`` per GPU, which is the
 other reason to use this: it is how a geometry that does not fit one card
 is measured without coarsening or dropping patches.
 
-Use it through ``PatchCorrelation(..., device=[0, 1])`` or directly::
+Use it through ``Integrated3PCF(..., device=[0, 1])``::
 
-    corr = MultiDevicePatchCorrelation(nside, phi, theta, devices=[0, 1], mask=mask,
-                                  nbins=8, theta_min=15, theta_max=250)
+    corr = Integrated3PCF(nside, phi, theta, device=[0, 1], mask=mask,
+                          nbins=8, theta_min=15, theta_max=250)
     corr.preprocess()                      # or corr.load_pairs(path)
-    M_a, xi_p, xi_m = corr.shear(shear, w)
+    res = corr.gg(shear, w)                # res.M_a, res.xi_p, res.xi_m
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-# (method name, axis of the per-patch output for each returned array).
-# Aperture outputs are (..., n_patches); pair outputs are
-# (..., n_patches, nbins), hence -1 and -2.
-_PATCH_AXIS: Dict[str, Tuple[int, ...]] = {
-    "aperture_shear_single": (-1,),
-    "aperture_density_single": (-1,),
-    "aperture_shear": (-1,),
-    "aperture_density": (-1,),
-    "shear_shear": (-2, -2),
-    "density_density": (-2,),
-    "density_shear": (-2,),
-    "shear": (-1, -2, -2),
-    "density": (-1, -2),
-    # xi_t, then the optional N_ap / M_ap aperture outputs
-    "ggl": (-2, -1, -1),
-    "three_by_two_pt": (-1, -1, -2, -2, -2, -2),
+# Methods measured per device and assembled on the patch axis.  Aperture
+# outputs are (..., n_patches), pair outputs (..., n_patches, nbins).
+_ARRAY_METHODS: Dict[str, int] = {"m_a": -1, "m_g": -1}
+_RESULT_METHODS = frozenset({"gg", "kk", "kg", "three_by_two_pt"})
+_FIELD_PATCH_AXIS: Dict[str, int] = {
+    "M_a": -1, "M_g": -1, "xi_p": -2, "xi_m": -2, "xi_g": -2, "xi_t": -2,
 }
+# kept for callers that ask which methods a group dispatches
+_PATCH_AXIS = tuple(_ARRAY_METHODS) + tuple(sorted(_RESULT_METHODS))
 
 
-class MultiDevicePatchCorrelation:
-    """A patch-parallel group of :class:`PatchCorrelation` objects, one per GPU."""
+class MultiDeviceIntegrated3PCF:
+    """A patch-parallel group of :class:`Integrated3PCF` objects, one per GPU."""
 
     def __init__(
         self,
@@ -55,9 +47,9 @@ class MultiDevicePatchCorrelation:
         devices: Sequence[int],
         **kwargs: Any,
     ) -> None:
-        from .correlations import PatchCorrelation
+        from .correlations import Integrated3PCF
 
-        # Usually CUDA ids; anything PatchCorrelation accepts works, so that the
+        # Usually CUDA ids; anything Integrated3PCF accepts works, so that the
         # splitting can be exercised with ("cpu", "cpu").
         ids = [int(d) if isinstance(d, (int, np.integer)) else d for d in devices]
         if len(ids) == 0:
@@ -80,7 +72,7 @@ class MultiDevicePatchCorrelation:
             (int(bounds[i]), int(bounds[i + 1])) for i in range(len(ids))
         ]
         self.parts = [
-            PatchCorrelation(
+            Integrated3PCF(
                 nside,
                 phi[a:b],
                 theta[a:b],
@@ -136,7 +128,7 @@ class MultiDevicePatchCorrelation:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_") or not self.__dict__.get("parts"):
             raise AttributeError(name)
-        if name in _PATCH_AXIS:
+        if name in _ARRAY_METHODS or name in _RESULT_METHODS:
             return self._dispatch_method(name)
         if name in self._SHARED_ATTRIBUTES:
             return getattr(self.parts[0], name)
@@ -144,7 +136,7 @@ class MultiDevicePatchCorrelation:
             f"{name!r} is not defined for a multi-device group: each part holds "
             f"its own patch range, so the first device's value would be a "
             f"fraction of the answer. Reach for the part you mean "
-            f"(group.parts[i].{name}), or use a single-device PatchCorrelation. "
+            f"(group.parts[i].{name}), or use a single-device Integrated3PCF. "
             f"The attributes that are the same on every part are: "
             f"{', '.join(sorted(self._SHARED_ATTRIBUTES))}."
         )
@@ -190,7 +182,7 @@ class MultiDevicePatchCorrelation:
         return out
 
     def _dispatch_method(self, name: str) -> Any:
-        axes = _PATCH_AXIS[name]
+        from .results import IntegratedResult
 
         def call(*args: Any, **kwargs: Any) -> Any:
             # every device needs the maps on its own card, so device-resident
@@ -204,19 +196,20 @@ class MultiDevicePatchCorrelation:
                     )
             kwargs.setdefault("return_device", False)
             results = self._run(lambda part, _i: getattr(part, name)(*args, **kwargs))
+            if name in _ARRAY_METHODS:
+                return self._concat(results, _ARRAY_METHODS[name])
             first = results[0]
-            if not isinstance(first, tuple):
-                return self._concat([r for r in results], axes[0])
-            if len(first) > len(axes):
-                raise NotImplementedError(
-                    f"{name} returned {len(first)} arrays but only "
-                    f"{len(axes)} patch axes are declared for it in "
-                    f"_PATCH_AXIS; the extra outputs cannot be concatenated "
-                    f"without knowing which axis is the patch axis."
-                )
-            return tuple(
-                self._concat([r[k] for r in results], axes[k])
-                for k in range(len(first))
+            assembled = {
+                k: self._concat([getattr(r, k) for r in results], axis)
+                for k, axis in _FIELD_PATCH_AXIS.items()
+                if getattr(first, k) is not None
+            }
+            return IntegratedResult(
+                binedges=first.binedges,
+                gg_combinations=first.gg_combinations,
+                kk_combinations=first.kk_combinations,
+                kg_combinations=first.kg_combinations,
+                **assembled,
             )
 
         call.__name__ = name
@@ -271,4 +264,4 @@ class MultiDevicePatchCorrelation:
 
     def __repr__(self) -> str:
         ranges = ", ".join(f"{d}:{a}-{b}" for d, (a, b) in zip(self.devices, self.patch_ranges))
-        return f"<MultiDevicePatchCorrelation {self.n_patches} patches over {ranges}>"
+        return f"<MultiDeviceIntegrated3PCF {self.n_patches} patches over {ranges}>"

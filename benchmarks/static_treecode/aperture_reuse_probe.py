@@ -44,7 +44,7 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import PatchCorrelation
+from CosmoFuse import Integrated3PCF
 
 PROBE_SOURCE = r"""
 __COMMON_CUDA_SOURCE__
@@ -147,7 +147,7 @@ __global__ void probe_fused(
 
 
 def build(args):
-    """A PatchCorrelation with the aperture geometry only -- no pair search.
+    """A Integrated3PCF with the aperture geometry only -- no pair search.
 
     The pair search is what makes nside 2048 expensive, and this kernel
     never touches a pair: it walks Q_inds.  So `_ensure_aperture_pairs` +
@@ -159,7 +159,7 @@ def build(args):
     mask[(np.degrees(phi) < 90.0) & (np.abs(90 - np.degrees(theta)) < 40)] = True
     rng = np.random.default_rng(0)
     mask[rng.choice(mask.size, mask.size // 50, replace=False)] = False
-    corr = PatchCorrelation.from_mask(
+    corr = Integrated3PCF.from_mask(
         args.nside, mask, args.nside_centers,
         patch_size=args.patch_size, theta_Q=args.theta_Q, f_mask=0.3,
         nbins=args.nbins, theta_min=args.theta_min, theta_max=args.theta_max,

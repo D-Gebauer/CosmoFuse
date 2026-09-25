@@ -21,10 +21,11 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse.correlations import PatchCorrelation, _compute_pairs_impl
+from CosmoFuse.correlations import Integrated3PCF, _compute_pairs_impl
 from CosmoFuse.treecode import assign_levels, level_groups
 
 from .test_gpu_kernel_emulation import emulated_gpu
+from ._results import fields_of
 
 NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
@@ -48,7 +49,7 @@ def make_mask() -> np.ndarray:
     return mask
 
 
-def make_corr(mask, resolution_factor=None, **kwargs) -> PatchCorrelation:
+def make_corr(mask, resolution_factor=None, **kwargs) -> Integrated3PCF:
     args = dict(
         patch_size=700,
         theta_Q=200,
@@ -60,7 +61,7 @@ def make_corr(mask, resolution_factor=None, **kwargs) -> PatchCorrelation:
     )
     args.update(BIN_ARGS)
     args.update(kwargs)
-    return PatchCorrelation(NSIDE, PHI_C, THETA_C, **args)
+    return Integrated3PCF(NSIDE, PHI_C, THETA_C, **args)
 
 
 def make_maps(mask, seed=11, nz=2):
@@ -216,11 +217,11 @@ class TestFullResolutionDefault(unittest.TestCase):
     def test_results_bitwise_equal(self):
         shear, dens, w_s, w_d = self.maps
         for name, call in (
-            ("shear", lambda c: c.shear(shear, w_s, return_device=False)),
-            ("dens", lambda c: c.density(dens, w_d, return_device=False)),
-            ("ggl", lambda c: c.ggl(dens, shear, w_d, w_s, return_device=False)),
-            ("fused", lambda c: tuple(np.array(o) for o in c.three_by_two_pt(
-                shear_maps=shear, density_maps=dens, weights=(w_s, w_d), return_device=False))),
+            ("shear", lambda c: fields_of(c.gg(shear, w_s, return_device=False), "M_a", "xi_p", "xi_m")),
+            ("dens", lambda c: fields_of(c.kk(dens, w_d, return_device=False), "M_g", "xi_g")),
+            ("ggl", lambda c: c.kg(dens, shear, w_d, w_s, return_device=False).xi_t),
+            ("fused", lambda c: tuple(np.array(o) for o in fields_of(c.three_by_two_pt(
+                shear_maps=shear, k_maps=dens, weights=(w_s, w_d), return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"))),
         ):
             a, b = call(self.default), call(self.k_inf)
             a = a if isinstance(a, tuple) else (a,)
@@ -238,7 +239,7 @@ class TestOptionPlumbing(TreecodeBase):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 make_corr(self.mask, resolution_factor=bad)
         with self.assertRaisesRegex(ValueError, "power-of-two nside"):
-            PatchCorrelation(48, PHI_C, THETA_C, resolution_factor=2.0, device="cpu")
+            Integrated3PCF(48, PHI_C, THETA_C, resolution_factor=2.0, device="cpu")
         for bad in (3, 128, 48):
             with self.assertRaisesRegex(ValueError, "aperture_nside"):
                 make_corr(self.mask, aperture_nside=bad)
@@ -277,7 +278,7 @@ class TestOptionPlumbing(TreecodeBase):
         self.assertEqual(self.tree.level_table["nside"].tolist(), EXPECTED_LEVELS)
 
     def test_from_mask_forwards_option(self):
-        corr = PatchCorrelation.from_mask(
+        corr = Integrated3PCF.from_mask(
             NSIDE, self.mask, 4, patch_size=700, theta_Q=200, f_mask=0.6,
             resolution_factor=2.0, device="cpu", **BIN_ARGS,
         )
@@ -289,8 +290,8 @@ class TestOptionPlumbing(TreecodeBase):
         self.assertEqual(clone.level_table["nside"].tolist(), EXPECTED_LEVELS)
         self.assertEqual(clone.n_appended, self.tree.n_appended)
         clone.prepare()
-        a = clone.shear_shear(self.shear, self.w_s, return_device=False)
-        b = self.tree.shear_shear(self.shear, self.w_s, return_device=False)
+        a = fields_of(clone.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
+        b = fields_of(self.tree.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
         for x, y in zip(a, b):
             self.assertTrue(np.array_equal(x, y))
 
@@ -355,13 +356,13 @@ class TestPairSearchPrecision(unittest.TestCase):
 
     def test_small_scale_float32_search_warns(self):
         with self.assertLogs("CosmoFuse.correlations", level="WARNING") as logs:
-            PatchCorrelation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu",
+            Integrated3PCF(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu",
                         pair_search_precision="float32")
         self.assertIn("pair_search_precision='float64'", logs.output[0])
         with self.assertNoLogs("CosmoFuse.correlations", level="WARNING"):
-            PatchCorrelation(64, PHI_C, THETA_C, nbins=3, theta_min=15, theta_max=50, device="cpu",
+            Integrated3PCF(64, PHI_C, THETA_C, nbins=3, theta_min=15, theta_max=50, device="cpu",
                         pair_search_precision="float32")
-            PatchCorrelation(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu")
+            Integrated3PCF(64, PHI_C, THETA_C, nbins=3, theta_min=5, theta_max=50, device="cpu")
 
 
 class TestBruteForceReference(TreecodeBase):
@@ -419,26 +420,26 @@ class TestBruteForceReference(TreecodeBase):
         # single-pair API (cross: tomo 0 x tomo 1), both orientations averaged
         # by the library -> compare the A->B numerators through the vectorized
         # kernel instead, and use the single-pair API for xi_g / xi_t.
-        (xig,) = corr.density_density_single(dens[0], dens[1], w_d[0], w_d[1], return_device=False)
-        (xit,) = corr.density_shear_single(
+        (xig,) = corr._kk_single(dens[0], dens[1], w_d[0], w_d[1], return_device=False)
+        (xit,) = corr._kg_single(
             dens[0], shear[1, 0], shear[1, 1], w_d[0], w_s[1], return_device=False)
         self.assert_close(xit, xit_ref, "single xi_t")
-        # density_density_single averages the two orientation *ratios*
-        ab = np.asarray(corr.density_density_single(
+        # _kk_single averages the two orientation *ratios*
+        ab = np.asarray(corr._kk_single(
             dens[0], dens[1], w_d[0], w_d[1], return_device=False)[0])
         self.assertTrue(np.all(np.isfinite(ab)))
 
         # vectorized tomography
-        xi_g = corr.density_density(dens, w_d, return_device=False)
+        xi_g = corr.kk(dens, w_d, return_device=False, apertures=False).xi_g
         self.assert_close(xi_g[1], xig_ref, "vectorized xi_g (0,1)")
-        xi_t = corr.density_shear(dens, shear, w_d, w_s, return_device=False)
+        xi_t = corr.kg(dens, shear, w_d, w_s, return_device=False).xi_t
         self.assert_close(xi_t[1], xit_ref, "vectorized xi_t (0,1)")
 
         # fused kernel: xi_g, xi_t as above; the xi+- cross term is the ratio
         # of the summed orientations -> the raw fused numerators / denominators
         M_a, M_g, xip, xim, xi_g2, xi_t2 = (
-            np.array(o) for o in corr.three_by_two_pt(
-                shear_maps=shear, density_maps=dens, weights=(w_s, w_d), return_device=False)
+            np.array(o) for o in fields_of(corr.three_by_two_pt(
+                shear_maps=shear, k_maps=dens, weights=(w_s, w_d), return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
         )
         self.assert_close(xi_g2[1], xig_ref, "fused xi_g (0,1)")
         self.assert_close(xi_t2[1], xit_ref, "fused xi_t (0,1)")
@@ -454,20 +455,20 @@ class TestBruteForceReference(TreecodeBase):
         self.assert_close(np.asarray(buf["out_xig_num"][1]).reshape(shape), ref["xig"], "fused xi_g num")
 
         # vectorized xi+- must agree with the fused kernel bit-for-bit-ish
-        xip_v, xim_v = corr.shear_shear(shear, w_s, return_device=False)
+        xip_v, xim_v = fields_of(corr.gg(shear, w_s, return_device=False, apertures=False), "xi_p", "xi_m")
         np.testing.assert_allclose(xip_v, xip, rtol=0, atol=1e-13 * np.max(np.abs(xip)))
         np.testing.assert_allclose(xim_v, xim, rtol=0, atol=1e-13 * np.max(np.abs(xim)))
         self.assert_close(xip_v[1], xip_ref, "vectorized xi+ (0,1)")
         # auto-correlation through the single-pair API vs the vectorized path
-        xip_s, xim_s = corr.shear_shear_single(
+        xip_s, xim_s = corr._gg_single(
             shear[0, 0], shear[0, 1], shear[0, 0], shear[0, 1], w_s[0], w_s[0], return_device=False)
         np.testing.assert_allclose(xip_s, xip_v[0], rtol=0, atol=1e-13 * np.max(np.abs(xip_v)))
         np.testing.assert_allclose(xim_s, xim_v[0], rtol=0, atol=1e-13 * np.max(np.abs(xim_v)))
         # the single-map cross API keeps the historical mean of the two
         # orientation ratios: equal to the ratio of sums only for equal weights
-        xip_c, _ = corr.shear_shear_single(
+        xip_c, _ = corr._gg_single(
             shear[0, 0], shear[0, 1], shear[1, 0], shear[1, 1], w_s[0], w_s[0], return_device=False)
-        xip_e, _ = corr.shear_shear(shear, np.stack((w_s[0], w_s[0])), return_device=False)
+        xip_e, _ = fields_of(corr.gg(shear, np.stack((w_s[0], w_s[0])), return_device=False, apertures=False), "xi_p", "xi_m")
         np.testing.assert_allclose(xip_c, xip_e[1], rtol=0, atol=1e-13 * np.max(np.abs(xip_e)))
         return xip_v, xim_v
 
@@ -477,8 +478,8 @@ class TestBruteForceReference(TreecodeBase):
     def test_row_space_input_is_bitwise_equal(self):
         corr = self.tree
         rows = lambda a: np.ascontiguousarray(a[..., corr.row_pix])
-        a = corr.shear_shear(self.shear, self.w_s, return_device=False)
-        b = corr.shear_shear(rows(self.shear), rows(self.w_s), return_device=False)
+        a = fields_of(corr.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
+        b = fields_of(corr.gg(rows(self.shear), rows(self.w_s), return_device=False, apertures=False), "xi_p", "xi_m")
         for x, y in zip(a, b):
             self.assertTrue(np.array_equal(x, y))
 
@@ -486,18 +487,18 @@ class TestBruteForceReference(TreecodeBase):
         """T7 without a GPU: real GPU orchestrator branches, numpy kernels."""
         corr = self.tree
         cpu = {
-            "ss": corr.shear(self.shear, self.w_s, flip_g1=True, return_device=False),
-            "dd": corr.density_density(self.dens, self.w_d, return_device=False),
-            "ds": corr.density_shear(
-                self.dens, self.shear, self.w_d, self.w_s, return_device=False),
+            "ss": fields_of(corr.gg(self.shear, self.w_s, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"),
+            "dd": corr.kk(self.dens, self.w_d, return_device=False, apertures=False).xi_g,
+            "ds": corr.kg(
+                self.dens, self.shear, self.w_d, self.w_s, return_device=False).xi_t,
         }
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
             gpu = {
-                "ss": corr.shear(self.shear, self.w_s, flip_g1=True, return_device=False),
-                "dd": corr.density_density(self.dens, self.w_d, return_device=False),
-                "ds": corr.density_shear(
-                    self.dens, self.shear, self.w_d, self.w_s, return_device=False),
+                "ss": fields_of(corr.gg(self.shear, self.w_s, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"),
+                "dd": corr.kk(self.dens, self.w_d, return_device=False, apertures=False).xi_g,
+                "ds": corr.kg(
+                    self.dens, self.shear, self.w_d, self.w_s, return_device=False).xi_t,
             }
             self.assertGreater(calls["xipm_tomo_vectorized_kernel"], 0)
         corr.compute_context.Q_inds_dev = None
@@ -512,8 +513,8 @@ class TestBruteForceReference(TreecodeBase):
         and identical in the base-level bins."""
         full = make_corr(self.mask)
         full.preprocess()
-        a = full.shear_shear(self.shear, self.w_s, return_device=False)[0]
-        b = self.tree.shear_shear(self.shear, self.w_s, return_device=False)[0]
+        a = fields_of(full.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")[0]
+        b = fields_of(self.tree.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")[0]
         self.assertTrue(np.array_equal(a[..., :2], b[..., :2]))
         self.assertFalse(np.allclose(a[..., 2:], b[..., 2:], rtol=1e-6, atol=0))
 
@@ -574,11 +575,11 @@ class TestDegradeOperator(TreecodeBase):
         self.assertTrue(empty.any())
         self.assertTrue(np.all(shear_rows[0, :, corr.n_active:][:, empty] == 0))
         full_w = np.zeros((2, NPIX)); full_w[:, corr.row_pix] = w
-        xip, xim = corr.shear_shear(clean(self.shear, self.mask), full_w, return_device=False)
+        xip, xim = fields_of(corr.gg(clean(self.shear, self.mask), full_w, return_device=False, apertures=False), "xi_p", "xi_m")
         self.assertTrue(np.all(np.isfinite(xip)) and np.all(np.isfinite(xim)))
         # all weights zero -> zeros, not NaN
-        xip0, _ = corr.shear_shear(
-            clean(self.shear, self.mask), np.zeros_like(full_w), return_device=False)
+        xip0, _ = fields_of(corr.gg(
+            clean(self.shear, self.mask), np.zeros_like(full_w), return_device=False, apertures=False), "xi_p", "xi_m")
         self.assertTrue(np.all(xip0 == 0))
 
     def test_cells_contain_only_in_patch_members(self):
@@ -635,7 +636,7 @@ class TestExpansionSharing(unittest.TestCase):
     def test_one_degrade_per_call_and_frozen_weights(self):
         corr = self.corr
         nz = self.shear.shape[0]
-        call = lambda w: corr.shear(self.shear, w, return_device=False)
+        call = lambda w: fields_of(corr.gg(self.shear, w, return_device=False), "M_a", "xi_p", "xi_m")
 
         ref, calls = self.count_appends(lambda: call(self.w_s))
         # one pass for the weights, one for w*g1 and w*g2 -- shared by the
@@ -661,7 +662,7 @@ class TestExpansionSharing(unittest.TestCase):
         self.assertFalse(np.array_equal(first[1], second[1]))
         fresh = make_corr(self.mask, resolution_factor=2.0, aperture_nside=16)
         fresh.preprocess()
-        for a, b in zip(second, fresh.shear(self.shear, w, return_device=False)):
+        for a, b in zip(second, fields_of(fresh.gg(self.shear, w, return_device=False), "M_a", "xi_p", "xi_m")):
             self.assertTrue(np.array_equal(a, b))
 
     def test_reused_buffer_is_not_stale(self):
@@ -669,9 +670,9 @@ class TestExpansionSharing(unittest.TestCase):
         corr = self.corr
         buf = np.ascontiguousarray(clean(self.shear, self.mask)[..., corr.row_pix])
         w = np.ascontiguousarray(clean(self.w_s, self.mask)[..., corr.row_pix])
-        a = corr.shear(buf, w, return_device=False)
+        a = fields_of(corr.gg(buf, w, return_device=False), "M_a", "xi_p", "xi_m")
         buf *= -2.0
-        b = corr.shear(buf, w, return_device=False)
+        b = fields_of(corr.gg(buf, w, return_device=False), "M_a", "xi_p", "xi_m")
         np.testing.assert_allclose(b[0], -2.0 * a[0], rtol=1e-12)
         np.testing.assert_allclose(b[1], 4.0 * a[1], rtol=1e-12)
 
@@ -716,7 +717,7 @@ class TestTreecodeIO(TreecodeBase):
     """T6"""
 
     def measure(self, corr):
-        return corr.shear(self.shear, self.w_s, return_device=False)
+        return fields_of(corr.gg(self.shear, self.w_s, return_device=False), "M_a", "xi_p", "xi_m")
 
     def test_roundtrip_and_slicing(self):
         ref = self.measure(self.tree)
@@ -822,35 +823,35 @@ class TestCoarseApertureLevel(unittest.TestCase):
     def test_equals_aperture_statistics_of_degraded_maps(self):
         nside_c = 16
         mask_c, sh, de, W_s, W_d = self.degraded(nside_c)
-        coarse = PatchCorrelation(
+        coarse = Integrated3PCF(
             nside_c, PHI_C, THETA_C, patch_size=700, theta_Q=200, mask=mask_c,
             device="cpu", map_precision="float64", rotation_precision="float64", **BIN_ARGS)
         coarse.find_aperture_pairs()
-        ref_a = coarse.aperture_shear(sh, W_s, return_device=False)
-        ref_g = coarse.aperture_density(de, W_d, return_device=False)
+        ref_a = coarse.m_a(sh, W_s, return_device=False)
+        ref_g = coarse.m_g(de, W_d, return_device=False)
 
         for k in (None, 2.0):
             fine = make_corr(self.mask, resolution_factor=k, aperture_nside=nside_c)
             fine.preprocess()
             self.assertGreater(fine.n_aperture_cells, 0)
             self.assertEqual(fine.level_table["aperture_nside"], nside_c)
-            M_a, xip, xim = fine.shear(self.shear, self.w_s, return_device=False)
-            M_g, xig = fine.density(self.dens, self.w_d, return_device=False)
+            M_a, xip, xim = fields_of(fine.gg(self.shear, self.w_s, return_device=False), "M_a", "xi_p", "xi_m")
+            M_g, xig = fields_of(fine.kk(self.dens, self.w_d, return_device=False), "M_g", "xi_g")
             np.testing.assert_allclose(M_a, ref_a, rtol=0, atol=1e-13 * np.max(np.abs(ref_a)))
             np.testing.assert_allclose(M_g, ref_g, rtol=0, atol=1e-13 * np.max(np.abs(ref_g)))
             # single-map API and fused kernel see the same aperture level
-            one = fine.aperture_shear_single(
+            one = fine._m_a_single(
                 self.shear[0, 0], self.shear[0, 1], self.w_s[0], return_device=False)
             np.testing.assert_allclose(one, ref_a[0], rtol=0, atol=1e-13 * np.max(np.abs(ref_a)))
-            fused = fine.three_by_two_pt(
-                shear_maps=self.shear, density_maps=self.dens,
-                weights=(self.w_s, self.w_d), return_device=False)
+            fused = fields_of(fine.three_by_two_pt(
+                shear_maps=self.shear, k_maps=self.dens,
+                weights=(self.w_s, self.w_d), return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
             np.testing.assert_allclose(fused[0], ref_a, rtol=0, atol=1e-13 * np.max(np.abs(ref_a)))
             np.testing.assert_allclose(fused[1], ref_g, rtol=0, atol=1e-13 * np.max(np.abs(ref_g)))
             # the 2PCF is not affected by the aperture level
             same = make_corr(self.mask, resolution_factor=k)
             same.preprocess()
-            xip2, xim2 = same.shear_shear(self.shear, self.w_s, return_device=False)
+            xip2, xim2 = fields_of(same.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
             np.testing.assert_allclose(xip, xip2, rtol=0, atol=1e-14 * np.max(np.abs(xip2)))
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -858,7 +859,7 @@ class TestCoarseApertureLevel(unittest.TestCase):
                 fine.save_pairs(path)
                 again = make_corr(self.mask, resolution_factor=k, aperture_nside=nside_c)
                 again.load_pairs(path, start_ind=1, stop_ind=3)
-                M_a2, _, _ = again.shear(self.shear, self.w_s, return_device=False)
+                M_a2, _, _ = fields_of(again.gg(self.shear, self.w_s, return_device=False), "M_a", "xi_p", "xi_m")
                 self.assertTrue(np.array_equal(M_a2, M_a[:, 1:3]))
                 with self.assertRaisesRegex(ValueError, "aperture_nside"):
                     make_corr(self.mask, resolution_factor=k, aperture_nside=32).load_pairs(path)

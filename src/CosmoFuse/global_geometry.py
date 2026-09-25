@@ -1,7 +1,7 @@
 """
 Tiles and the footprint-wide pair search of the global estimators.
 
-The patch estimator (:class:`~CosmoFuse.correlations.PatchCorrelation`) finds
+The patch estimator (:class:`~CosmoFuse.correlations.Integrated3PCF`) finds
 the pairs *inside* every patch disc; a pair enters once per patch that holds
 both of its ends.  The global estimators instead need every pair of the
 footprint exactly once (:class:`~CosmoFuse.global_2pcf.Global2PCF`) or every

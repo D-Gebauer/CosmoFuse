@@ -2,7 +2,7 @@
 
 CLAUDE.md states the wrapper contract as a **ratio of sums**: both
 orientations of a cross combination summed, then divided once (TreeCorr's
-definition).  Nothing gated it per method, and ``density_density_single``
+definition).  Nothing gated it per method, and ``_kk_single``
 quietly used a mean of ratios instead -- ``0.5*(N_ab/D_ab + N_ba/D_ba)`` --
 which agrees with the rest only when the two orientations carry the same
 weight, i.e. never for a cross pair.
@@ -18,7 +18,8 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
+from ._results import fields_of
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -35,7 +36,7 @@ def _mask():
 
 
 def _corr(device="cpu"):
-    corr = PatchCorrelation(
+    corr = Integrated3PCF(
         NSIDE, PHI_C, THETA_C, nbins=3, theta_min=120.0, theta_max=600.0,
         patch_size=PATCH, theta_Q=200.0, mask=_mask(), device=device,
         map_precision="float64", rotation_precision="float64",
@@ -82,20 +83,18 @@ class EstimatorParityBase:
     def test_xi_g_cross_single_map_matches_vectorized_and_fused(self):
         corr = self.corr
         single = self._to_host(
-            corr.density_density_single(
+            corr._kk_single(
                 self.density[0], self.density[1], self.w_d[0], self.w_d[1]
             )[0]
         )
         vectorized = self._to_host(
-            corr.density_density(
-                self.density, self.w_d, return_device=False
-            )
+            corr.kk(
+                self.density, self.w_d, return_device=False, apertures=False).xi_g
         )[self.cross_row]
         fused = self._to_host(
-            corr.three_by_two_pt(
-                shear_maps=self.shear, density_maps=self.density,
-                weights=(self.w_s, self.w_d), return_device=False,
-            )[4]
+            fields_of(corr.three_by_two_pt(
+                shear_maps=self.shear, k_maps=self.density,
+                weights=(self.w_s, self.w_d), return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")[4]
         )[self.cross_row]
         np.testing.assert_allclose(single, vectorized, rtol=1e-12, atol=0)
         np.testing.assert_allclose(single, fused, rtol=1e-12, atol=0)
@@ -103,15 +102,14 @@ class EstimatorParityBase:
     def test_xi_t_cross_single_map_matches_vectorized_and_fused(self):
         corr = self.corr
         single = self._to_host(
-            corr.density_shear_single(
+            corr._kg_single(
                 self.density[0], self.shear[1][0], self.shear[1][1],
                 self.w_d[0], self.w_s[1],
             )[0]
         )
         vectorized = self._to_host(
-            corr.density_shear(
-                self.density, self.shear, self.w_d, self.w_s, return_device=False
-            )
+            corr.kg(
+                self.density, self.shear, self.w_d, self.w_s, return_device=False).xi_t
         )
         # ggl combinations are (lens, source) in row-major order
         np.testing.assert_allclose(single, vectorized[1], rtol=1e-12, atol=0)
@@ -120,7 +118,7 @@ class EstimatorParityBase:
         corr = self.corr
         xip, xim = (
             self._to_host(a)
-            for a in corr.shear_shear_single(
+            for a in corr._gg_single(
                 self.shear[0][0], self.shear[0][1],
                 self.shear[1][0], self.shear[1][1],
                 self.w_s[0], self.w_s[1], return_device=False,
@@ -128,9 +126,8 @@ class EstimatorParityBase:
         )
         vp, vm = (
             self._to_host(a)
-            for a in corr.shear_shear(
-                self.shear, self.w_s, return_device=False
-            )
+            for a in fields_of(corr.gg(
+                self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
         )
         np.testing.assert_allclose(xip, vp[self.cross_row], rtol=1e-12, atol=0)
         np.testing.assert_allclose(xim, vm[self.cross_row], rtol=1e-12, atol=0)
@@ -143,19 +140,19 @@ class EstimatorParityBase:
         """
         corr = self.corr
         auto = self._to_host(
-            corr.density_density_single(
+            corr._kk_single(
                 self.density[0], self.density[0], self.w_d[0], self.w_d[0]
             )[0]
         )
         # for an auto pair the two orientations coincide, so both estimators
         # agree -- the cross pair is where they part
         cross = self._to_host(
-            corr.density_density_single(
+            corr._kk_single(
                 self.density[0], self.density[1], self.w_d[0], self.w_d[1]
             )[0]
         )
         swapped = self._to_host(
-            corr.density_density_single(
+            corr._kk_single(
                 self.density[1], self.density[0], self.w_d[1], self.w_d[0]
             )[0]
         )
@@ -197,7 +194,7 @@ class TestCombinationAccessors(unittest.TestCase):
                 nzbins, ncomb
             )
             built = list(zip(np.asarray(comb_i).tolist(), np.asarray(comb_j).tolist()))
-            self.assertEqual(built, PatchCorrelation.tomo_combinations(nzbins))
+            self.assertEqual(built, Integrated3PCF.tomo_combinations(nzbins))
             self.assertEqual(
                 [i == j for i, j in built], np.asarray(auto).tolist()
             )
@@ -211,7 +208,7 @@ class TestCombinationAccessors(unittest.TestCase):
             )
             built = list(zip(np.asarray(comb_i).tolist(), np.asarray(comb_j).tolist()))
             self.assertEqual(
-                built, PatchCorrelation.tomo_combinations(nzbins, True)
+                built, Integrated3PCF.tomo_combinations(nzbins, True)
             )
             self.assertEqual(ncomb, nzbins)
 
@@ -223,7 +220,7 @@ class TestCombinationAccessors(unittest.TestCase):
                 )
             )
             built = list(zip(np.asarray(comb_i).tolist(), np.asarray(comb_j).tolist()))
-            self.assertEqual(built, PatchCorrelation.ggl_combinations(nlens, nsource))
+            self.assertEqual(built, Integrated3PCF.kg_combinations(nlens, nsource))
             self.assertEqual(ncomb, nlens * nsource)
 
     def test_ggl_combinations_honour_an_explicit_selection(self):
@@ -234,7 +231,7 @@ class TestCombinationAccessors(unittest.TestCase):
             )
         )
         built = list(zip(np.asarray(comb_i).tolist(), np.asarray(comb_j).tolist()))
-        self.assertEqual(built, PatchCorrelation.ggl_combinations(2, 4, selection))
+        self.assertEqual(built, Integrated3PCF.kg_combinations(2, 4, selection))
         self.assertEqual(ncomb, len(selection))
 
     def test_zeta_triplets_match_the_reduction(self):
@@ -242,7 +239,7 @@ class TestCombinationAccessors(unittest.TestCase):
 
         for nzbins in (1, 2, 4):
             indices = _triplet_indices(nzbins)
-            triplets = PatchCorrelation.zeta_triplets(nzbins)
+            triplets = Integrated3PCF.zeta_triplets(nzbins)
             self.assertEqual(len(triplets), len(indices.centers))
             for k, (z_center, z2, z3) in enumerate(triplets):
                 self.assertEqual(indices.centers[k], z_center)
@@ -272,12 +269,10 @@ class TestPrecomputedSumOfWeights(unittest.TestCase):
             tuple(np.asarray(sums).shape),
             (2, nz * (nz + 1) // 2, corr.n_patches * corr.nbins),
         )
-        xip_a, xim_a = corr.shear_shear(
-            self.shear, self.w_s, return_device=False
-        )
-        xip_b, xim_b = corr.shear_shear(
-            self.shear, self.w_s, sumofweights=sums, return_device=False
-        )
+        xip_a, xim_a = fields_of(corr.gg(
+            self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m")
+        xip_b, xim_b = fields_of(corr.gg(
+            self.shear, self.w_s, sumofweights=sums, return_device=False, apertures=False), "xi_p", "xi_m")
         np.testing.assert_allclose(
             np.asarray(xip_b), np.asarray(xip_a), rtol=1e-12, atol=0
         )

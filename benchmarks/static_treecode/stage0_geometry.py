@@ -21,7 +21,7 @@ import time
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import select_patch_centers
 
 MASK = "/home/david/Documents/research/PDFast/data/DESY3_Mask.fits"
@@ -33,7 +33,7 @@ def degrade_mask(mask: np.ndarray, nside: int) -> np.ndarray:
     return hp.ud_grade(mask.astype(np.float64), nside) >= 0.5
 
 
-def geometry_stats(corr: PatchCorrelation) -> dict:
+def geometry_stats(corr: Integrated3PCF) -> dict:
     bins = np.asarray(corr.bins, dtype=np.int64)
     per_patch = bins.sum(axis=1)
     pair_pix = np.unique(np.concatenate([p.ravel() for p in corr.pair_inds]))
@@ -79,7 +79,7 @@ def main() -> None:
     # --- production geometry at nside 512 --------------------------------
     mask512 = degrade_mask(mask2048, 512)
     t0 = time.perf_counter()
-    corr = PatchCorrelation.from_mask(
+    corr = Integrated3PCF.from_mask(
         512,
         mask512,
         args.nside_centers,
@@ -103,7 +103,7 @@ def main() -> None:
     best = int(np.argmax(per_patch))
     for nside in (512, 1024, 2048):
         m = degrade_mask(mask2048, nside)
-        c = PatchCorrelation(
+        c = Integrated3PCF(
             nside,
             phi_c[best : best + 1],
             theta_c[best : best + 1],

@@ -2,7 +2,7 @@
  * tomo_fused_3x2pt.cu -- Aperture sections of the fused 3x2pt tomographic
  *                        measurement.
  *
- * `PatchCorrelation.three_by_two_pt` computes all six outputs of a 3x2pt analysis
+ * `Integrated3PCF.three_by_two_pt` computes all six outputs of a 3x2pt analysis
  * from one set of device inputs (AoS layout, all tomo bins of a pixel
  * contiguous):
  *

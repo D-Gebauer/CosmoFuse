@@ -31,7 +31,7 @@ from .treecode import (
 from .utils import live_object_serial, pixel2RaDec
 
 if TYPE_CHECKING:
-    from .correlations import PatchCorrelation
+    from .correlations import Integrated3PCF
 
 
 class PairGeometry:
@@ -59,7 +59,7 @@ class PairGeometry:
 
     @staticmethod
     def evaluate_aperture_filter(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         aperture_filter: Callable[..., Any],
         theta: np.ndarray,
     ) -> np.ndarray:
@@ -71,7 +71,7 @@ class PairGeometry:
 
     @staticmethod
     def ensure_aperture_pairs(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
         filter_fn = PairGeometry.resolve_aperture_filter(aperture_filter)
@@ -88,7 +88,7 @@ class PairGeometry:
 
     @staticmethod
     def get_pairs_patch(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         patch_inds: np.ndarray,
         ra: np.ndarray,
         dec: np.ndarray,
@@ -102,7 +102,7 @@ class PairGeometry:
 
     @staticmethod
     def get_pairs_helper(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         i: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         vec = hp.ang2vec(owner.theta_center[i], owner.phi_center[i])
@@ -124,14 +124,14 @@ class PairGeometry:
         )
 
     @staticmethod
-    def coarse_nsides(owner: "PatchCorrelation") -> Tuple[int, ...]:
+    def coarse_nsides(owner: "Integrated3PCF") -> Tuple[int, ...]:
         """Distinct coarse levels used by the 2PCF bins, descending nside."""
         levels = {int(ns) for ns in owner.level_nside if int(ns) != int(owner.nside)}
         return tuple(sorted(levels, reverse=True))
 
     @staticmethod
     def get_pairs_helper_levels(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         i: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, PatchCells]:
         """Static-treecode pair search for patch ``i``.
@@ -181,7 +181,7 @@ class PairGeometry:
         )
 
     @staticmethod
-    def preflight_pair_memory(owner: "PatchCorrelation") -> Optional[dict]:
+    def preflight_pair_memory(owner: "Integrated3PCF") -> Optional[dict]:
         """Project the pair memory *before* pair finding and fail early.
 
         Uses the analytic pair-separation distribution of a disc with the
@@ -280,7 +280,7 @@ class PairGeometry:
         )
 
     @staticmethod
-    def find_pairs(owner: "PatchCorrelation") -> None:
+    def find_pairs(owner: "Integrated3PCF") -> None:
         PairGeometry.preflight_pair_memory(owner)
 
         coarse = PairGeometry.coarse_nsides(owner)
@@ -336,11 +336,11 @@ class PairGeometry:
         owner._invalidate_prepared_state()
 
     @staticmethod
-    def pack_host_pairs(owner: "PatchCorrelation") -> None:
+    def pack_host_pairs(owner: "Integrated3PCF") -> None:
         """Replace the exact host pair geometry by its packed form (8 B/pair).
 
         Packing runs on the *global ids* rather than the device rows used in
-        :meth:`PatchCorrelation.prepare`; both orderings agree (``map_inds`` is
+        :meth:`Integrated3PCF.prepare`; both orderings agree (``map_inds`` is
         ascending and virtual rows are appended in id order), so the packed
         payload is identical and the row blocks stay mask-independent -- a
         packed pair file can still be loaded into any matching mask.  Each
@@ -374,7 +374,7 @@ class PairGeometry:
 
     @staticmethod
     def get_pairs_patch_M_a(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         pixels_RA_Q_patch: np.ndarray,
         pixels_dec_Q_patch: np.ndarray,
         Q_patch_center_RA: float,
@@ -424,7 +424,7 @@ class PairGeometry:
 
     @staticmethod
     def get_pairs_M_a_helper(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         i: int,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
@@ -468,7 +468,7 @@ class PairGeometry:
 
     @staticmethod
     def _get_pairs_M_a_coarse(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         i: int,
         vec: np.ndarray,
         cell_pix: np.ndarray,
@@ -505,7 +505,7 @@ class PairGeometry:
 
     @staticmethod
     def find_aperture_pairs(
-        owner: "PatchCorrelation",
+        owner: "Integrated3PCF",
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
         filter_fn = PairGeometry.resolve_aperture_filter(aperture_filter)
@@ -532,7 +532,7 @@ class PairGeometry:
         owner._aperture_filter_active_key = PairGeometry.aperture_filter_key(filter_fn)
 
     @staticmethod
-    def prepare_aperture_flat(owner: "PatchCorrelation") -> None:
+    def prepare_aperture_flat(owner: "Integrated3PCF") -> None:
         if not owner.Q_inds:
             owner.Q_inds_flat = None
             owner.Q_cos_flat = None

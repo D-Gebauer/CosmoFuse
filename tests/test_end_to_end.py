@@ -9,8 +9,9 @@ import treecorr
 # Add src to path for testing
 sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
-from CosmoFuse.correlations import PatchCorrelation
+from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
+from ._results import fields_of
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -37,7 +38,7 @@ class TestEndToEnd(unittest.TestCase):
         self.phi_center = np.array([0.44178647, 0.73631078, 0.85902924, 0.71176709, 0.17180585, 1.07992247])
         self.theta_center = np.array([1.54996149, 1.80201781, 1.9551931 , 2.04691539, 2.1432149 , 2.21951601])
 
-        self.corr = PatchCorrelation(
+        self.corr = Integrated3PCF(
             self.nside,
             self.phi_center,
             self.theta_center,
@@ -195,11 +196,10 @@ class TestEndToEnd(unittest.TestCase):
         self._ensure_mock_maperture_pairs()
         shear_maps = self.shear_maps[1:2]
         w = np.stack((self.w1,), axis=0)
-        xip_full, xim_full = self.corr.shear_shear(
+        xip_full, xim_full = fields_of(self.corr.gg(
             shear_maps,
             w,
-            flip_g1=True,
-        )
+            flip_g1=True, apertures=False), "xi_p", "xi_m")
         xip = self.corr.backend.to_numpy(xip_full[0])
         xim = self.corr.backend.to_numpy(xim_full[0])
 
@@ -219,11 +219,10 @@ class TestEndToEnd(unittest.TestCase):
     def get_cross_correlation(self):
         self._ensure_mock_maperture_pairs()
         w = np.stack((self.w1, self.w2), axis=0)
-        xip_full, xim_full = self.corr.shear_shear(
+        xip_full, xim_full = fields_of(self.corr.gg(
             self.shear_maps,
             w,
-            flip_g1=True,
-        )
+            flip_g1=True, apertures=False), "xi_p", "xi_m")
         xip = self.corr.backend.to_numpy(xip_full[1])
         xim = self.corr.backend.to_numpy(xim_full[1])
 
@@ -241,10 +240,9 @@ class TestEndToEnd(unittest.TestCase):
         )
 
     def get_gc_correlation(self):
-        wtheta_full = self.corr.density_density(
+        wtheta_full = self.corr.kk(
             self.density_maps,
-            np.stack((self.w1, self.w2), axis=0),
-        )
+            np.stack((self.w1, self.w2), axis=0), apertures=False).xi_g
         wtheta = self.corr.backend.to_numpy(wtheta_full[1])
 
         self.assertAlmostEqual(
@@ -255,13 +253,12 @@ class TestEndToEnd(unittest.TestCase):
         )
 
     def get_ggl_correlation(self):
-        gamma_t_full = self.corr.density_shear(
+        gamma_t_full = self.corr.kg(
             self.density_maps,
             self.shear_maps,
             np.stack((self.w1, self.w2), axis=0),
             np.stack((self.w1, self.w2), axis=0),
-            flip_g1=True,
-        )
+            flip_g1=True).xi_t
         gamma_t = self.corr.backend.to_numpy(gamma_t_full[1])
 
         self.assertAlmostEqual(
@@ -387,7 +384,7 @@ class TestEndToEnd(unittest.TestCase):
         w = self.w2
 
         m_a_ref = self._reference_maperture_shear_numpy(g1, g2, w)
-        m_a_corr = self.corr.backend.to_numpy(self.corr.aperture_shear_single(g1, g2, w))
+        m_a_corr = self.corr.backend.to_numpy(self.corr._m_a_single(g1, g2, w))
 
         np.testing.assert_allclose(m_a_corr, m_a_ref, rtol=1e-8, atol=1e-10)
 
@@ -398,7 +395,7 @@ class TestEndToEnd(unittest.TestCase):
         w = self.w2
 
         m_g_ref = self._reference_maperture_density_numpy(density, w)
-        m_g_corr = self.corr.backend.to_numpy(self.corr.aperture_density_single(density, w))
+        m_g_corr = self.corr.backend.to_numpy(self.corr._m_g_single(density, w))
 
         np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
 

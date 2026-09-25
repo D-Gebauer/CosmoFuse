@@ -10,13 +10,15 @@ A package for efficiently measuring integrated 3-point correlation functions on 
 plus footprint-wide two- and three-point correlation functions (`Global2PCF`, `Global3PCF`) built on the
 same precompute-once / measure-many machinery.
 
-Three estimators share one vocabulary -- the class says *what* is measured, the method *which fields*:
+Three estimators, named after the statistic they deliver, share one vocabulary: methods are
+TreeCorr's field codes (`g` = shear, `k` = scalar field such as an overdensity δ), and every call
+returns a labelled result object instead of a positional tuple.
 
-| class | measures | `shear(maps, w)` returns |
-|---|---|---|
-| `PatchCorrelation` | per-patch aperture masses and 2PCFs (i3PCF ingredients) | `(M_a, xi_p, xi_m)` per patch |
-| `Global2PCF` | 2PCFs of the whole footprint | `(xi_p, xi_m)` |
-| `Global3PCF` | 3PCF multipoles of the whole footprint | `ThreePointMultipoles` (Γ₀…Γ₃) |
+| class | measures | methods | result |
+|---|---|---|---|
+| `Integrated3PCF` | per-patch apertures and 2PCFs (the i3PCF ingredients) | `gg`, `kk`, `kg`, `three_by_two_pt`, `m_a`, `m_g` | `IntegratedResult` |
+| `Global2PCF` | 2PCFs of the whole footprint | `gg`, `kk`, `kg`, `three_by_two_pt` | `TwoPointResult` |
+| `Global3PCF` | 3PCF multipoles of the whole footprint | `ggg`, `kkk`, `kgg`, `kkg`, `measure` | `ThreePointResult` |
 
 The integrated 3-point correlation function probes squeezed configurations of the bispectrum without the computational expense of the full 3-point correlation function.
 
@@ -86,10 +88,10 @@ Note: for GPU execution, install CuPy in your environment.
 
 ## USAGE
 
-First create a PatchCorrelation object:
+First create an Integrated3PCF object:
 
-    from CosmoFuse import PatchCorrelation
-    correlation = PatchCorrelation(
+    from CosmoFuse import Integrated3PCF
+    correlation = Integrated3PCF(
         nside,                              # resolution of healpy maps
         phi_center, theta_center,           # patch centers (radians)
         patch_size=90,                      # patch size (arcminutes)
@@ -106,7 +108,7 @@ First create a PatchCorrelation object:
         aperture_nside=None,                # coarser nside for the aperture statistics (None = nside)
         memory_budget_gb=None,              # pair-memory budget of the preflight check (None = free device memory)
         pair_search_precision="float64",    # "float64" / "float32"
-        pack_pairs=False,                   # 8-byte pairs on the device (tomographic methods only)
+        pack_pairs=False,                   # 8-byte pairs on the device
         pack_host_pairs=False,              # 8-byte pairs in host RAM and in the pair file too
     )
 
@@ -135,11 +137,11 @@ Instead of providing patch centers manually, they can be selected automatically 
         f_mask=0.2,              # max masked fraction in the patch disc
         filter_weighting="abs",  # "abs" / "signed"
     )
-    correlation = PatchCorrelation(nside, phi_center, theta_center, mask=mask, ...)
+    correlation = Integrated3PCF(nside, phi_center, theta_center, mask=mask, ...)
 
 or, in one step:
 
-    correlation = PatchCorrelation.from_mask(
+    correlation = Integrated3PCF.from_mask(
         nside, mask, nside_centers=32,
         patch_size=90, theta_Q=90, f_mask=0.2,
         nbins=10, theta_min=10, theta_max=170,
@@ -180,7 +182,7 @@ Pair files are written in a consolidated layout (format version 2; version 3 wit
 
 `pack_pairs=True` stores the pair geometry on the *device* in 8 instead of 24 bytes per pair, so about three times as many pairs fit on a GPU; host arrays and pair files stay exact. `pack_host_pairs=True` applies the same packing already at pair-finding time, which cuts host RAM and the pair file by the same factor (`pair_inds` / `pair_exp2phi` are then `None`, the payload lives in `packed_pairs`):
 
-    correlation = PatchCorrelation(..., pack_pairs=True, pack_host_pairs=True)
+    correlation = Integrated3PCF(..., pack_pairs=True, pack_host_pairs=True)
     correlation.preprocess()
     correlation.save_pairs("/path/to/pairs.h5")   # format version 4
 
@@ -188,7 +190,7 @@ Both are off by default. Packing quantises the pair rotations to $2\pi/65536$, w
 
 ### Aperture filters
 
-The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `find_aperture_pairs()`, `select_patch_centers()`, and `PatchCorrelation.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
+The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `find_aperture_pairs()`, `select_patch_centers()`, and `Integrated3PCF.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
 
 **`Q_crittenden` (default)** — the exponential compensated filter of [Crittenden et al. (2002)](https://arxiv.org/abs/astro-ph/0012336), as used for the i3PCF in [Halder et al. (2021)](https://arxiv.org/abs/2102.10177):
 
@@ -208,154 +210,92 @@ Both filters are normalised to $\int Q(\theta)\, \mathrm{d}\Omega = 1$, so apert
 
     correlation.preprocess(aperture_filter=Q_schneider)
 
-### Measuring Correlations
+### Measuring correlations
 
-The package supports 3 main probes: Cosmic Shear, Galaxy Clustering, and Galaxy-Galaxy Lensing (GGL).
+Method names are TreeCorr's field codes: `g` is a shear field (spin 2), `k` a
+scalar field -- an overdensity map δ or a convergence map.  The class says
+*what* is measured, the method *which fields*:
+
+| `Integrated3PCF` method | measures (per patch) | result fields |
+| :--- | :--- | :--- |
+| `gg(shear_maps, w)` | ξ± and the aperture mass at the patch centre | `M_a`, `xi_p`, `xi_m` |
+| `kk(k_maps, w)` | w(θ) (field estimator on δ) and the aperture count | `M_g`, `xi_g` |
+| `kg(k_maps, shear_maps, k_w, shear_w, m_g=False, m_a=False)` | γ_t of lens δ × source shear (+ optional apertures) | `xi_t` (`M_g`, `M_a`) |
+| `three_by_two_pt(shear_maps, k_maps, weights)` | all six in one fused pass | all six |
+| `m_a(shear_maps, w)`, `m_g(k_maps, w)` | apertures only | array `(nz, n_patches)` |
+
+`gg` and `kk` measure the apertures too by default (one shared row expansion);
+pass `apertures=False` for the 2PCFs alone.  Inputs are full-sky
+(`(nz, [2,] npix)`) or row-space (`(nz, [2,] n_active)`) arrays.
+
+Every call returns a labelled `IntegratedResult` -- fields that were not
+measured are `None`, and the rows of every 2PCF come with their tomographic
+labels:
+
+```python
+res = correlation.gg(shear_maps, weights, flip_g1=True)
+res.M_a.shape            # (nz, n_patches)
+res.xi_p.shape           # (nz(nz+1)/2, n_patches, nbins)
+res.gg_combinations      # ((0, 0), (0, 1), ...) -- which bins each row of xi_p/xi_m is
+res.theta                # bin centres in arcmin
+
+res = correlation.kg(delta_maps, shear_maps, w_lens, w_source, m_g=True)
+res.xi_t, res.M_g, res.kg_combinations      # rows as (lens_bin, source_bin)
+
+res = correlation.three_by_two_pt(
+    shear_maps, delta_maps, weights={"shear": shear_w, "density": density_w},
+)
+zetas = res.zetas()      # every i3PCF the measured fields form
+```
+
+The TreeCorr equivalents (on a catalogue of the pixel centres, `metric="Arc"`)
+are `GGCorrelation` for ξ±, `KKCorrelation` with `k = δ` for w(θ) and
+`KGCorrelation` for γ_t.  With coverage-fraction weights the `kk` field
+estimator is exactly Landy-Szalay with randoms at the pixel centres.
 
 #### Probes & Inputs
 
-| Probe | Aperture Quantity | 2-Point PatchCorrelation | Inputs |
+| Probe | Aperture | 2PCF | Inputs |
 | :--- | :--- | :--- | :--- |
-| **Shear** | Aperture Mass ($M_a$) | Shear 2PCF ($\xi_\pm$) | Shear maps ($g_1, g_2$), Weights ($w$) |
-| **Clustering** | Aperture Count ($M_g$) | Angular Clustering ($\xi_g$) | Density maps ($\delta$ or counts), Weights ($w$) |
-| **GGL** | Aperture Count ($M_g$) | Tangential Shear ($\xi_t$) | Lens density + Source shear |
+| **Shear** (`gg`) | Aperture mass ($M_a$) | $\xi_\pm$ | Shear maps ($g_1, g_2$), weights |
+| **Clustering** (`kk`) | Aperture count ($M_g$) | $w(\theta)$ | Overdensity maps δ, weights (coverage) |
+| **GGL** (`kg`) | $M_g$ (and $M_a$) | $\gamma_t$ | Lens δ + source shear |
 
 #### What the measurement methods return (`return_device`)
 
 Every measurement method takes `return_device` and it defaults to **`True`**.
-On a GPU backend that means you get **cupy arrays**, not numpy — which is what
-makes the device-resident pipeline work: `MapLoader` keeps the maps on the
-card, `ZetaWriter` reduces on the card and copies ~9 kB instead of ~1 MB per
-map-set, and nothing crosses PCIe that does not have to. Pass
-`return_device=False` for numpy.
+On a GPU backend the result's arrays are then **cupy arrays**, not numpy --
+which is what makes the device-resident pipeline work: `MapLoader` keeps the
+maps on the card, `ZetaWriter` reduces on the card and copies ~9 kB instead of
+~1 MB per map-set, and nothing crosses PCIe that does not have to. Pass
+`return_device=False` (or call `res.to_numpy()`) for numpy.
 
-Two things worth knowing:
-
-* **A multi-device group always returns numpy.** `MultiDevicePatchCorrelation`
-  concatenates the per-device patch ranges on the host, so `return_device` is
-  ignored there.
+* **A multi-device instance always returns numpy** -- it concatenates the
+  per-device patch ranges on the host.
 * **The arrays are yours.** Each call allocates its outputs, so collecting
-  results in a list across realisations is safe:
-
-  ```python
-  results = [corr.three_by_two_pt(...) for _ in range(n_realisations)]   # fine
-  ```
-
-  (Before 6.3.0 `three_by_two_pt(return_device=True)` returned cached buffers
-  that the next call overwrote in place, so that loop silently produced N
-  copies of the last realisation.)
+  results across realisations is safe:
+  `results = [corr.three_by_two_pt(...) for _ in range(n)]`.
 
 #### Which row is which pair of bins
 
-The tomographic outputs are `(ncomb, n_patches, nbins)` and the row order is
-part of the contract, not something to rederive:
+Results carry their row labels (`gg_combinations`, `kk_combinations`,
+`kg_combinations`).  The same orders are available without measuring:
 
 ```python
-PatchCorrelation.tomo_combinations(4)         # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
-PatchCorrelation.tomo_combinations(4, True)   # gc_auto_correlations_only=True: the diagonal only
-PatchCorrelation.ggl_combinations(2, 4)       # xi_t rows as (lens_bin, source_bin)
-PatchCorrelation.zeta_triplets(4)             # same-sample zeta rows: (z_center, z2, z3)
-PatchCorrelation.zeta_cross_triplets(5, 10)   # cross-sample zeta rows: (z_center, annulus_row)
+Integrated3PCF.tomo_combinations(4)                  # xi_p / xi_m / xi_g rows: [(0,0), (0,1), ...]
+Integrated3PCF.tomo_combinations(4, auto_only=True)  # kk(auto_only=True): the diagonal only
+Integrated3PCF.kg_combinations(2, 4)                 # xi_t rows as (lens_bin, source_bin)
+Integrated3PCF.zeta_triplets(4)                      # same-sample zeta rows: (z_center, z2, z3)
+Integrated3PCF.zeta_cross_triplets(5, 10)            # cross-sample zeta rows: (z_center, annulus_row)
 ```
 
-Note that `gc_auto_correlations_only=True` changes the length of the $\xi_g$
-vector from `nz(nz+1)/2` to `nz` — a shape check will not catch a mislabelled
-data vector, so index it by the accessor.
+`auto_only=True` changes the length of the $\xi_g$ vector from `nz(nz+1)/2` to
+`nz` -- a shape check will not catch a mislabelled data vector, so use the labels.
 
 A ζ estimator uses `zeta_triplets` when its centre and its annulus are built
 from the **same** sample (`zeta_a_plus`, `zeta_a_minus`, `zeta_g_g`) and
 `zeta_cross_triplets` when they are not (`zeta_g_plus`, `zeta_g_minus`,
-`zeta_a_g`, `zeta_g_t`, `zeta_a_t`) — see below.
-
-#### 1. Single Map Pair (Patch-Level)
-
-Calculate quantities for a single pair of maps (e.g. one tomographic bin pair).
-
-**Cosmic Shear**:
-```python
-# Aperture Mass
-M_a = correlation.aperture_shear_single(g1, g2, w)
-# Shear 2PCF
-xi_p, xi_m = correlation.shear_shear_single(g1_a, g2_a, g1_b, g2_b, w_a, w_b)
-```
-
-**Galaxy Clustering**:
-```python
-# Aperture Number Count
-M_g = correlation.aperture_density_single(delta, w)
-# Angular Clustering
-xi_g, = correlation.density_density_single(delta_a, delta_b, w_a, w_b)
-```
-
-**Galaxy-Galaxy Lensing**:
-```python
-# Aperture Number Count (Lenses)
-M_g = correlation.aperture_density_single(delta_lens, w_lens)
-# Tangential Shear
-xi_t, = correlation.density_shear_single(delta_lens, g1_source, g2_source, w_lens, w_source)
-```
-
-#### 2. Full Tomography (3x2pt)
-
-Calculate all correlations for all requested tomographic bin combinations at once.
-
-**Specific Probes**:
-
-*Cosmic Shear*:
-```python
-# Returns: xi_p, xi_m
-xi_p, xi_m = correlation.shear_shear(shear_maps, weights)
-
-# Full shear tomography (includes aperture mass)
-M_a, xi_p, xi_m = correlation.shear(shear_maps, weights)
-```
-
-*Galaxy Clustering*:
-```python
-# Returns: xi_g
-xi_g = correlation.density_density(density_maps, weights)
-
-# Full clustering tomography (includes aperture counts)
-M_g, xi_g = correlation.density(density_maps, weights)
-```
-
-*Galaxy-Galaxy Lensing*:
-```python
-# Returns: xi_t (Lens->Source combinations)
-xi_t = correlation.density_shear(
-    density_maps, shear_maps, density_weights, shear_weights
-)
-
-# Full GGL helper; by default returns only xi_t
-xi_t = correlation.ggl(
-    density_maps, shear_maps, density_weights, shear_weights
-)
-
-# Optional extras: also return M_g and/or M_a
-xi_t, M_g = correlation.ggl(
-    density_maps, shear_maps, density_weights, shear_weights,
-    return_N_ap=True,
-)
-xi_t, M_g, M_a = correlation.ggl(
-    density_maps, shear_maps, density_weights, shear_weights,
-    return_N_ap=True,
-    return_M_ap=True,
-)
-```
-
-**Combined 3x2pt Bundle**:
-
-```python
-# shear_maps:   [nzbins_s, 2, npix] or None
-# density_maps: [nzbins_d, npix] or None
-# weights:      dict of weights or None
-
-M_a, M_g, xi_p, xi_m, xi_g, xi_t = correlation.three_by_two_pt(
-    shear_maps=shear_maps,
-    density_maps=density_maps,
-    weights={"shear": shear_w, "density": density_w},
-)
-```
+`zeta_a_g`, `zeta_g_t`, `zeta_a_t`) -- see below.
 
 **Overlapping uploads with compute (GPU)**:
 
@@ -372,7 +312,7 @@ pipe = MapLoader(correlation, {"shear": (nz, 2, npix), "w": (nz, npix)})
 dev = pipe.wait(pipe.stage({"shear": shear_np[0], "w": w_np[0]}))
 for k in range(nmaps):
     nxt = pipe.stage({"shear": shear_np[k + 1], "w": w_np[k + 1]}) if k + 1 < nmaps else None
-    results.append(correlation.shear(dev["shear"], dev["w"]))
+    results.append(correlation.gg(dev["shear"], dev["w"]))
     dev = pipe.wait(nxt)
 ```
 
@@ -392,7 +332,7 @@ loader = MapFileLoader(
     row_pix_hash=correlation.row_pix_hash,   # optional archive/mask check
 )
 for k, dev in loader:
-    results.append(correlation.shear(dev["shear"], w))
+    results.append(correlation.gg(dev["shear"], w))
 ```
 
 Store the maps in row space (`correlation.to_row_space(full_sky_maps)`, done
@@ -412,15 +352,15 @@ timing a loop.
 **Several GPUs**:
 
 Passing a list of GPU ids splits the patches across those devices — one
-`PatchCorrelation` per GPU, measured in parallel, outputs concatenated in patch
+`Integrated3PCF` per GPU, measured in parallel, outputs concatenated in patch
 order. The result is identical to a single-device run, and each GPU holds only
 its share of the pair geometry, which is how a geometry too large for one card
 is measured. A single device remains the default.
 
 ```python
-correlation = PatchCorrelation(nside, phi_center, theta_center, device=[0, 1], ...)
+correlation = Integrated3PCF(nside, phi_center, theta_center, device=[0, 1], ...)
 correlation.preprocess()          # or load_pairs(path): each device takes its own slice
-M_a, xi_p, xi_m = correlation.shear(shear_maps, weights)
+res = correlation.gg(shear_maps, weights)
 ```
 
 Write pair files from a single-device instance; a multi-device group only
@@ -436,10 +376,10 @@ the end:
 
     with ZetaWriter("zetas.h5", correlation, flush_every=50) as out:
         for shear, w in map_sets:
-            out.submit_shear(correlation.shear(shear, w))
+            out.submit(correlation.gg(shear, w))
 
-`submit_three_by_two_pt()` takes a `three_by_two_pt()` result, and `submit(M_a=..., xi_p=...)`
-any subset of the six fields. `submit()` blocks once `depth` map-sets are queued, so
+`submit()` takes any `Integrated3PCF` result (`gg`, `kk`, `kg`, `three_by_two_pt`), or
+keyword arrays -- `submit(M_a=..., xi_p=...)` -- for any subset of the six fields. `submit()` blocks once `depth` map-sets are queued, so
 memory stays bounded and a writer that falls behind cannot go unnoticed.
 
 This works because zeta averages over *patches*, not over maps: map-set *k* can be
@@ -450,8 +390,8 @@ instead; zeta, a leave-one-patch-out jackknife or a different binning can all st
 be derived from those.
 
 On a GPU the reduction runs on the device before the copy, so only the 9 kB data
-vector crosses PCIe and the writer thread does nothing but I/O. With a
-`MultiDevicePatchCorrelation` the group returns host arrays, so the reduction runs on the
+vector crosses PCIe and the writer thread does nothing but I/O. A
+multi-device instance returns host arrays, so the reduction runs on the
 CPU in the writer thread — still off the measurement's critical path, and nothing
 about the group changes.
 
@@ -482,18 +422,24 @@ g2 = Global2PCF(nside, mask=mask, nbins=20, theta_min=5, theta_max=250,
                 resolution_factor=None, pack_pairs=False, device="auto")
 g2.preprocess()                      # or g2.load_pairs("g2.h5") after g2.save_pairs(...)
 
-xi_p, xi_m = g2.shear(shear_maps, w, flip_g1=True)     # (nz(nz+1)/2, nbins)
-w_theta    = g2.density(delta_maps, w)                   # (nz(nz+1)/2, nbins)
-gamma_t    = g2.ggl(delta_maps, shear_maps, w_lens, w_source)
-xi_p, xi_m, xi_g, xi_t = g2.three_by_two_pt(shear_maps, delta_maps, w_source, w_lens)
+gg = g2.gg(shear_maps, w, flip_g1=True)              # TwoPointResult
+gg.xi_p, gg.xi_m                                      # (nz(nz+1)/2, nbins)
+gg.combinations, gg.theta                             # row labels, bin centres (arcmin)
+w_theta = g2.kk(delta_maps, w_cov).xi                 # KK field estimator (= LS with pixel randoms)
+gamma_t = g2.kg(delta_maps, shear_maps, w_lens, w_source).xi
+out = g2.three_by_two_pt(shear_maps, delta_maps, w_source, w_lens)   # {"gg", "kk", "kg"}
 
-# per-tile numerators and weight sums (delete-one-tile jackknife)
-num_p, num_m, den = g2.shear(shear_maps, w, per_tile=True)   # (ncomb, n_tiles, nbins)
+jk = gg.jackknife()["xi_p"]                           # delete-one-tile estimates (n_tiles, ncomb, nbins)
 ```
 
-It runs the same pair kernels as `PatchCorrelation` with tiles in the role of patches and forms the
-ratio of sums over the whole footprint.  The static treecode builds its cells over the whole
-footprint (there is no patch window to preserve).
+A `TwoPointResult` holds the per-tile numerators and weight sums
+(`tile_num`, `tile_weight`); the estimate is their ratio over the whole
+footprint, and results of different tile sets or devices join with `+`.  It
+runs the same pair kernels as `Integrated3PCF` with tiles in the role of
+patches.  The static treecode builds its cells over the whole footprint (there
+is no patch window to preserve).  It reproduces TreeCorr (`brute=True`,
+`bin_slop=0`, `angle_slop=0`, `metric="Arc"`, on the pixel centres) to its
+rounding: `GGCorrelation`, `KKCorrelation` and `KGCorrelation` with `k = δ`.
 
 ### Three-point: `Global3PCF`
 
@@ -503,15 +449,17 @@ from CosmoFuse import Component, Global3PCF
 g3 = Global3PCF(nside, mask=mask, nbins=12, theta_min=15, theta_max=250, n_max=20, device="auto")
 g3.preprocess()
 
-res = g3.shear(shear_maps, w, flip_g1=True)          # components gamma0..gamma3
+res = g3.ggg(shear_maps, w, flip_g1=True)            # ThreePointResult, labels gamma0..gamma3
 res.num["gamma0"].shape    # (2 n_max + 1, nz, nz, nz, nbins, nbins): n, z_centre, z_leg2, z_leg3, b2, b3
 gamma = res.binned(np.linspace(-np.pi, np.pi, 17))    # label -> (..., nbins, nbins, 16)
 gamma_cen = res.to_centroid(gamma, np.linspace(-np.pi, np.pi, 17))
 
-zeta = g3.density(delta_maps, w)                      # scalar 3PCF
+zeta = g3.kkk(delta_maps, w)                          # scalar 3PCF
+kgg = g3.kgg(delta_maps, shear_maps, w_lens, w_source)  # <k g g>, <k g* g>
+kkg = g3.kkg(delta_maps, shear_maps, w_lens, w_source)  # <k k g>
 mixed = g3.measure(                                   # any spin-0 / spin-2 combination
-    {"d": (delta_maps, w_lens, 0), "g": (shear_maps, w_source, 2)},
-    [Component("dgg", ("d", "g", "g")), Component("ggd*", ("g", "g", "d"), (False, False, True))],
+    {"k": (delta_maps, w_lens, 0), "g": (shear_maps, w_source, 2)},
+    [Component("gkk*", ("g", "k", "k"), (True, False, False))],
 )
 ```
 
