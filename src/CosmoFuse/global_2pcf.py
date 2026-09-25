@@ -524,8 +524,10 @@ class Global2PCF:
         per_tile: bool = False,
         return_device: bool = True,
     ) -> Any:
-        """Tomographic w(θ) of the footprint (Peebles-Hauser ``Σ w w δ δ /
-        Σ w w`` on overdensity maps, like the patch estimator).
+        """Tomographic w(θ) of the footprint: the *field* estimator
+        ``Σ w_i w_j δ_i δ_j / Σ w_i w_j`` on overdensity maps, like the patch
+        estimator (TreeCorr's ``KKCorrelation`` with ``k = δ``, not the
+        pair-count ``NNCorrelation``).
 
         Returns ``(ncomb, nbins)`` -- upper-triangle combinations, or the
         ``nz`` auto-correlations with ``auto_only=True``.  ``per_tile=True``
@@ -554,7 +556,9 @@ class Global2PCF:
         per_tile: bool = False,
         return_device: bool = True,
     ) -> Any:
-        """Tomographic γ_t (lens density × source shear) of the footprint.
+        """Tomographic γ_t (lens density × source shear) of the footprint:
+        ``Σ w_l w_s δ_l γ_t / Σ w_l w_s`` (TreeCorr's ``KGCorrelation`` with
+        ``k = δ``, not ``NGCorrelation``).
 
         All ``(lens, source)`` combinations in row-major order, or the given
         ``ggl_bin_combinations``.  Returns ``(ncomb, nbins)``;
