@@ -476,7 +476,7 @@ class TestCorrelation(unittest.TestCase):
         _ = corr._to_backend_array(host, dtype=np.float64)
         self.assertEqual(calls["to_device"], 1)
 
-    def test_shear_shear_accepts_backend_native_arrays_without_transfer(self):
+    def test_gg_accepts_backend_native_arrays_without_transfer(self):
         corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,

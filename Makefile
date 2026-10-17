@@ -19,8 +19,8 @@ test-fast: ## Run the fast local loop (no GPU, no slow exactness gates)
 coverage: ## Run the CI selection with coverage reports
 	pytest tests/ -m "not gpu" --cov=CosmoFuse --cov-report=term-missing --cov-report=html --cov-report=xml
 
-test-env: ## Run tests with pytest in specific environment (usage: make test-env-pytest ENV=myenv)
-	conda run --no-capture-output -n $(ENV) pytest tests/ -v
+test-env: ## Run tests in a uv venv under ~/.venvs (usage: make test-env ENV=cosmo)
+	$(HOME)/.venvs/$(ENV)/bin/python -m pytest tests/ -v
 
 clean: ## Clean build, test, coverage, cache and temporary artifacts
 	rm -rf build/

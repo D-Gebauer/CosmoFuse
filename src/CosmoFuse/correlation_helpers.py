@@ -377,21 +377,6 @@ def _zeta_from_fields(
     return _zeta_covariance(central, annulus, indices)
 
 
-def _zeta_from_cross_fields(
-    central_field: np.ndarray,
-    annulus_field: np.ndarray,
-    symmetric: Optional[bool] = None,
-) -> np.ndarray:
-    """Deprecated alias of :func:`_zeta_from_fields`.
-
-    The two differed only in whether the upper-triangle rule was enforced
-    before the layout was chosen; `_zeta_from_fields` now takes ``symmetric``
-    and decides both.  Kept because it names the generic case at the call
-    sites that need it.
-    """
-    return _zeta_from_fields(central_field, annulus_field, symmetric=symmetric)
-
-
 def zeta_g_plus(
     M_g: np.ndarray, xi_p: np.ndarray, symmetric: Optional[bool] = None
 ) -> np.ndarray:
@@ -478,7 +463,7 @@ def zeta_g_t(
     Uses the galaxy-galaxy lensing signal as the annular field; probes
     the galaxy-galaxy-matter bispectrum.
     """
-    return _zeta_from_cross_fields(M_g, xi_t, symmetric=symmetric)
+    return _zeta_from_fields(M_g, xi_t, symmetric=symmetric)
 
 
 def zeta_a_t(
@@ -489,7 +474,7 @@ def zeta_a_t(
     Correlates lensing mass with galaxy-galaxy lensing; probes the
     matter-galaxy-matter bispectrum.
     """
-    return _zeta_from_cross_fields(M_a, xi_t, symmetric=symmetric)
+    return _zeta_from_fields(M_a, xi_t, symmetric=symmetric)
 
 
 #: (result name, central field, annulus field, symmetric-triplet layout).

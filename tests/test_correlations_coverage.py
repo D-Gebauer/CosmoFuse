@@ -271,7 +271,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
         np.testing.assert_allclose(reduced, expected)
 
-    def test_shear_shear_prefers_vectorized_path_when_available(self):
+    def test_gg_prefers_vectorized_path_when_available(self):
         self._setup_mock_pairs()
 
         nzbins = 2
@@ -344,7 +344,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(xip_dev.shape, (corr.n_patches, corr.nbins))
         self.assertEqual(xim_dev.shape, (corr.n_patches, corr.nbins))
 
-    def test_shear_shear_single_public_api(self):
+    def test_gg_single_public_api(self):
         corr = self._make_small_cpu_corr()
         self.assertFalse(hasattr(corr, "xipm"))
 
@@ -424,7 +424,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 np.ones(12, dtype=np.float64),
             )
 
-    def test_compute_density_methods_prepare_on_demand(self):
+    def test_kk_methods_prepare_on_demand(self):
         corr = self._make_small_cpu_corr()
         corr.inds_dev = None
 
@@ -459,7 +459,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(normalized.shape, (corr.n_patches, corr.nbins))
         self.assertAlmostEqual(normalized[0, 0], 0.5)
 
-    def test_shear_shear_returns_2pcf_outputs(self):
+    def test_gg_returns_2pcf_outputs(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
@@ -482,7 +482,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         np.testing.assert_allclose(out_xip, xip)
         np.testing.assert_allclose(out_xim, xim)
 
-    def test_vectorized_density_methods_delegate_to_tomo_helpers(self):
+    def test_kk_kg_delegate_to_tomo_helpers(self):
         corr = self._make_small_cpu_corr()
         density_maps = np.arange(24, dtype=np.float64).reshape(2, 12)
         shear_maps = np.zeros((2, 2, 12), dtype=np.float64)
@@ -1447,7 +1447,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                 nsource_bins,
             )
 
-    def test_shear_shear_sumofweights_validation_errors(self):
+    def test_gg_sumofweights_validation_errors(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
@@ -2308,7 +2308,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         expected = 5.0 * np.sum(np.array([2.0, 4.0]) * gt * 2.0) / np.sum(np.array([2.0, 4.0]))
         self.assertAlmostEqual(vals[0], expected)
 
-    def test_compute_density_methods_non_numpy_backend_path(self):
+    def test_kk_methods_non_numpy_backend_path(self):
         corr = self._make_small_cpu_corr()
 
         class FakeBackend:
@@ -2543,7 +2543,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                     )
                     self.assertIsNone(result)
 
-    def test_shear_shear_raises_when_vectorized_unavailable(self):
+    def test_gg_raises_when_vectorized_unavailable(self):
         corr = self._make_small_cpu_corr()
         shear_maps = np.ones((2, 2, 12), dtype=np.float64)
         w = np.ones((2, 12), dtype=np.float64)
@@ -2552,8 +2552,8 @@ class TestCorrelationCoverage(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 fields_of(corr.gg(shear_maps, w, apertures=False), "xi_p", "xi_m")
 
-    def test_shear_shear_fused_cpu_assignments(self):
-        """CPU shear_shear should use vectorized tomography, not legacy cross kernel."""
+    def test_gg_fused_cpu_assignments(self):
+        """CPU gg should use the vectorised tomographic path, not a cross kernel."""
         corr = Integrated3PCF(
             nside=1,
             phi_center=np.array([0.0]),
@@ -2642,7 +2642,7 @@ class TestCorrelationCoverage(unittest.TestCase):
     @patch('CosmoFuse.correlations.Integrated3PCF.find_pairs')
     @patch('CosmoFuse.correlations.Integrated3PCF.prepare')
     def test_preprocess_forwarding(
-        self, mock_prepare, mock_calculate_pairs_2PCF, mock_calculate_pairs_M_a
+        self, mock_prepare, mock_find_pairs, mock_find_aperture_pairs
     ):
         def custom_filter(theta, theta_q):
             return np.ones_like(theta) * theta_q
@@ -2665,26 +2665,26 @@ class TestCorrelationCoverage(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case["name"]):
                 mock_prepare.reset_mock()
-                mock_calculate_pairs_2PCF.reset_mock()
-                mock_calculate_pairs_M_a.reset_mock()
+                mock_find_pairs.reset_mock()
+                mock_find_aperture_pairs.reset_mock()
 
                 getattr(self.corr, case["method"])(**case["kwargs"])
 
-                mock_calculate_pairs_2PCF.assert_called_once_with()
+                mock_find_pairs.assert_called_once_with()
                 mock_prepare.assert_called_once_with()
 
                 expected_filter = case["expected_filter"]
                 if expected_filter is None:
-                    mock_calculate_pairs_M_a.assert_called_once_with()
+                    mock_find_aperture_pairs.assert_called_once_with()
                 else:
-                    mock_calculate_pairs_M_a.assert_called_once()
+                    mock_find_aperture_pairs.assert_called_once()
                     self.assertIs(
-                        mock_calculate_pairs_M_a.call_args.kwargs["aperture_filter"],
+                        mock_find_aperture_pairs.call_args.kwargs["aperture_filter"],
                         expected_filter,
                     )
 
-    def test_shear_shear(self):
-        """Test the shear_shear method."""
+    def test_gg(self):
+        """Test the gg method."""
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         
@@ -2722,8 +2722,8 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIsNone(self.corr.Q_inds_flat)
         self.assertIsNone(self.corr.Q_offsets)
 
-    def test_shear_shear_missing_fused_kernel(self):
-        """shear_shear should not depend on legacy fused cross kernel."""
+    def test_gg_missing_fused_kernel(self):
+        """gg should not depend on a fused cross kernel."""
         corr = Integrated3PCF(
             nside=1,
             phi_center=np.array([0.0]),
@@ -3249,7 +3249,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             sys.modules.pop("cupy", None)
             sys.modules.pop(module_name, None)
 
-    def test_shear_shear_cpu_skips_sumofweights(self):
+    def test_gg_cpu_skips_sumofweights(self):
         """On the CPU backend the kernel accumulates the weight sums, so
         neither the fingerprint cache nor the reduce machinery runs."""
         nzbins = 2
@@ -3271,7 +3271,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.assertEqual(spy_compute.call_count, 0)
             self.assertEqual(spy_fp.call_count, 0)
 
-    def test_shear_shear_gpu_branch_skips_sumofweights_machinery(self):
+    def test_gg_gpu_branch_skips_sumofweights_machinery(self):
         """On the GPU-style branch the kernel accumulates the denominators
         in-pass, so neither fingerprinting nor the reduce machinery runs —
         even when the weights change between calls."""
@@ -3317,7 +3317,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.corr.backend.to_device = orig_to_device
             self.corr.backend.to_numpy = orig_to_numpy
 
-    def test_shear_shear_gpu_branch_explicit_sumofweights_forwarded(self):
+    def test_gg_gpu_branch_explicit_sumofweights_forwarded(self):
         """An explicit sumofweights still bypasses the in-kernel denominators."""
         nzbins = 2
         nzbin_combs = 3
@@ -3352,7 +3352,7 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.corr.backend.to_device = orig_to_device
             self.corr.backend.to_numpy = orig_to_numpy
 
-    def test_shear_shear_explicit_sumofweights_still_accepted(self):
+    def test_gg_explicit_sumofweights_still_accepted(self):
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         shear_maps = np.random.rand(nzbins, 2, self.npix)
@@ -3364,7 +3364,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
-    def test_shear_shear_explicit_sumofweights_skips_fingerprint_checks(self):
+    def test_gg_explicit_sumofweights_skips_fingerprint_checks(self):
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         shear_maps = np.random.rand(nzbins, 2, self.npix)
@@ -3388,8 +3388,8 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertEqual(xip.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
         self.assertEqual(xim.shape, (nzbin_combs, self.corr.n_patches, self.corr.nbins))
 
-    def test_shear_shear_prepares(self):
-        """Test that shear_shear calls prepare if needed."""
+    def test_gg_prepares(self):
+        """Test that gg calls prepare if needed."""
         self.corr.bins = [np.array([1, 0], dtype=np.uint32)]
         self.corr.pair_inds = [np.zeros((2, 1), dtype=np.uint32)]
         self.corr.pair_exp2phi = [np.zeros((2, 1), dtype=np.complex128)]

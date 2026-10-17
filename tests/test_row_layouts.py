@@ -250,13 +250,13 @@ class TestPublicFlipsUnchanged(FusedDegradeBase):
 
     def cases(self, corr, shear, flip_g1, flip_g2):
         return {
-            "shear": lambda c: fields_of(c.gg(
+            "gg": lambda c: fields_of(c.gg(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
                 return_device=False), "M_a", "xi_p", "xi_m"),
-            "shear_shear": lambda c: fields_of(c.gg(
+            "gg_pairs": lambda c: fields_of(c.gg(
                 shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
                 return_device=False, apertures=False), "xi_p", "xi_m"),
-            "ggl": lambda c: c.kg(
+            "kg": lambda c: c.kg(
                 self.dens, shear, self.w, self.w, flip_g1=flip_g1,
                 flip_g2=flip_g2, return_device=False).xi_t,
             "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(

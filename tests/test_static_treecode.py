@@ -666,7 +666,7 @@ class TestExpansionSharing(unittest.TestCase):
             self.assertTrue(np.array_equal(a, b))
 
     def test_reused_buffer_is_not_stale(self):
-        """Same array object, new content (what PinnedMapPipeline does)."""
+        """Same array object, new content (what MapLoader does)."""
         corr = self.corr
         buf = np.ascontiguousarray(clean(self.shear, self.mask)[..., corr.row_pix])
         w = np.ascontiguousarray(clean(self.w_s, self.mask)[..., corr.row_pix])

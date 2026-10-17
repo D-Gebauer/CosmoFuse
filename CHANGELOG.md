@@ -1,6 +1,6 @@
 # Changelog
 
-## 7.0.0 (2026-09-25)
+## 7.0.0 (2026-10-17)
 
 **Breaking.** One vocabulary for three estimators, labelled results instead
 of positional tuples, and two new estimators that measure the whole footprint
@@ -37,11 +37,16 @@ instead of patches.  There are no aliases for the old names.
 | `_aperture_filter_key` (private) | `aperture_filter_key` (public) |
 | `ggl_combinations(..., ggl_bin_combinations=)` | `kg_combinations(..., combinations=)` |
 | keyword `gc_auto_correlations_only` / `ggl_bin_combinations` | `auto_only` / `combinations` |
-| `ZetaWriter.submit_shear(tuple)` / `submit_3x2pt(tuple)` | `ZetaWriter.submit(result)` (keyword arrays still accepted) |
+| `ZetaWriter.submit_shear(tuple)` / `submit_3x2pt(tuple)` / `submit(M_a=..., xi_p=...)` | `ZetaWriter.submit(result)` -- an `IntegratedResult` only |
 
 Numbers are bitwise unchanged: the public methods wrap the unchanged
 implementations and only label their outputs.  The three pair statistics now
 normalise through one method (`_finish_pair_sums`).
+
+Nothing of the pre-7.0 surface survives: `ZetaWriter.submit` takes a result
+and nothing else (`TypeError` otherwise), the private
+`_zeta_from_cross_fields` alias of `_zeta_from_fields` is gone, and the
+README no longer mentions the pre-5.0 loader names.
 
 ### New: `Global2PCF`
 

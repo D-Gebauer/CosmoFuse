@@ -25,7 +25,12 @@ import h5py
 import healpy as hp
 import numpy as np
 
-from CosmoFuse import Integrated3PCF, ZetaWriter, calculate_all_zetas
+from CosmoFuse import (
+    Integrated3PCF,
+    IntegratedResult,
+    ZetaWriter,
+    calculate_all_zetas,
+)
 from CosmoFuse.multi_device import MultiDeviceIntegrated3PCF
 
 NSIDE = 16
@@ -286,7 +291,8 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
         fine but cannot be appended: 3 bins give 10 zeta triplets where the
         file holds 4.  The writer thread must not swallow that."""
         npatch, nbins = self.corr.n_patches, self.corr.nbins
-        other = dict(
+        other = IntegratedResult(
+            self.corr.binedges,
             M_a=np.zeros((3, npatch)),             # 3 tomographic bins
             xi_p=np.zeros((6, npatch, nbins)),
             xi_m=np.zeros((6, npatch, nbins)),
@@ -294,7 +300,7 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
         writer = ZetaWriter(self.path, self.corr)
         writer.submit(self.results[0])
         writer._queue.join()
-        writer.submit(**other)               # fails in the thread
+        writer.submit(other)                 # fails in the thread
         writer._queue.join()
         with self.assertRaisesRegex(RuntimeError, "thread failed"):
             writer.submit(self.results[1])
@@ -302,21 +308,21 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
             writer.close()
         self.assertIsNone(writer._file)            # handle released anyway
 
-    def test_rejects_incomplete_or_unknown_fields(self):
+    def test_rejects_incomplete_results(self):
+        edges = self.corr.binedges
         with ZetaWriter(self.path, self.corr) as out:
-            with self.assertRaisesRegex(ValueError, "unknown field"):
-                out.submit(M_a=np.zeros((2, 4)), nonsense=1)
             with self.assertRaisesRegex(ValueError, "central field"):
-                out.submit(xi_p=np.zeros((3, 4, 3)))
+                out.submit(IntegratedResult(edges, xi_p=np.zeros((3, 4, 3))))
             with self.assertRaisesRegex(ValueError, "annular field"):
-                out.submit(M_a=np.zeros((2, 4)))
+                out.submit(IntegratedResult(edges, M_a=np.zeros((2, 4))))
             out.submit(self.results[0])
 
-    def test_result_or_fields_not_both(self):
+    def test_rejects_anything_but_a_result(self):
         with ZetaWriter(self.path, self.corr) as out:
-            with self.assertRaisesRegex(ValueError, "not both"):
-                out.submit(self.results[0], M_a=self.results[0].M_a)
-            out.submit(**self.results[0].fields())      # keyword form still works
+            with self.assertRaisesRegex(TypeError, "IntegratedResult"):
+                out.submit(self.results[0].fields())
+            with self.assertRaisesRegex(TypeError, "IntegratedResult"):
+                out.submit(None)
             out.submit(self.results[0])
 
 

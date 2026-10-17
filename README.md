@@ -6,13 +6,11 @@
 
 # CosmoFuse
 
-A package for efficiently measuring integrated 3-point correlation functions on GPU/CPU written in Python 3,
-plus footprint-wide two- and three-point correlation functions (`Global2PCF`, `Global3PCF`) built on the
-same precompute-once / measure-many machinery.
+A Python package for measuring integrated 3-point correlation functions (i3PCFs), as well as
+footprint-wide two- and three-point correlation functions, on HEALPix maps, on GPU or CPU.
 
-Three estimators, named after the statistic they deliver, share one vocabulary: methods are
-TreeCorr's field codes (`g` = shear, `k` = scalar field such as an overdensity δ), and every call
-returns a labelled result object instead of a positional tuple.
+Three estimators share one vocabulary: methods are TreeCorr's field codes (`g` = shear,
+`k` = scalar field such as an overdensity δ), and every call returns a labelled result object.
 
 | class | measures | methods | result |
 |---|---|---|---|
@@ -72,10 +70,9 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Calculate pairs for given mask & resolution once
 - Save/Load pairs using hdf5 files
 - Reuse pairs to measure i3PCFs across maps
-- Footprint-wide 2PCFs (ξ±, w(θ), γ_t) with the same kernels, static treecode and packing, per-tile sums for jackknifes
-- Footprint-wide 3PCFs (shear Γ₀…Γ₃, scalar ζ, any mixed spin-0/spin-2 triplet) by multipole decomposition, exact per multipole
-- Optimized backend kernels for Spin-0×Spin-0 ($`w(\theta)`$), Spin-0×Spin-2 ($\gamma_t$), and Spin-2×Spin-2 ($\xi_\pm$) workloads
-- Optimized tomographic kernels for all probes on CPU and GPU
+- Footprint-wide 2PCFs (ξ±, w(θ), γ_t) with per-tile sums for jackknife errors
+- Footprint-wide 3PCFs (shear Γ₀…Γ₃, scalar ζ, any mixed spin-0/spin-2 triplet) by multipole decomposition
+- Tomographic measurements of all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
 
@@ -112,16 +109,9 @@ First create an Integrated3PCF object:
         pack_host_pairs=False,              # 8-byte pairs in host RAM and in the pair file too
     )
 
-For GPU runs the recommended precision configuration is
-`map_precision="float32", accumulation_precision="float64"`: the maps,
-uploads, and per-pair gathers run at float32 (roughly halving the
-per-map wall time on bandwidth-bound hardware), while every pair sum is
-accumulated and reduced at float64, so the estimators avoid float32
-cancellation error. On an A100 this measures within a few times 1e-7
-(scale-relative) of the float64 CPU reference — compared to a few times
-1e-3 when also accumulating at float32 (`accumulation_precision="same"`).
-Keep `map_precision="float64"` when bitwise-tight agreement with the
-float64 reference (~1e-14) is required.
+For GPU runs use `map_precision="float32", accumulation_precision="float64"`: the maps are
+handled at float32, every pair sum is accumulated at float64. Keep `map_precision="float64"`
+when agreement with a float64 reference at machine precision is required.
 
 ### Selecting patch centers from a mask
 
@@ -178,15 +168,19 @@ To load pairs and immediately release host-side pair arrays after backend prepar
 
     correlation.load_pairs("/path/to/pairs.h5", release_host_pairs=True)
 
-Pair files are written in a consolidated layout (format version 2; version 3 with `resolution_factor`, version 4 with `pack_host_pairs`) that loads with a handful of bulk reads. Versions 2 and later are readable; **format version 1 is not** — it is rejected with an explicit error, so a pre-consolidation archive has to be regenerated.
+Pair files of format version 1 (written before 5.0) are no longer readable and have to be regenerated.
 
-`pack_pairs=True` stores the pair geometry on the *device* in 8 instead of 24 bytes per pair, so about three times as many pairs fit on a GPU; host arrays and pair files stay exact. `pack_host_pairs=True` applies the same packing already at pair-finding time, which cuts host RAM and the pair file by the same factor (`pair_inds` / `pair_exp2phi` are then `None`, the payload lives in `packed_pairs`):
+`pack_pairs=True` stores the pair geometry on the device in 8 instead of 24 bytes per pair, so about
+three times as many pairs fit on a GPU. `pack_host_pairs=True` applies the same packing in host RAM
+and in the pair file:
 
     correlation = Integrated3PCF(..., pack_pairs=True, pack_host_pairs=True)
     correlation.preprocess()
-    correlation.save_pairs("/path/to/pairs.h5")   # format version 4
+    correlation.save_pairs("/path/to/pairs.h5")
 
-Both are off by default. Packing quantises the pair rotations to $2\pi/65536$, which moves each estimate by ~1e-5 of its statistical error without biasing it — but a `pack_host_pairs` file is no longer exact and cannot be turned back into an exact one, so keep an exact file if you may want to switch the estimator later. A packed file loads into any matching mask and slices by patch like any other.
+Both are off by default. Packing moves each estimate by ~1e-5 of its statistical error without biasing
+it, but a packed pair file cannot be turned back into an exact one, so keep an exact file if you may
+want to switch later.
 
 ### Aperture filters
 
@@ -224,8 +218,8 @@ scalar field -- an overdensity map δ or a convergence map.  The class says
 | `three_by_two_pt(shear_maps, k_maps, weights)` | all six in one fused pass | all six |
 | `m_a(shear_maps, w)`, `m_g(k_maps, w)` | apertures only | array `(nz, n_patches)` |
 
-`gg` and `kk` measure the apertures too by default (one shared row expansion);
-pass `apertures=False` for the 2PCFs alone.  Inputs are full-sky
+`gg` and `kk` measure the apertures too by default; pass `apertures=False` for
+the 2PCFs alone.  Inputs are full-sky
 (`(nz, [2,] npix)`) or row-space (`(nz, [2,] n_active)`) arrays.
 
 Every call returns a labelled `IntegratedResult` -- fields that were not
@@ -261,20 +255,12 @@ estimator is exactly Landy-Szalay with randoms at the pixel centres.
 | **Clustering** (`kk`) | Aperture count ($M_g$) | $w(\theta)$ | Overdensity maps δ, weights (coverage) |
 | **GGL** (`kg`) | $M_g$ (and $M_a$) | $\gamma_t$ | Lens δ + source shear |
 
-#### What the measurement methods return (`return_device`)
+#### Host or device arrays (`return_device`)
 
-Every measurement method takes `return_device` and it defaults to **`True`**.
-On a GPU backend the result's arrays are then **cupy arrays**, not numpy --
-which is what makes the device-resident pipeline work: `MapLoader` keeps the
-maps on the card, `ZetaWriter` reduces on the card and copies ~9 kB instead of
-~1 MB per map-set, and nothing crosses PCIe that does not have to. Pass
-`return_device=False` (or call `res.to_numpy()`) for numpy.
-
-* **A multi-device instance always returns numpy** -- it concatenates the
-  per-device patch ranges on the host.
-* **The arrays are yours.** Each call allocates its outputs, so collecting
-  results across realisations is safe:
-  `results = [corr.three_by_two_pt(...) for _ in range(n)]`.
+`return_device` defaults to `True`: on a GPU backend the result's arrays are cupy arrays, which
+is what keeps a device-resident pipeline (`MapLoader`, `ZetaWriter`) off the PCIe bus. Pass
+`return_device=False` or call `res.to_numpy()` for numpy. A multi-device instance always returns
+numpy. Each call allocates its own outputs, so collecting results across realisations is safe.
 
 #### Which row is which pair of bins
 
@@ -297,13 +283,12 @@ from the **same** sample (`zeta_a_plus`, `zeta_a_minus`, `zeta_g_g`) and
 `zeta_cross_triplets` when they are not (`zeta_g_plus`, `zeta_g_minus`,
 `zeta_a_g`, `zeta_g_t`, `zeta_a_t`) -- see below.
 
-**Overlapping uploads with compute (GPU)**:
+### Overlapping uploads with compute (GPU)
 
-On a GPU the host→device transfer of a map-set costs about as much as the
-measurement itself. Two loaders hide it behind the previous map's kernels
-(both are no-op passthroughs on CPU backends).
+On a GPU the upload of a map-set costs about as much as the measurement. Two loaders
+hide it behind the previous map's measurement (both are passthroughs on CPU backends).
 
-`MapLoader` double-buffers maps that are already in host arrays:
+`MapLoader` is for maps that are already in host arrays:
 
 ```python
 from CosmoFuse import MapLoader
@@ -316,9 +301,8 @@ for k in range(nmaps):
     dev = pipe.wait(nxt)
 ```
 
-`MapFileLoader` is for maps read from disk: `n_readers` threads fill a ring of
-`n_slots` pinned buffers straight from the source and hand the device buffers
-to you in order.
+`MapFileLoader` is for maps read from disk: `n_readers` threads read into `n_slots`
+buffers and hand the device arrays to you in order.
 
 ```python
 from CosmoFuse import MapFileLoader
@@ -335,27 +319,19 @@ for k, dev in loader:
     results.append(correlation.gg(dev["shear"], w))
 ```
 
-Store the maps in row space (`correlation.to_row_space(full_sky_maps)`, done
-once when the archive is written) so no gather is needed per map. Fixed weight
-maps should be passed as a read-only array (`w.flags.writeable = False`), which
-lets CosmoFuse upload and degrade them once instead of once per map. Use enough
-readers that reading keeps up with the measurement; the device arrays handed
-out are only valid until the next iteration.
+Store the maps in row space (`correlation.to_row_space(full_sky_maps)`, done once when the
+archive is written) so no gather is needed per map. Pass fixed weight maps as a read-only array
+(`w.flags.writeable = False`) so they are uploaded once. The device arrays handed out are only
+valid until the next iteration.
 
-Note that on GPU backends `warmup()` does nothing — the CUDA kernels are
-compiled on the first measurement call, so make one throwaway call before
-timing a loop.
+On GPU backends `warmup()` does nothing: the CUDA kernels are compiled on the first measurement
+call, so make one throwaway call before timing a loop.
 
-(Up to 5.0 these classes were called `PinnedMapPipeline` and
-`RowSpaceMapLoader`.)
+### Several GPUs
 
-**Several GPUs**:
-
-Passing a list of GPU ids splits the patches across those devices — one
-`Integrated3PCF` per GPU, measured in parallel, outputs concatenated in patch
-order. The result is identical to a single-device run, and each GPU holds only
-its share of the pair geometry, which is how a geometry too large for one card
-is measured. A single device remains the default.
+Passing a list of GPU ids splits the patches across those devices and concatenates the outputs
+in patch order. The result is identical to a single-device run, and each GPU holds only its share
+of the pairs, which is how a geometry too large for one card is measured.
 
 ```python
 correlation = Integrated3PCF(nside, phi_center, theta_center, device=[0, 1], ...)
@@ -378,40 +354,27 @@ the end:
         for shear, w in map_sets:
             out.submit(correlation.gg(shear, w))
 
-`submit()` takes any `Integrated3PCF` result (`gg`, `kk`, `kg`, `three_by_two_pt`), or
-keyword arrays -- `submit(M_a=..., xi_p=...)` -- for any subset of the six fields. `submit()` blocks once `depth` map-sets are queued, so
-memory stays bounded and a writer that falls behind cannot go unnoticed.
+`submit()` takes any `Integrated3PCF` result (`gg`, `kk`, `kg`, `three_by_two_pt`) -- or an
+`IntegratedResult` built by hand -- holding at least one central and one annular field. It blocks
+once `depth` map-sets are queued, so memory stays bounded and a writer that falls behind cannot go
+unnoticed.
 
-This works because zeta averages over *patches*, not over maps: map-set *k* can be
-reduced the moment it is measured. At the DES Y3 production geometry one map-set is
-1.06 MB of per-patch arrays but only 9 kB of zetas — 118x smaller, 90 MB instead of
-10.6 GB for 10,000 realisations. Pass `reduce="none"` to store the per-patch arrays
-instead; zeta, a leave-one-patch-out jackknife or a different binning can all still
-be derived from those.
+Each map-set is reduced to its i3PCFs the moment it is measured (zeta averages over patches, not
+over maps), so only the ~9 kB data vector per map-set is kept instead of the ~1 MB of per-patch
+arrays. Pass `reduce="none"` to store the per-patch arrays instead; zeta, a leave-one-patch-out
+jackknife or a different binning can all still be derived from those.
 
-On a GPU the reduction runs on the device before the copy, so only the 9 kB data
-vector crosses PCIe and the writer thread does nothing but I/O. A
-multi-device instance returns host arrays, so the reduction runs on the
-CPU in the writer thread — still off the measurement's critical path, and nothing
-about the group changes.
-
-The file records `n_flushed`, the number of map-sets guaranteed to be on disk, and
-enough provenance (`level_table`, `row_pix_hash`, nside, bins, `resolution_factor`)
-that a data vector can never be silently combined with one measured under a
-different estimator. After a crash, reopen with `resume=True`: anything written past
-the last flush is discarded and appending continues.
-
-`swmr=True` lets another process follow the file as it grows, but it is **not free**
-and is off by default: it forces `libver="latest"` (needs HDF5 >= 1.10 to read),
-readers must pass `swmr=True`, HDF5 documents it as unreliable on NFS, and after a
-crash the file keeps a stale write lock — an ordinary `h5py.File(path, "r")` then
-fails until someone runs `h5clear -s`. A non-SWMR file survives the same crash and
-opens normally.
+The file records `n_flushed`, the number of map-sets guaranteed to be on disk, and enough
+provenance (`level_table`, `row_pix_hash`, nside, bins, `resolution_factor`) that a data vector
+cannot be silently combined with one measured under a different estimator. After a crash, reopen
+with `resume=True`: anything written past the last flush is discarded and appending continues.
+`swmr=True` lets another process follow the file as it grows; it is off by default because a
+crashed SWMR file keeps a stale write lock (`h5clear -s` releases it).
 
 ## Global (footprint-wide) estimators
 
-Both estimators find their pairs once -- per HEALPix *tile* (`tile_nside`), every pair of the
-footprint exactly once -- and reuse them for every map, on CPU (Numba) or GPU (CUDA).
+Both estimators find their pairs once (per HEALPix tile, `tile_nside`) and reuse them for every
+map, on CPU or GPU, with the same `preprocess` / `save_pairs` / `load_pairs` workflow as above.
 
 ### Two-point: `Global2PCF`
 
@@ -432,14 +395,11 @@ out = g2.three_by_two_pt(shear_maps, delta_maps, w_source, w_lens)   # {"gg", "k
 jk = gg.jackknife()["xi_p"]                           # delete-one-tile estimates (n_tiles, ncomb, nbins)
 ```
 
-A `TwoPointResult` holds the per-tile numerators and weight sums
-(`tile_num`, `tile_weight`); the estimate is their ratio over the whole
-footprint, and results of different tile sets or devices join with `+`.  It
-runs the same pair kernels as `Integrated3PCF` with tiles in the role of
-patches.  The static treecode builds its cells over the whole footprint (there
-is no patch window to preserve).  It reproduces TreeCorr (`brute=True`,
-`bin_slop=0`, `angle_slop=0`, `metric="Arc"`, on the pixel centres) to its
-rounding: `GGCorrelation`, `KKCorrelation` and `KGCorrelation` with `k = δ`.
+A `TwoPointResult` holds the per-tile sums; the estimate is their ratio over the whole footprint,
+`jackknife()` gives the delete-one-tile estimates, and results of different tile sets or devices
+add with `+`. The estimator is the ratio of sums over every pixel pair of the footprint and agrees
+with TreeCorr's `GGCorrelation`, `KKCorrelation` (`k = δ`) and `KGCorrelation` on the pixel
+centres (`brute=True`, `metric="Arc"`) to TreeCorr's rounding.
 
 ### Three-point: `Global3PCF`
 
@@ -464,13 +424,10 @@ mixed = g3.measure(                                   # any spin-0 / spin-2 comb
 ```
 
 A triangle is seen from its centre vertex with legs in radial bins `b2`, `b3` and opening angle
-`phi = phi_3 - phi_2` (position angles from local east towards north).  The multipoles
-`Gamma_n = sum w1 w2 w3 f1 f2 f3 exp(-i n phi)` are **exact** for every `n` (compared against a
-brute-force triplet loop in the tests); only the conversion to opening-angle bins truncates at
-`n_max`.  Spin-2 values are in the x-projection (centre along its first leg, outer vertices along
-their leg to the centre, `Re` = tangential); `to_centroid` converts binned values to the centroid
-projection.  Results are sums (numerators and weight normalisations), so tiles, chunks and devices
-add with `+`.  Full resolution only; one device.
+`phi = phi_3 - phi_2`. The multipoles are exact for every `n`; only the conversion to
+opening-angle bins (`binned()`) truncates at `n_max`. Spin-2 values are in the x-projection
+(`Re` = tangential); `to_centroid` converts binned values to the centroid projection. Results
+are sums, so tiles, chunks and devices add with `+`. Full resolution only; one device.
 
 ## Calculating i3PCFs
 

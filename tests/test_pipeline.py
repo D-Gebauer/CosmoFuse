@@ -9,7 +9,7 @@ from CosmoFuse.backend import get_backend
 from CosmoFuse.pipeline import MapLoader
 
 
-class TestPinnedMapPipelineCPU(unittest.TestCase):
+class TestMapLoaderCPU(unittest.TestCase):
     def _make_corr_stub(self):
         return SimpleNamespace(backend=get_backend("cpu"), map_dtype=np.dtype(np.float64))
 
@@ -49,7 +49,7 @@ class TestPinnedMapPipelineCPU(unittest.TestCase):
         np.testing.assert_array_equal(dev["w"], np.arange(4, dtype=np.float32))
 
 
-class TestPinnedMapPipelineStreamContract(unittest.TestCase):
+class TestMapLoaderStreamContract(unittest.TestCase):
     """The CUDA-side contract, driven with fakes: uploads are enqueued on
     the pipeline stream and the compute stream waits on the copy event
     exactly when a staged slot is swapped in."""

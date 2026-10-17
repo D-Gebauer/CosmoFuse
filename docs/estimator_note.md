@@ -1,7 +1,9 @@
 # The CosmoFuse i3PCF estimator, and its static-treecode variant
 
-A self-contained definition of what CosmoFuse measures, written so that it can
-be restated in a paper appendix. Version 5.0.0. Companion measurements:
+A self-contained definition of what `Integrated3PCF` measures, written so that
+it can be restated in a paper appendix. Version 7.0.0 (the footprint-wide
+estimators `Global2PCF` and `Global3PCF` are defined in the README and in
+`tests/threepoint_reference.py`). Companion measurements:
 `benchmarks/static_treecode/STAGE1_RESULTS.md` (2-point level dependence),
 `T10_RESULTS.md` (i3PCF level dependence), `BENCHMARK_TREECORR.md`
 (cross-check against TreeCorr).

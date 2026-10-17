@@ -63,12 +63,12 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 
 from .correlation_helpers import calculate_all_zetas
+from .results import IntegratedResult
 
 # Central (aperture) and annular (2PCF) fields, in the order of
 # results.INTEGRATED_FIELDS.
 CENTRAL_FIELDS: Tuple[str, ...] = ("M_a", "M_g")
 ANNULAR_FIELDS: Tuple[str, ...] = ("xi_p", "xi_m", "xi_g", "xi_t")
-FIELDS: Tuple[str, ...] = ("M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")
 
 # Target size of one HDF5 chunk along the map axis.
 _CHUNK_BYTES = 1 << 20
@@ -196,28 +196,23 @@ class ZetaWriter:
     # submission (calling thread)
     # ------------------------------------------------------------------ #
 
-    def submit(self, result: Any = None, **fields: Any) -> None:
+    def submit(self, result: IntegratedResult) -> None:
         """Queue one map-set.
 
-        Pass an :class:`~CosmoFuse.results.IntegratedResult` (what
-        ``Integrated3PCF.gg`` / ``kk`` / ``kg`` / ``three_by_two_pt`` return),
-        or keyword arrays -- any subset of ``M_a``, ``M_g``, ``xi_p``,
-        ``xi_m``, ``xi_g``, ``xi_t`` -- shaped as the measurement returns them
-        (no leading map axis).  Blocks when the queue is full.
+        ``result`` is what ``Integrated3PCF.gg`` / ``kk`` / ``kg`` /
+        ``three_by_two_pt`` return (or an :class:`IntegratedResult` built by
+        hand), with no leading map axis.  It must hold at least one central
+        field and one annular field.  Blocks when the queue is full.
         """
-        if result is not None:
-            if fields:
-                raise ValueError("pass either a result or keyword fields, not both")
-            fields = result.fields()
+        if not isinstance(result, IntegratedResult):
+            raise TypeError(
+                "submit() takes an IntegratedResult, "
+                f"not {type(result).__name__}"
+            )
         self._raise_deferred()
         if self._closed:
             raise RuntimeError("ZetaWriter is closed")
-        unknown = set(fields) - set(FIELDS)
-        if unknown:
-            raise ValueError(f"unknown field(s) {sorted(unknown)}; expected {FIELDS}")
-        given = {k: v for k, v in fields.items() if v is not None}
-        if not given:
-            raise ValueError("submit() needs at least one field")
+        given = result.fields()
         if not any(k in given for k in CENTRAL_FIELDS):
             raise ValueError(f"submit() needs a central field ({CENTRAL_FIELDS})")
         if not any(k in given for k in ANNULAR_FIELDS):

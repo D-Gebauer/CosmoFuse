@@ -239,13 +239,13 @@ class TestPublicMethodsMatch(FusedDegradeBase):
     def test_methods(self):
         corr = self.corr
         cases = {
-            "shear": lambda c: fields_of(c.gg(
+            "gg": lambda c: fields_of(c.gg(
                 self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"),
-            "shear_shear": lambda c: fields_of(c.gg(
+            "gg_pairs": lambda c: fields_of(c.gg(
                 self.shear, self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
-            "density": lambda c: fields_of(c.kk(
+            "kk": lambda c: fields_of(c.kk(
                 self.dens, self.w, return_device=False), "M_g", "xi_g"),
-            "ggl": lambda c: c.kg(
+            "kg": lambda c: c.kg(
                 self.dens, self.shear, self.w, self.w, return_device=False).xi_t,
             "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(
                 shear_maps=self.shear, k_maps=self.dens,

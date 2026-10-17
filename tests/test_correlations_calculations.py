@@ -279,7 +279,7 @@ class TestCorrelationCalculations(unittest.TestCase):
     @patch('healpy.ang2pix')
     @patch('healpy.query_disc')
     @patch('CosmoFuse.correlations.pixel2RaDec')
-    def test_calculate_pairs_M_a(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
+    def test_find_aperture_pairs(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
         """Test the find_aperture_pairs method."""
         mock_ang2pix.return_value = 99
         mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
@@ -453,7 +453,7 @@ class TestCorrelationCalculations(unittest.TestCase):
             sys.modules.pop("cupy", None)
             sys.modules.pop(module_name, None)
 
-    def test_calculate_pairs_2PCF(self):
+    def test_find_pairs(self):
         """Test find_pairs sequential aggregation."""
         # The patch centres have to grow with n_patches: the pre-flight
         # memory projection walks one disc per patch, and on a machine with

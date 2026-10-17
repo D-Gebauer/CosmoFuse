@@ -1,8 +1,14 @@
 """
 CosmoFuse: GPU/CPU measurement of integrated, two- and three-point correlation functions.
 
-This package provides tools for calculating integrated 3-point correlation functions
-on GPU/CPU, with support for shear measurements and aperture mass calculations.
+Three estimators on HEALPix maps, named after the statistic they deliver:
+:class:`Integrated3PCF` (per-patch aperture masses and 2PCFs, the i3PCF
+ingredients), :class:`Global2PCF` (footprint-wide 2PCFs) and
+:class:`Global3PCF` (footprint-wide 3PCF multipoles).  Methods are TreeCorr
+field codes (``g`` = shear, ``k`` = scalar field): ``gg``, ``kk``, ``kg``,
+``three_by_two_pt``, ``ggg``, ``kkk``, ``kgg``, ``kkg``.  Every call returns a
+labelled result (:class:`IntegratedResult`, :class:`TwoPointResult`,
+:class:`ThreePointResult`).
 """
 
 from .correlation_helpers import (

@@ -140,7 +140,7 @@ class SimModule:
 
 
 class SimBackend:
-    """Duck-typed Backend for RowSpaceMapLoader."""
+    """Duck-typed Backend for MapFileLoader."""
 
     name = "cupy"
     device_id = 0
