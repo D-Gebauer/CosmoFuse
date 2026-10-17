@@ -1,18 +1,15 @@
 """Tests for the Integrated3PCF class."""
-import sys
+
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 from scipy.special import binom
 
-# Add src to path for testing
-sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
-
 import CosmoFuse.correlations as correlations_module
 from CosmoFuse.correlations import Integrated3PCF
+
 from ._results import fields_of
 
 
@@ -241,7 +238,9 @@ class TestCorrelation(unittest.TestCase):
             np.zeros(self.nbins, dtype=np.int64),
         )
 
-        with patch.object(corr, "_compute_pairs_kernel", return_value=empty_out) as kernel_mock:
+        with patch.object(
+            corr, "_compute_pairs_kernel", return_value=empty_out
+        ) as kernel_mock:
             corr.get_pairs_patch(patch_inds, ra, dec)
 
         kernel_mock.assert_called_once()
@@ -350,7 +349,11 @@ class TestCorrelation(unittest.TestCase):
         original_cos = correlations_module.np.cos
 
         def fake_cos(x):
-            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
+            if (
+                isinstance(x, np.ndarray)
+                and x.shape == dec.shape
+                and np.allclose(x, dec)
+            ):
                 out = original_cos(x).copy()
                 out[np.isclose(x, np.pi / 2)] = 0.0
                 return out
@@ -389,7 +392,11 @@ class TestCorrelation(unittest.TestCase):
         original_cos = correlations_module.np.cos
 
         def fake_cos(x):
-            if isinstance(x, np.ndarray) and x.shape == dec.shape and np.allclose(x, dec):
+            if (
+                isinstance(x, np.ndarray)
+                and x.shape == dec.shape
+                and np.allclose(x, dec)
+            ):
                 out = original_cos(x).copy()
                 out[np.isclose(x, np.pi / 2)] = 0.0
                 return out
@@ -449,10 +456,14 @@ class TestCorrelation(unittest.TestCase):
                 self.data = SimpleNamespace(ptr=id(self._values))
 
             def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
+                return FakeGPUArray(
+                    self._values.astype(dtype, copy=copy), device_id=self.device.id
+                )
 
             def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
+                raise AssertionError(
+                    "backend-native arrays should not be coerced to numpy"
+                )
 
         calls = {"to_device": 0}
 
@@ -465,7 +476,11 @@ class TestCorrelation(unittest.TestCase):
             module=SimpleNamespace(ndarray=FakeGPUArray),
             device_id=0,
             to_device=fake_to_device,
-            to_numpy=lambda values: values._values if isinstance(values, FakeGPUArray) else np.asarray(values),
+            to_numpy=lambda values: (
+                values._values
+                if isinstance(values, FakeGPUArray)
+                else np.asarray(values)
+            ),
         )
 
         native = FakeGPUArray([1.0, 2.0, 3.0], device_id=0)
@@ -497,10 +512,14 @@ class TestCorrelation(unittest.TestCase):
                 self.data = SimpleNamespace(ptr=id(self._values))
 
             def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
+                return FakeGPUArray(
+                    self._values.astype(dtype, copy=copy), device_id=self.device.id
+                )
 
             def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
+                raise AssertionError(
+                    "backend-native arrays should not be coerced to numpy"
+                )
 
         calls = {"to_device": 0}
 
@@ -512,20 +531,30 @@ class TestCorrelation(unittest.TestCase):
             name="cupy",
             module=SimpleNamespace(
                 ndarray=FakeGPUArray,
-                real=lambda x: FakeGPUArray(np.real(x._values if isinstance(x, FakeGPUArray) else x)),
+                real=lambda x: FakeGPUArray(
+                    np.real(x._values if isinstance(x, FakeGPUArray) else x)
+                ),
             ),
             device_id=0,
             to_device=fake_to_device,
-            to_numpy=lambda values: values._values if isinstance(values, FakeGPUArray) else np.asarray(values),
+            to_numpy=lambda values: (
+                values._values
+                if isinstance(values, FakeGPUArray)
+                else np.asarray(values)
+            ),
         )
 
         nzbins = 2
         nzbin_combs = int(binom(nzbins + 1, 2))
         # Map inputs must be full-sky (or row-space) sized.
         npix = 12 * self.nside**2
-        shear_maps = FakeGPUArray(np.ones((nzbins, 2, npix), dtype=np.float64), device_id=0)
+        shear_maps = FakeGPUArray(
+            np.ones((nzbins, 2, npix), dtype=np.float64), device_id=0
+        )
         weights = FakeGPUArray(np.ones((nzbins, npix), dtype=np.float64), device_id=0)
-        sumofweights = FakeGPUArray(np.ones((2, nzbin_combs), dtype=np.float64), device_id=0)
+        sumofweights = FakeGPUArray(
+            np.ones((2, nzbin_combs), dtype=np.float64), device_id=0
+        )
         xip_dev = FakeGPUArray(
             np.ones((nzbin_combs, corr.n_patches, corr.nbins), dtype=np.float64),
             device_id=0,
@@ -535,11 +564,16 @@ class TestCorrelation(unittest.TestCase):
             device_id=0,
         )
 
-        with patch.object(corr, "_xipm_tomo_vectorized", return_value=(xip_dev, xim_dev)):
-            xip, xim = fields_of(corr.gg(
-                shear_maps,
-                weights,
-                sumofweights=sumofweights, apertures=False), "xi_p", "xi_m")
+        with patch.object(
+            corr, "_xipm_tomo_vectorized", return_value=(xip_dev, xim_dev)
+        ):
+            xip, xim = fields_of(
+                corr.gg(
+                    shear_maps, weights, sumofweights=sumofweights, apertures=False
+                ),
+                "xi_p",
+                "xi_m",
+            )
 
         self.assertEqual(calls["to_device"], 0)
         self.assertEqual(xip.shape, (nzbin_combs, corr.n_patches, corr.nbins))
@@ -559,7 +593,11 @@ class TestCorrelation(unittest.TestCase):
                 self.shape = self._values.shape
                 self.dtype = self._values.dtype
                 self.device = SimpleNamespace(id=device_id)
-                self.data = SimpleNamespace(ptr=id(self._values)) if with_ptr else SimpleNamespace()
+                self.data = (
+                    SimpleNamespace(ptr=id(self._values))
+                    if with_ptr
+                    else SimpleNamespace()
+                )
 
             def astype(self, dtype, copy=False):
                 return FakeGPUArray(
@@ -579,11 +617,15 @@ class TestCorrelation(unittest.TestCase):
             module=SimpleNamespace(ndarray=FakeGPUArray),
             device_id=0,
             to_device=lambda values: FakeGPUArray(values),
-            to_numpy=lambda values: values._values if hasattr(values, "_values") else np.asarray(values),
+            to_numpy=lambda values: (
+                values._values if hasattr(values, "_values") else np.asarray(values)
+            ),
         )
 
         self.assertFalse(corr._is_backend_native_array(FakeNoDevice([1.0, 2.0])))
-        self.assertFalse(corr._is_backend_native_array(FakeGPUArray([1.0, 2.0], device_id=1)))
+        self.assertFalse(
+            corr._is_backend_native_array(FakeGPUArray([1.0, 2.0], device_id=1))
+        )
 
         first = FakeGPUArray([1.0, 2.0], with_ptr=False)
         fp = corr._fingerprint_weights(first)
@@ -597,7 +639,9 @@ class TestCorrelation(unittest.TestCase):
             corr._fingerprint_weights(FakeGPUArray([1.0, 2.0], with_ptr=False)), fp
         )
 
-    def test_get_aperture_methods_accept_backend_native_arrays_without_input_transfer(self):
+    def test_get_aperture_methods_accept_backend_native_arrays_without_input_transfer(
+        self,
+    ):
         corr = Integrated3PCF(
             nside=self.nside,
             phi_center=self.phi_center,
@@ -617,10 +661,14 @@ class TestCorrelation(unittest.TestCase):
                 self.data = SimpleNamespace(ptr=id(self._values))
 
             def astype(self, dtype, copy=False):
-                return FakeGPUArray(self._values.astype(dtype, copy=copy), device_id=self.device.id)
+                return FakeGPUArray(
+                    self._values.astype(dtype, copy=copy), device_id=self.device.id
+                )
 
             def __array__(self, *args, **kwargs):
-                raise AssertionError("backend-native arrays should not be coerced to numpy")
+                raise AssertionError(
+                    "backend-native arrays should not be coerced to numpy"
+                )
 
             def __getitem__(self, key):
                 out = self._values[key]
@@ -650,8 +698,16 @@ class TestCorrelation(unittest.TestCase):
             class add:
                 @staticmethod
                 def reduceat(array, starts):
-                    arr = array._values if isinstance(array, FakeGPUArray) else np.asarray(array)
-                    st = starts._values if isinstance(starts, FakeGPUArray) else np.asarray(starts)
+                    arr = (
+                        array._values
+                        if isinstance(array, FakeGPUArray)
+                        else np.asarray(array)
+                    )
+                    st = (
+                        starts._values
+                        if isinstance(starts, FakeGPUArray)
+                        else np.asarray(starts)
+                    )
                     reduced = np.add.reduceat(arr, st.astype(np.int64, copy=False))
                     return FakeGPUArray(reduced)
 
@@ -664,9 +720,15 @@ class TestCorrelation(unittest.TestCase):
             return FakeGPUArray(values)
 
         def fake_to_numpy(values):
-            return values._values if isinstance(values, FakeGPUArray) else np.asarray(values)
+            return (
+                values._values
+                if isinstance(values, FakeGPUArray)
+                else np.asarray(values)
+            )
 
-        def aperture_shear_kernel(Q_inds, Q_cos, Q_sin, Q_val, g1, g2, w, out_num, out_den):
+        def aperture_shear_kernel(
+            Q_inds, Q_cos, Q_sin, Q_val, g1, g2, w, out_num, out_den
+        ):
             idx = Q_inds._values.astype(np.int64, copy=False)
             gt = -(g1._values[idx] * Q_cos._values) - (g2._values[idx] * Q_sin._values)
             out_num._values[:] = w._values[idx] * gt * Q_val._values
@@ -674,7 +736,9 @@ class TestCorrelation(unittest.TestCase):
 
         def aperture_density_kernel(Q_inds, Q_val, map_values, w, out_num, out_den):
             idx = Q_inds._values.astype(np.int64, copy=False)
-            out_num._values[:] = w._values[idx] * map_values._values[idx] * Q_val._values
+            out_num._values[:] = (
+                w._values[idx] * map_values._values[idx] * Q_val._values
+            )
             out_den._values[:] = w._values[idx]
 
         corr.backend = SimpleNamespace(
@@ -752,7 +816,9 @@ class TestCrossOrientationEstimator(unittest.TestCase):
 
     def test_single_map_matches_the_tomographic_wrapper(self):
         c, g, w = self.corr, self.shear, self.w
-        xip_t, xim_t = fields_of(c.gg(g, w, return_device=False, apertures=False), "xi_p", "xi_m")
+        xip_t, xim_t = fields_of(
+            c.gg(g, w, return_device=False, apertures=False), "xi_p", "xi_m"
+        )
         xip_s, xim_s = c._gg_single(
             g[0, 0], g[0, 1], g[1, 0], g[1, 1], w[0], w[1], return_device=False
         )

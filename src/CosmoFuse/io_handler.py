@@ -1,9 +1,9 @@
-from typing import Optional, TYPE_CHECKING
+import warnings
+from typing import TYPE_CHECKING, Optional
 
 import h5py
 import healpy as hp
 import numpy as np
-import warnings
 
 from .treecode import TreecodeGeometry, assign_levels
 
@@ -112,14 +112,21 @@ class PairIOHandler:
                 gp.attrs["base_nside"] = int(treecode.base_nside)
                 gp.attrs["n_aperture_cells"] = int(owner.n_aperture_cells)
                 gp.create_dataset(
-                    "coarse_nsides", data=np.asarray(treecode.coarse_nsides, dtype=np.int64)
+                    "coarse_nsides",
+                    data=np.asarray(treecode.coarse_nsides, dtype=np.int64),
                 )
                 gp.create_dataset("cell_offsets", data=treecode.cell_offsets)
                 for level in range(treecode.n_levels):
-                    gp.create_dataset(f"child_indptr_{level}", data=treecode.child_indptr[level])
-                    gp.create_dataset(f"child_indices_{level}", data=treecode.child_indices[level])
+                    gp.create_dataset(
+                        f"child_indptr_{level}", data=treecode.child_indptr[level]
+                    )
+                    gp.create_dataset(
+                        f"child_indices_{level}", data=treecode.child_indices[level]
+                    )
                     gp.create_dataset(f"cell_ra_{level}", data=treecode.cell_ra[level])
-                    gp.create_dataset(f"cell_dec_{level}", data=treecode.cell_dec[level])
+                    gp.create_dataset(
+                        f"cell_dec_{level}", data=treecode.cell_dec[level]
+                    )
             fp.attrs["nside"] = owner.nside
             fp.attrs["nbins"] = owner.nbins
             fp.attrs["theta_min"] = owner.theta_min
@@ -140,9 +147,7 @@ class PairIOHandler:
             fp.create_dataset("bins", data=bins_arr)
 
             if packed:
-                PairIOHandler._save_packed_pairs(
-                    owner, fp, pair_offsets, total_pairs
-                )
+                PairIOHandler._save_packed_pairs(owner, fp, pair_offsets, total_pairs)
             else:
                 d_inds = fp.create_dataset(
                     pair_name, shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
@@ -158,8 +163,12 @@ class PairIOHandler:
                         d_inds[:, start:stop] = owner.pair_inds[i]
                         d_exp[:, start:stop] = owner.pair_exp2phi[i]
 
-            q_inds_dtype = np.asarray(owner.Q_inds[0]).dtype if n_patches else owner.index_dtype
-            q_val_dtype = np.asarray(owner.Q_val[0]).dtype if n_patches else owner.rotation_dtype
+            q_inds_dtype = (
+                np.asarray(owner.Q_inds[0]).dtype if n_patches else owner.index_dtype
+            )
+            q_val_dtype = (
+                np.asarray(owner.Q_val[0]).dtype if n_patches else owner.rotation_dtype
+            )
             d_qi = fp.create_dataset(q_name, shape=(total_q,), dtype=q_inds_dtype)
             d_qc = fp.create_dataset("Q_cos", shape=(total_q,), dtype=q_val_dtype)
             d_qs = fp.create_dataset("Q_sin", shape=(total_q,), dtype=q_val_dtype)
@@ -253,7 +262,9 @@ class PairIOHandler:
             owner.nbins = fp.attrs["nbins"]
             owner.theta_min = fp.attrs["theta_min"]
             owner.theta_max = fp.attrs["theta_max"]
-            owner.binedges = np.geomspace(owner.theta_min, owner.theta_max, owner.nbins + 1)
+            owner.binedges = np.geomspace(
+                owner.theta_min, owner.theta_max, owner.nbins + 1
+            )
             owner.bincenters = (
                 np.sqrt(owner.binedges[1:] * owner.binedges[:-1]) * 60 * 180 / np.pi
             )
@@ -271,7 +282,9 @@ class PairIOHandler:
         owner.prepare(release_host_pairs=release_host_pairs)
 
     @staticmethod
-    def _load_resolution(owner: "Integrated3PCF", fp: "h5py.File", filepath: str) -> None:
+    def _load_resolution(
+        owner: "Integrated3PCF", fp: "h5py.File", filepath: str
+    ) -> None:
         """Adopt the estimator definition stored in the file.
 
         The file is authoritative for the geometry (as for nside, bins, ...).
@@ -394,7 +407,9 @@ class PairIOHandler:
             owner.Q_cos.append(q_cos_flat[qs:qe])
             owner.Q_sin.append(q_sin_flat[qs:qe])
             owner.Q_val.append(q_val_flat[qs:qe])
-            owner.Q_patch_area.append(owner.rotation_dtype.type(q_patch_area[i - start_ind]))
+            owner.Q_patch_area.append(
+                owner.rotation_dtype.type(q_patch_area[i - start_ind])
+            )
 
         # The flat aperture arrays are already exactly what
         # _prepare_aperture_flat would build — set them directly instead of
@@ -486,6 +501,8 @@ class PairIOHandler:
         virtual = out >= npix + n_ap
         a = out[virtual] - npix
         level = np.searchsorted(old_starts, a, side="right") - 1
-        shift = new_starts[level] - old_starts[level] - full.cell_offsets[level, start_ind]
+        shift = (
+            new_starts[level] - old_starts[level] - full.cell_offsets[level, start_ind]
+        )
         out[virtual] = a + shift + npix
         return out.astype(owner.index_dtype, copy=False)

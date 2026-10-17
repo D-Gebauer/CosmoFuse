@@ -1,0 +1,5 @@
+# flake8 does not read pyproject.toml; this mirrors black's settings there.
+[flake8]
+max-line-length = 88
+extend-ignore = E203, E704, W503
+exclude = .git, __pycache__, build, dist, .venv, htmlcov, *.egg-info

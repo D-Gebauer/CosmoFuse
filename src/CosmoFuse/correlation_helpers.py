@@ -96,7 +96,7 @@ def U_crittenden(theta: float, theta_Q: float = 90) -> np.ndarray:
 def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
     """Convergence-space partner of :func:`Q_schneider`:
 
-        U(θ) = 9/(π θ_Q²) · (1 - x²)(1/3 - x²)   for x = θ/θ_Q ≤ 1, else 0.
+    U(θ) = 9/(π θ_Q²) · (1 - x²)(1/3 - x²)   for x = θ/θ_Q ≤ 1, else 0.
     """
     theta_ap = np.radians(theta_Q / 60)
     x2 = (np.asarray(theta) / theta_ap) ** 2
@@ -151,14 +151,14 @@ def _get_pair_index(nbins: int, i: int, j: int) -> int:
     """
     if i > j:
         i, j = j, i
-    
+
     # number of elements before row i
     # row 0 has n elements
     # row 1 has n-1 elements
     # ...
     # row k has n-k elements
     # sum_{k=0}^{i-1} (n - k) = i*n - i*(i-1)/2
-    
+
     idx = int(i * nbins - i * (i - 1) / 2)
     # index within row i is j - i
     idx += j - i
@@ -371,9 +371,7 @@ def _zeta_from_fields(
     central, annulus = _validate_and_cast_fields(
         central_field, annulus_field, require_triangle=symmetric is True
     )
-    indices = _layout_indices(
-        int(central.shape[1]), int(annulus.shape[1]), symmetric
-    )
+    indices = _layout_indices(int(central.shape[1]), int(annulus.shape[1]), symmetric)
     return _zeta_covariance(central, annulus, indices)
 
 
@@ -572,9 +570,7 @@ def _batched_zetas(
         if len(annulus_names) == 1
         else xp.concatenate(used_annuli, axis=1)
     )
-    indices = _ZetaIndices(
-        np.concatenate(centre_parts), np.concatenate(pair_parts)
-    )
+    indices = _ZetaIndices(np.concatenate(centre_parts), np.concatenate(pair_parts))
     stacked = _zeta_covariance(central, annulus, indices)
 
     out: Dict[str, np.ndarray] = {}
@@ -637,9 +633,7 @@ def calculate_all_zetas(
         # so a bad shape raises the same error whichever path runs.
         for _name, central_name, annulus_name, resolved in requested:
             if resolved:
-                _validate_and_cast_fields(
-                    centrals[central_name], annuli[annulus_name]
-                )
+                _validate_and_cast_fields(centrals[central_name], annuli[annulus_name])
         batched = _batched_zetas(centrals, annuli, requested)
         if batched is not None:
             return batched
@@ -650,4 +644,3 @@ def calculate_all_zetas(
         )
         for name, central_name, annulus_name, resolved in requested
     }
-

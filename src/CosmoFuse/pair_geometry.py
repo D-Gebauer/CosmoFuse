@@ -13,7 +13,7 @@ Handles the spatial geometry needed for 2-point and aperture statistics:
   into tangential and cross components.
 """
 
-from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import healpy as hp
 import numpy as np
@@ -218,8 +218,7 @@ class PairGeometry:
         # *device* memory rejects runs that fit -- which is exactly the
         # nside 2048 case packing exists for.
         exact_bytes_per_pair = (
-            2 * owner.index_dtype.itemsize
-            + 2 * owner.rotation_complex_dtype.itemsize
+            2 * owner.index_dtype.itemsize + 2 * owner.rotation_complex_dtype.itemsize
         )
         if budget_is_device:
             resource = "device"
@@ -227,9 +226,7 @@ class PairGeometry:
         else:
             resource = "host"
             packed = bool(getattr(owner, "pack_host_pairs", False))
-        bytes_per_pair = (
-            PACKED_BYTES_PER_PAIR if packed else exact_bytes_per_pair
-        )
+        bytes_per_pair = PACKED_BYTES_PER_PAIR if packed else exact_bytes_per_pair
 
         def projected_gb(level_nside: np.ndarray) -> float:
             pairs = estimate_pairs_per_bin(
@@ -320,9 +317,9 @@ class PairGeometry:
                     level = coarse.index(nside_b)
                     shift = starts[level] + treecode.cell_offsets[level, i]
                     if shift:
-                        pair_inds[i][:, edges[b0] : edges[b1]] += owner.index_dtype.type(
-                            shift
-                        )
+                        pair_inds[i][
+                            :, edges[b0] : edges[b1]
+                        ] += owner.index_dtype.type(shift)
 
         owner.pair_inds = pair_inds
         owner.pair_exp2phi = pair_exp2phi
@@ -564,5 +561,7 @@ class PairGeometry:
         owner.Q_sin_flat = Q_sin_flat
         owner.Q_val_flat = Q_val_flat
         owner.Q_offsets = offsets
-        owner.Q_patch_area_flat = np.asarray(owner.Q_patch_area, dtype=owner.rotation_dtype)
+        owner.Q_patch_area_flat = np.asarray(
+            owner.Q_patch_area, dtype=owner.rotation_dtype
+        )
         owner._invalidate_aperture_device_buffers()

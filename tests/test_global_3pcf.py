@@ -22,7 +22,7 @@ from CosmoFuse import Component, Global3PCF, ThreePointResult
 from CosmoFuse.threepoint_kernels import build_cupy_3pcf_multipoles_kernel
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
-from .threepoint_reference import brute_force, position_angle, _frame
+from .threepoint_reference import _frame, brute_force, position_angle
 
 NSIDE = 16
 N_MAX = 3
@@ -30,7 +30,9 @@ N_MAX = 3
 
 def _setup():
     npix = hp.nside2npix(NSIDE)
-    disc = hp.query_disc(NSIDE, hp.ang2vec(np.radians(70), np.radians(40)), np.radians(16))
+    disc = hp.query_disc(
+        NSIDE, hp.ang2vec(np.radians(70), np.radians(40)), np.radians(16)
+    )
     mask = np.zeros(npix, bool)
     mask[disc] = True
     rng = np.random.default_rng(3)
@@ -67,7 +69,9 @@ class TestBruteForce(unittest.TestCase):
 
     def _check(self, res, fields):
         comps = [(c.label, c.fields, c.conj) for c in res.components]
-        num, norm = brute_force(NSIDE, self.pix, fields, comps, self.est.binedges, N_MAX)
+        num, norm = brute_force(
+            NSIDE, self.pix, fields, comps, self.est.binedges, N_MAX
+        )
         for c in res.components:
             with self.subTest(component=c.label):
                 self.assertLess(_rel(res.num[c.label], num[c.label]), 1e-12)
@@ -75,7 +79,9 @@ class TestBruteForce(unittest.TestCase):
 
     def test_shear(self):
         res = self.est.ggg(self.g, self.w)
-        self.assertEqual([c.label for c in res.components], ["gamma0", "gamma1", "gamma2", "gamma3"])
+        self.assertEqual(
+            [c.label for c in res.components], ["gamma0", "gamma1", "gamma2", "gamma3"]
+        )
         self.assertEqual(res.num["gamma0"].shape, (2 * N_MAX + 1, 2, 2, 2, 3, 3))
         self._check(res, {"g": (self.g[:, :, self.pix], self.w[:, self.pix], 2)})
 
@@ -115,13 +121,20 @@ class TestBruteForce(unittest.TestCase):
         P, Ee, Nn = _frame(NSIDE, est.map_inds)
         for c in range(0, est.centre_rows.size, 7):
             i = int(est.centre_rows[c])
-            lo, hi = est.pair_offsets[c * est.nbins], est.pair_offsets[(c + 1) * est.nbins]
+            lo, hi = (
+                est.pair_offsets[c * est.nbins],
+                est.pair_offsets[(c + 1) * est.nbins],
+            )
             for p in range(lo, hi):
                 j = int(est.nbr_rows[p])
                 ref_c = position_angle(P[i], Ee[i], Nn[i], P[j])
                 ref_n = position_angle(P[j], Ee[j], Nn[j], P[i])
-                self.assertAlmostEqual(np.angle(np.exp(1j * (est.phi_c[p] - ref_c))), 0.0, places=10)
-                self.assertAlmostEqual(np.angle(np.exp(1j * (est.phi_n[p] - ref_n))), 0.0, places=10)
+                self.assertAlmostEqual(
+                    np.angle(np.exp(1j * (est.phi_c[p] - ref_c))), 0.0, places=10
+                )
+                self.assertAlmostEqual(
+                    np.angle(np.exp(1j * (est.phi_n[p] - ref_n))), 0.0, places=10
+                )
 
 
 class TestInvariance(unittest.TestCase):
@@ -130,7 +143,9 @@ class TestInvariance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mask, cls.g, cls.w, cls.d = _setup()
-        cls.ref = _estimator(cls.mask, tile_nside=1, centre_chunk=4096).ggg(cls.g, cls.w)
+        cls.ref = _estimator(cls.mask, tile_nside=1, centre_chunk=4096).ggg(
+            cls.g, cls.w
+        )
 
     def test_tiles_and_chunks(self):
         for tile_nside, chunk in ((2, 5), (4, 1000), (8, 33)):
@@ -168,7 +183,8 @@ class TestPairFiles(unittest.TestCase):
     """G4"""
 
     def test_round_trip(self):
-        import tempfile, os
+        import os
+        import tempfile
 
         mask, g, w, _ = _setup()
         est = _estimator(mask)
@@ -178,16 +194,31 @@ class TestPairFiles(unittest.TestCase):
             est.save_pairs(path)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                other = Global3PCF(NSIDE, mask=mask, nbins=3, theta_min=240, theta_max=900,
-                                   n_max=N_MAX, tile_nside=2, device="cpu")
+                other = Global3PCF(
+                    NSIDE,
+                    mask=mask,
+                    nbins=3,
+                    theta_min=240,
+                    theta_max=900,
+                    n_max=N_MAX,
+                    tile_nside=2,
+                    device="cpu",
+                )
             other.load_pairs(path)
             res = other.ggg(g, w)
             for label in ref.num:
                 np.testing.assert_array_equal(res.num[label], ref.num[label])
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                wrong = Global3PCF(NSIDE, mask=mask, nbins=4, theta_min=240, theta_max=900,
-                                   tile_nside=2, device="cpu")
+                wrong = Global3PCF(
+                    NSIDE,
+                    mask=mask,
+                    nbins=4,
+                    theta_min=240,
+                    theta_max=900,
+                    tile_nside=2,
+                    device="cpu",
+                )
             with self.assertRaises(ValueError):
                 wrong.load_pairs(path)
 
@@ -210,11 +241,13 @@ class TestBinning(unittest.TestCase):
         rng = np.random.default_rng(0)
         edges = np.linspace(-np.pi, np.pi, 5)
         centres = 0.5 * (edges[:-1] + edges[1:])
-        phi_t = (centres[rng.integers(0, 4, 400)] + rng.uniform(-0.6, 0.6, 400))
+        phi_t = centres[rng.integers(0, 4, 400)] + rng.uniform(-0.6, 0.6, 400)
         vals = rng.normal(size=400) + 1j * rng.normal(size=400)
         wts = rng.uniform(0.5, 1.5, size=400)
         k = np.digitize(phi_t, edges) - 1
-        direct = np.array([np.sum(vals[k == i]) / np.sum(wts[k == i]) for i in range(4)])
+        direct = np.array(
+            [np.sum(vals[k == i]) / np.sum(wts[k == i]) for i in range(4)]
+        )
         errs = []
         for n_max in (20, 80, 320):
             n = np.arange(-n_max, n_max + 1)
@@ -222,8 +255,12 @@ class TestBinning(unittest.TestCase):
             den = np.sum(wts[None] * np.exp(-1j * n[:, None] * phi_t[None]), axis=1)
             shape = (n.size, 1, 1, 1, 1, 1)
             res = ThreePointResult(
-                n_max, np.array([1.0, 2.0]), (Component("x", ("a", "a", "a")),), {"a": 0},
-                {"x": num.reshape(shape)}, {"x": den.reshape(shape)},
+                n_max,
+                np.array([1.0, 2.0]),
+                (Component("x", ("a", "a", "a")),),
+                {"a": 0},
+                {"x": num.reshape(shape)},
+                {"x": den.reshape(shape)},
             )
             errs.append(np.abs(res.binned(edges)["x"].ravel() - direct).max())
         self.assertLess(errs[2], errs[0])
@@ -237,7 +274,9 @@ class TestBinning(unittest.TestCase):
         b = res.binned(edges)
         cen = res.to_centroid(b, edges)
         for label in b:
-            np.testing.assert_allclose(np.abs(cen[label]), np.abs(b[label]), rtol=1e-12, atol=0)
+            np.testing.assert_allclose(
+                np.abs(cen[label]), np.abs(b[label]), rtol=1e-12, atol=0
+            )
         dres = est.kkk(d, w)
         db = dres.binned(edges)
         np.testing.assert_array_equal(dres.to_centroid(db, edges)["zeta"], db["zeta"])
@@ -257,14 +296,20 @@ class TestEmulatedGPU(unittest.TestCase):
         mask, g, w, d = _setup()
         for acc in ("float64", "same"):
             with self.subTest(accumulation_precision=acc):
-                est = _estimator(mask, map_precision="float32", rotation_precision="float32",
-                                 accumulation_precision=acc)
+                est = _estimator(
+                    mask,
+                    map_precision="float32",
+                    rotation_precision="float32",
+                    accumulation_precision=acc,
+                )
                 cpu = est.ggg(g, w)
                 cpu_d = est.kkk(d, w)
                 be = est.backend
                 saved = (be.name, be.kernel_3pcf_multipoles, be.to_device, be.to_numpy)
                 be.name = "cupy"
-                be.kernel_3pcf_multipoles = build_cupy_3pcf_multipoles_kernel(EmulatedCupyModule)
+                be.kernel_3pcf_multipoles = build_cupy_3pcf_multipoles_kernel(
+                    EmulatedCupyModule
+                )
                 be.to_device = lambda a, stream=None: np.asarray(a)
                 be.to_numpy = lambda a, stream=None: np.asarray(a)
                 est._norm_cache.clear()
@@ -273,7 +318,9 @@ class TestEmulatedGPU(unittest.TestCase):
                     gpu = est.ggg(g, w)
                     gpu_d = est.kkk(d, w)
                 finally:
-                    be.name, be.kernel_3pcf_multipoles, be.to_device, be.to_numpy = saved
+                    be.name, be.kernel_3pcf_multipoles, be.to_device, be.to_numpy = (
+                        saved
+                    )
                 self.assertIn("gpu_3pcf_multipoles", LAUNCH_LOG)
                 tol = 1e-12 if acc == "float64" else 1e-5
                 for label in cpu.num:
@@ -286,13 +333,27 @@ class TestEmulatedGPU(unittest.TestCase):
 class TestRealGPU(unittest.TestCase):
     def test_gpu_matches_cpu(self):
         mask, g, w, d = _setup()
-        for mp, acc, tol in (("float64", "float64", 1e-12), ("float32", "float64", 1e-5),
-                             ("float32", "same", 1e-4)):
+        for mp, acc, tol in (
+            ("float64", "float64", 1e-12),
+            ("float32", "float64", 1e-5),
+            ("float32", "same", 1e-4),
+        ):
             with self.subTest(map_precision=mp, accumulation_precision=acc):
-                kw = dict(map_precision=mp, rotation_precision=mp, accumulation_precision=acc)
+                kw = dict(
+                    map_precision=mp, rotation_precision=mp, accumulation_precision=acc
+                )
                 cpu = _estimator(mask, **kw)
-                gpu = Global3PCF(NSIDE, mask=mask, nbins=3, theta_min=240, theta_max=900,
-                                 n_max=N_MAX, tile_nside=2, device="gpu", **kw)
+                gpu = Global3PCF(
+                    NSIDE,
+                    mask=mask,
+                    nbins=3,
+                    theta_min=240,
+                    theta_max=900,
+                    n_max=N_MAX,
+                    tile_nside=2,
+                    device="gpu",
+                    **kw,
+                )
                 gpu.preprocess()
                 for fn, args in (("ggg", (g, w)), ("kkk", (d, w))):
                     a = getattr(cpu, fn)(*args)

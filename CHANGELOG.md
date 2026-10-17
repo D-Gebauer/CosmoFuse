@@ -1,5 +1,22 @@
 # Changelog
 
+## 7.0.1 (2026-10-17)
+
+Packaging and hygiene, no change to any number.
+
+- **Python >= 3.12** (was 3.10): `requires-python`, the classifiers, black's
+  target, mypy's `python_version` and the CI matrix (3.12, 3.13).
+- **`black`, `isort` and `flake8` are clean** over `src` and `tests`
+  (`make lint`); flake8 reads `.flake8`, which mirrors black's line length.
+  Lambdas assigned to names became `def`s, dead imports went, the test files
+  no longer edit `sys.path`, and three tests stopped mocking a function the
+  pair finder had not called for several releases.
+- `Integrated3PCF._invalidate_aperture_device_buffers` was defined twice; the
+  shadowed first definition is gone (the one that ran is unchanged).
+- `mypy --strict` still reports ~370 errors, most of them dynamically set
+  `ComputeContext` attributes and the backend module typed as `object`; not
+  addressed here.
+
 ## 7.0.0 (2026-10-17)
 
 **Breaking.** One vocabulary for three estimators, labelled results instead

@@ -12,9 +12,9 @@ to_device()/to_numpy() for transparent data movement between host and device.
 """
 
 import logging
+import warnings
 from contextlib import nullcontext
 from pathlib import Path
-import warnings
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -40,6 +40,7 @@ _CUDA_SOURCE_CACHE: dict[str, str] = {}
 # per-builder kernel caches, so a failing NVRTC compilation is not retried
 # (and re-logged) on every subsequent call.
 _KERNEL_CACHE_MISS = object()
+
 
 def _load_cuda_source_file(filename: str) -> str:
     cached = _CUDA_SOURCE_CACHE.get(filename)
@@ -109,6 +110,7 @@ def _compile_raw_cuda_kernel(module: Any, source: str, name_expression: str) -> 
 # Compute the aperture-filtered field for each sky patch:
 #   M = A_patch · Σ(w · field · Q(θ)) / Σ(w)
 # where Q(θ) is the compensated filter function.
+
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_aperture_density_kernel(
@@ -192,6 +194,7 @@ def _cpu_aperture_shear_kernel(
 
 # ── CuPy ElementwiseKernel builders (GPU per-element operations) ──────────
 
+
 def _build_cupy_aperture_density_kernel(module: Any) -> Any:
     """GPU kernel: per-pixel contribution to galaxy mean density M_g.
 
@@ -241,6 +244,7 @@ def _build_cupy_aperture_shear_kernel(module: Any) -> Any:
 # launch over (patch, tomo bin) blocks; the wrappers fall back (return
 # False) when no raw compiler is available so callers can use the legacy
 # ElementwiseKernel path.
+
 
 def _aperture_tomo_prepare_planar(module: Any, arr: Any) -> Tuple[Any, int, int]:
     """Return (array, bin stride, row stride) in elements for a 2D view.
@@ -478,7 +482,8 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
             kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
-                "Aperture-shear tomo RawKernel compilation failed; using elementwise path: %s",
+                "Aperture-shear tomo RawKernel compilation failed; "
+                "using elementwise path: %s",
                 exc,
             )
             kernel_cache[key] = None
@@ -527,8 +532,7 @@ def _build_cupy_aperture_tomo_shear_kernel(module: Any) -> Any:
 
         threads = 256
         blocks = (
-            (max(1, npatches), 1, 1) if fused
-            else (max(1, npatches), max(1, ntomo), 1)
+            (max(1, npatches), 1, 1) if fused else (max(1, npatches), max(1, ntomo), 1)
         )
         # The fused kernel knows NZ at compile time and takes no `ntomo`.
         tail: Tuple[Any, ...] = (np.int32(npatches),)
@@ -592,7 +596,8 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
             kernel = _compile_raw_cuda_kernel(module, source, name_expression)
         except Exception as exc:
             logger.warning(
-                "Aperture-density tomo RawKernel compilation failed; using elementwise path: %s",
+                "Aperture-density tomo RawKernel compilation failed; "
+                "using elementwise path: %s",
                 exc,
             )
             kernel_cache[key] = None
@@ -632,8 +637,7 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
 
         threads = 256
         blocks = (
-            (max(1, npatches), 1, 1) if fused
-            else (max(1, npatches), max(1, ntomo), 1)
+            (max(1, npatches), 1, 1) if fused else (max(1, npatches), max(1, ntomo), 1)
         )
         # The fused kernel knows NZ at compile time and takes no `ntomo`.
         tail: Tuple[Any, ...] = (np.int32(npatches),)
@@ -664,6 +668,7 @@ def _build_cupy_aperture_tomo_density_kernel(module: Any) -> Any:
 
 
 # ── Single-pair 2PCF kernels ─────────────────────────────────────────────
+
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_corr_kernel(
@@ -768,6 +773,7 @@ def _cpu_density_shear_corr_kernel(
 # ── Vectorised tomographic CPU kernels ────────────────────────────────────
 # Process all tomographic bin combinations in a single pass over the
 # pair list, avoiding redundant memory traversals.
+
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_density_density_tomo_vectorized_kernel(
@@ -879,10 +885,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
                     -shear_map[pix_j, source_bin, 0] * exp_j_re
                     + shear_map[pix_j, source_bin, 1] * exp_j_im
                 )
-                w_ab = (
-                    lens_weights[pix_i, lens_bin]
-                    * source_weights[pix_j, source_bin]
-                )
+                w_ab = lens_weights[pix_i, lens_bin] * source_weights[pix_j, source_bin]
                 acc_num[comb_idx] += w_ab * density_map[pix_i, lens_bin] * gamma_t_ij
                 acc_den[comb_idx] += w_ab
 
@@ -891,10 +894,7 @@ def _cpu_density_shear_tomo_vectorized_kernel(
                     -shear_map[pix_i, source_bin, 0] * exp_i_re
                     + shear_map[pix_i, source_bin, 1] * exp_i_im
                 )
-                w_ba = (
-                    lens_weights[pix_j, lens_bin]
-                    * source_weights[pix_i, source_bin]
-                )
+                w_ba = lens_weights[pix_j, lens_bin] * source_weights[pix_i, source_bin]
                 acc_num[comb_idx] += w_ba * density_map[pix_j, lens_bin] * gamma_t_ji
                 acc_den[comb_idx] += w_ba
 
@@ -943,19 +943,24 @@ def _build_cupy_density_shear_corr_kernel(module: Any) -> Any:
 # These builders compile the CUDA source templates with specific type
 # parameters and cache the compiled kernels for reuse.
 
+
 class _CombinationLayout:
     """How a requested list of tomographic combinations maps onto the
     canonical layout generated by the combination-tiled kernels."""
 
     __slots__ = ("mode", "canonical_ncomb", "rows")
 
-    def __init__(self, mode: str, canonical_ncomb: int, rows: Optional[np.ndarray]) -> None:
-        self.mode = mode                        # "triangle" | "auto" | "cartesian"
+    def __init__(
+        self, mode: str, canonical_ncomb: int, rows: Optional[np.ndarray]
+    ) -> None:
+        self.mode = mode  # "triangle" | "auto" | "cartesian"
         self.canonical_ncomb = canonical_ncomb  # rows the tile produces
-        self.rows = rows                        # canonical row per request, None = identity
+        self.rows = rows  # canonical row per request, None = identity
 
 
-_COMBINATION_LAYOUT_CACHE: dict[tuple[int, int, str, int, int], Optional[_CombinationLayout]] = {}
+_COMBINATION_LAYOUT_CACHE: dict[
+    tuple[int, int, str, int, int], Optional[_CombinationLayout]
+] = {}
 
 
 def _combination_layout(
@@ -995,29 +1000,57 @@ def _combination_layout(
     cached = _COMBINATION_LAYOUT_CACHE.get(key, _KERNEL_CACHE_MISS)
     if cached is not _KERNEL_CACHE_MISS:
         return cached
-    to_host = lambda a: np.asarray(a.get() if hasattr(a, "get") else a).astype(np.int64)
+
+    def to_host(a: Any) -> np.ndarray:
+        return np.asarray(a.get() if hasattr(a, "get") else a).astype(np.int64)
+
     ci, cj = to_host(comb_i), to_host(comb_j)
     layout: Optional[_CombinationLayout]
     if kind == "triangle":
-        if ci.size == 0 or ci.min() < 0 or cj.min() < 0 or ci.max() >= n1 or cj.max() >= n1:
+        if (
+            ci.size == 0
+            or ci.min() < 0
+            or cj.min() < 0
+            or ci.max() >= n1
+            or cj.max() >= n1
+        ):
             layout = None
         else:
             lo, hi = np.minimum(ci, cj), np.maximum(ci, cj)
             rows = lo * n1 - (lo * (lo - 1)) // 2 + (hi - lo)
             canonical = (n1 * (n1 + 1)) // 2
-            identity = rows.size == canonical and np.array_equal(rows, np.arange(canonical))
-            if not identity and ci.size == n1 and np.array_equal(ci, np.arange(n1)) and np.array_equal(cj, ci):
+            identity = rows.size == canonical and np.array_equal(
+                rows, np.arange(canonical)
+            )
+            if (
+                not identity
+                and ci.size == n1
+                and np.array_equal(ci, np.arange(n1))
+                and np.array_equal(cj, ci)
+            ):
                 layout = _CombinationLayout("auto", int(n1), None)
             else:
-                layout = _CombinationLayout("triangle", int(canonical), None if identity else rows)
+                layout = _CombinationLayout(
+                    "triangle", int(canonical), None if identity else rows
+                )
     elif kind == "cartesian":
-        if ci.size == 0 or ci.min() < 0 or cj.min() < 0 or ci.max() >= n1 or cj.max() >= n2:
+        if (
+            ci.size == 0
+            or ci.min() < 0
+            or cj.min() < 0
+            or ci.max() >= n1
+            or cj.max() >= n2
+        ):
             layout = None
         else:
             rows = ci * n2 + cj
             canonical = int(n1 * n2)
-            identity = rows.size == canonical and np.array_equal(rows, np.arange(canonical))
-            layout = _CombinationLayout("cartesian", canonical, None if identity else rows)
+            identity = rows.size == canonical and np.array_equal(
+                rows, np.arange(canonical)
+            )
+            layout = _CombinationLayout(
+                "cartesian", canonical, None if identity else rows
+            )
     else:
         raise ValueError(f"unknown combination layout kind {kind!r}")
     if len(_COMBINATION_LAYOUT_CACHE) > 64:
@@ -1066,7 +1099,10 @@ def _make_raw_kernel_builder(module: Any, filename: str, what: str) -> Any:
             if key not in warned:
                 warned.add(key)
                 logger.warning(
-                    "%s RawKernel compilation failed (%s): %s", what, name_expression, exc
+                    "%s RawKernel compilation failed (%s): %s",
+                    what,
+                    name_expression,
+                    exc,
                 )
             if not _is_deterministic_compile_failure(exc):
                 # Retry next call rather than downgrading this process to
@@ -1079,7 +1115,9 @@ def _make_raw_kernel_builder(module: Any, filename: str, what: str) -> Any:
     return _get_or_build
 
 
-def _scatter_canonical_rows(module: Any, layout: _CombinationLayout, tmp: Any, out: Any) -> None:
+def _scatter_canonical_rows(
+    module: Any, layout: _CombinationLayout, tmp: Any, out: Any
+) -> None:
     """out[r] = tmp[layout.rows[r]] (tmp holds the canonical rows)."""
     rows = module.asarray(layout.rows)
     out[...] = tmp[rows]
@@ -1140,13 +1178,25 @@ def _build_cupy_density_density_tomo_vectorized_kernel(module: Any) -> Any:
                 if layout.rows is None:
                     tgt_num, tgt_den = out_num, out_den
                 else:
-                    tgt_num = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_num.dtype)
-                    tgt_den = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_den.dtype)
+                    tgt_num = module.zeros(
+                        (layout.canonical_ncomb, nbins_total), dtype=out_num.dtype
+                    )
+                    tgt_den = module.zeros(
+                        (layout.canonical_ncomb, nbins_total), dtype=out_den.dtype
+                    )
                 raw_kernel(
                     (max(1, nbins_total), 1, 1),
                     (threads,),
-                    (density_map, weights, ind_i, ind_j, bin_offsets,
-                     tgt_num, tgt_den, np.int64(nbins_total)),
+                    (
+                        density_map,
+                        weights,
+                        ind_i,
+                        ind_j,
+                        bin_offsets,
+                        tgt_num,
+                        tgt_den,
+                        np.int64(nbins_total),
+                    ),
                 )
                 if layout.rows is not None:
                     _scatter_canonical_rows(module, layout, tgt_num, out_num)
@@ -1223,13 +1273,25 @@ def _build_cupy_density_density_tomo_packed_kernel(module: Any) -> Any:
         if layout.rows is None:
             tgt_num, tgt_den = out_num, out_den
         else:
-            tgt_num = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_num.dtype)
-            tgt_den = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_den.dtype)
+            tgt_num = module.zeros(
+                (layout.canonical_ncomb, nbins_total), dtype=out_num.dtype
+            )
+            tgt_den = module.zeros(
+                (layout.canonical_ncomb, nbins_total), dtype=out_den.dtype
+            )
         raw_kernel(
             (max(1, nbins_total), 1, 1),
             (256,),
-            (density_map, weights, pairs, bin_offsets, row_base,
-             tgt_num, tgt_den, np.int64(nbins_total)),
+            (
+                density_map,
+                weights,
+                pairs,
+                bin_offsets,
+                row_base,
+                tgt_num,
+                tgt_den,
+                np.int64(nbins_total),
+            ),
         )
         if layout.rows is not None:
             _scatter_canonical_rows(module, layout, tgt_num, out_num)
@@ -1274,7 +1336,9 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         if not _has_raw_cuda_compiler(module):
             return False
 
-        complex_c_type = "cuFloatComplex" if rot_j.dtype == module.complex64 else "cuDoubleComplex"
+        complex_c_type = (
+            "cuFloatComplex" if rot_j.dtype == module.complex64 else "cuDoubleComplex"
+        )
         map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         # Accumulator type follows the orchestrator-allocated output buffers.
@@ -1284,7 +1348,9 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         ncomb = int(comb_i.shape[0])
         threads = 256
 
-        layout = _combination_layout(comb_i, comb_j, "cartesian", nlens_bins, nsource_bins)
+        layout = _combination_layout(
+            comb_i, comb_j, "cartesian", nlens_bins, nsource_bins
+        )
         if (
             _cupy_density_shear_tomo_vectorized_kernel.tiled
             and layout is not None
@@ -1292,20 +1358,42 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
         ):
             raw_kernel = build(
                 "gpu_tiled_tomo_reduce_ds",
-                (map_c_type, complex_c_type, nlens_bins, nsource_bins, index_c_type, acc_c_type),
+                (
+                    map_c_type,
+                    complex_c_type,
+                    nlens_bins,
+                    nsource_bins,
+                    index_c_type,
+                    acc_c_type,
+                ),
             )
             if raw_kernel is not None:
                 if layout.rows is None:
                     tgt_num, tgt_den = out_num, out_den
                 else:
-                    tgt_num = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_num.dtype)
-                    tgt_den = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_den.dtype)
+                    tgt_num = module.zeros(
+                        (layout.canonical_ncomb, nbins_total), dtype=out_num.dtype
+                    )
+                    tgt_den = module.zeros(
+                        (layout.canonical_ncomb, nbins_total), dtype=out_den.dtype
+                    )
                 raw_kernel(
                     (max(1, nbins_total), 1, 1),
                     (threads,),
-                    (density_map, shear_map, lens_weights, source_weights,
-                     ind_i, ind_j, rot_i, rot_j, bin_offsets,
-                     tgt_num, tgt_den, np.int64(nbins_total)),
+                    (
+                        density_map,
+                        shear_map,
+                        lens_weights,
+                        source_weights,
+                        ind_i,
+                        ind_j,
+                        rot_i,
+                        rot_j,
+                        bin_offsets,
+                        tgt_num,
+                        tgt_den,
+                        np.int64(nbins_total),
+                    ),
                 )
                 if layout.rows is not None:
                     _scatter_canonical_rows(module, layout, tgt_num, out_num)
@@ -1314,7 +1402,14 @@ def _build_cupy_density_shear_tomo_vectorized_kernel(module: Any) -> Any:
 
         raw_kernel = build(
             "gpu_fused_tomo_reduce_ds",
-            (map_c_type, complex_c_type, nlens_bins, nsource_bins, index_c_type, acc_c_type),
+            (
+                map_c_type,
+                complex_c_type,
+                nlens_bins,
+                nsource_bins,
+                index_c_type,
+                acc_c_type,
+            ),
         )
         if raw_kernel is None:
             return False
@@ -1371,13 +1466,16 @@ def _build_cupy_density_shear_tomo_packed_kernel(module: Any) -> Any:
             return False
         if not _has_raw_cuda_compiler(module):
             return False
-        layout = _combination_layout(comb_i, comb_j, "cartesian", nlens_bins, nsource_bins)
+        layout = _combination_layout(
+            comb_i, comb_j, "cartesian", nlens_bins, nsource_bins
+        )
         if layout is None or 2 * layout.canonical_ncomb > _MAX_TILED_ACCUMULATORS:
             return False
         map_c_type = "float" if lens_weights.dtype == module.float32 else "double"
         acc_c_type = "float" if out_num.dtype == module.float32 else "double"
         raw_kernel = build(
-            "gpu_tiled_packed_reduce_ds", (map_c_type, nlens_bins, nsource_bins, acc_c_type)
+            "gpu_tiled_packed_reduce_ds",
+            (map_c_type, nlens_bins, nsource_bins, acc_c_type),
         )
         if raw_kernel is None:
             return False
@@ -1385,13 +1483,27 @@ def _build_cupy_density_shear_tomo_packed_kernel(module: Any) -> Any:
         if layout.rows is None:
             tgt_num, tgt_den = out_num, out_den
         else:
-            tgt_num = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_num.dtype)
-            tgt_den = module.zeros((layout.canonical_ncomb, nbins_total), dtype=out_den.dtype)
+            tgt_num = module.zeros(
+                (layout.canonical_ncomb, nbins_total), dtype=out_num.dtype
+            )
+            tgt_den = module.zeros(
+                (layout.canonical_ncomb, nbins_total), dtype=out_den.dtype
+            )
         raw_kernel(
             (max(1, nbins_total), 1, 1),
             (256,),
-            (density_map, shear_map, lens_weights, source_weights, pairs,
-             bin_offsets, row_base, tgt_num, tgt_den, np.int64(nbins_total)),
+            (
+                density_map,
+                shear_map,
+                lens_weights,
+                source_weights,
+                pairs,
+                bin_offsets,
+                row_base,
+                tgt_num,
+                tgt_den,
+                np.int64(nbins_total),
+            ),
         )
         if layout.rows is not None:
             _scatter_canonical_rows(module, layout, tgt_num, out_num)
@@ -1406,6 +1518,7 @@ def _build_cupy_density_shear_tomo_packed_kernel(module: Any) -> Any:
 # The shear is rotated into the pair frame via γ' = γ · e^{2iφ}, then:
 #   ξ+ = Re[γ'_b · conj(γ'_a)]   (sensitive to E+B mode power)
 #   ξ- = Re[γ'_b · γ'_a]          (sensitive to E-B mode power)
+
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_xipm_cross_corr_kernel(
@@ -1663,7 +1776,9 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
     rows are summed here).  Set ``kernel.tiled = False`` on the returned
     callable to force the per-row kernel.
     """
-    build = _make_raw_kernel_builder(module, "tomo_vectorized_xipm.cu", "Vectorized tomography")
+    build = _make_raw_kernel_builder(
+        module, "tomo_vectorized_xipm.cu", "Vectorized tomography"
+    )
 
     def _cupy_tomo_vectorized_kernel(
         shear_map: Any,
@@ -1684,7 +1799,9 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         if not _has_raw_cuda_compiler(module):
             return False
 
-        complex_c_type = "cuFloatComplex" if rot_i.dtype == module.complex64 else "cuDoubleComplex"
+        complex_c_type = (
+            "cuFloatComplex" if rot_i.dtype == module.complex64 else "cuDoubleComplex"
+        )
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         index_c_type = "int" if ind_i.dtype == module.int32 else "long long"
         # The accumulator type follows the (orchestrator-allocated) output
@@ -1711,8 +1828,18 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
                 raw_kernel(
                     (max(1, nbins_total), 1, 1),
                     (threads,),
-                    (shear_map, weights, ind_i, ind_j, rot_i, rot_j, bin_offsets,
-                     out_num, out_den, np.int64(nbins_total)),
+                    (
+                        shear_map,
+                        weights,
+                        ind_i,
+                        ind_j,
+                        rot_i,
+                        rot_j,
+                        bin_offsets,
+                        out_num,
+                        out_den,
+                        np.int64(nbins_total),
+                    ),
                 )
                 return True
 
@@ -1784,15 +1911,25 @@ def _build_cupy_tomo_packed_kernel(module: Any) -> Any:
             return False
         map_c_type = "float" if weights.dtype == module.float32 else "double"
         acc_c_type = "float" if out_num.dtype == module.float32 else "double"
-        raw_kernel = build("gpu_tiled_packed_reduce_xipm", (map_c_type, nzbins, acc_c_type))
+        raw_kernel = build(
+            "gpu_tiled_packed_reduce_xipm", (map_c_type, nzbins, acc_c_type)
+        )
         if raw_kernel is None:
             return False
         nbins_total = int(bin_offsets.shape[0] - 1)
         raw_kernel(
             (max(1, nbins_total), 1, 1),
             (256,),
-            (shear_map, weights, pairs, bin_offsets, row_base,
-             out_num, out_den, np.int64(nbins_total)),
+            (
+                shear_map,
+                weights,
+                pairs,
+                bin_offsets,
+                row_base,
+                out_num,
+                out_den,
+                np.int64(nbins_total),
+            ),
         )
         return True
 
@@ -1804,6 +1941,7 @@ def _build_cupy_tomo_packed_kernel(module: Any) -> Any:
 # Computes all six 3×2pt outputs (M_ap, M_g, ξ+, ξ-, ξ_g, ξ_t) in
 # separate prange loops — each loop parallelises over tomo combinations
 # or patch indices.
+
 
 @njit(fastmath=True, parallel=True, cache=True)
 def _cpu_3x2pt_tomo_fused_kernel(
@@ -1858,7 +1996,10 @@ def _cpu_3x2pt_tomo_fused_kernel(
         for q_idx in range(start, stop):
             pix_idx = q_inds[q_idx]
             weight = shear_weights[pix_idx, tomo_idx]
-            gt = -shear_map[pix_idx, tomo_idx, 0] * q_cos[q_idx] - shear_map[pix_idx, tomo_idx, 1] * q_sin[q_idx]
+            gt = (
+                -shear_map[pix_idx, tomo_idx, 0] * q_cos[q_idx]
+                - shear_map[pix_idx, tomo_idx, 1] * q_sin[q_idx]
+            )
             sum_w += weight
             sum_num += weight * gt * q_val[q_idx]
 
@@ -1963,12 +2104,16 @@ def _cpu_3x2pt_tomo_fused_kernel(
 
                 w_ab = density_weights[pix_a, i_bin] * density_weights[pix_b, j_bin]
                 acc_den[comb_idx] += w_ab
-                acc_num[comb_idx] += w_ab * density_map[pix_a, i_bin] * density_map[pix_b, j_bin]
+                acc_num[comb_idx] += (
+                    w_ab * density_map[pix_a, i_bin] * density_map[pix_b, j_bin]
+                )
 
                 if i_bin != j_bin:
                     w_ba = density_weights[pix_a, j_bin] * density_weights[pix_b, i_bin]
                     acc_den[comb_idx] += w_ba
-                    acc_num[comb_idx] += w_ba * density_map[pix_a, j_bin] * density_map[pix_b, i_bin]
+                    acc_num[comb_idx] += (
+                        w_ba * density_map[pix_a, j_bin] * density_map[pix_b, i_bin]
+                    )
 
         for row in range(n_dd_comb):
             out_xig_num[row, bin_flat] = acc_num[row]
@@ -2000,7 +2145,9 @@ def _cpu_3x2pt_tomo_fused_kernel(
                     -shear_map[pix_b, source_bin, 0] * exp_ab_re
                     + shear_map[pix_b, source_bin, 1] * exp_ab_im
                 )
-                w_ab = density_weights[pix_a, lens_bin] * shear_weights[pix_b, source_bin]
+                w_ab = (
+                    density_weights[pix_a, lens_bin] * shear_weights[pix_b, source_bin]
+                )
                 acc_num[comb_idx] += w_ab * density_map[pix_a, lens_bin] * gt_ab
                 acc_den[comb_idx] += w_ab
 
@@ -2008,7 +2155,9 @@ def _cpu_3x2pt_tomo_fused_kernel(
                     -shear_map[pix_a, source_bin, 0] * exp_ba_re
                     + shear_map[pix_a, source_bin, 1] * exp_ba_im
                 )
-                w_ba = density_weights[pix_b, lens_bin] * shear_weights[pix_a, source_bin]
+                w_ba = (
+                    density_weights[pix_b, lens_bin] * shear_weights[pix_a, source_bin]
+                )
                 acc_num[comb_idx] += w_ba * density_map[pix_b, lens_bin] * gt_ba
                 acc_den[comb_idx] += w_ba
 
@@ -2021,7 +2170,9 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
     """Builder for the aperture sections (M_ap, M_g) of the fused 3x2pt path
     (``tomo_fused_3x2pt.cu``; AoS inputs, accumulation at ACC).  The pair
     statistics of ``three_by_two_pt`` run in the tiled pair kernels."""
-    build = _make_raw_kernel_builder(module, "tomo_fused_3x2pt.cu", "Fused 3x2pt aperture")
+    build = _make_raw_kernel_builder(
+        module, "tomo_fused_3x2pt.cu", "Fused 3x2pt aperture"
+    )
     # One non-blocking stream per section, created lazily on first launch
     # (per device: each Backend instance gets its own builder closure).
     section_streams: list = []
@@ -2053,9 +2204,7 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
         npatches = int(q_offsets.shape[0] - 1)
         # One decision for both sections: they share the kernel, and the
         # widest bin set is what the accumulator budget has to cover.
-        fused = _use_fused_aperture(
-            module, max(n_density_bins, n_shear_bins), npatches
-        )
+        fused = _use_fused_aperture(module, max(n_density_bins, n_shear_bins), npatches)
         raw_kernel = build(
             "gpu_3x2pt_tomo_aperture_fused" if fused else "gpu_3x2pt_tomo_aperture",
             (map_c_type, q_c_type, n_density_bins, n_shear_bins, acc_c_type),
@@ -2081,8 +2230,8 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
             out_mg_den,
         )
         section_grids = (
-            (npatches, 1 if fused else n_shear_bins),      # z=0  M_ap
-            (npatches, 1 if fused else n_density_bins),    # z=1  M_g
+            (npatches, 1 if fused else n_shear_bins),  # z=0  M_ap
+            (npatches, 1 if fused else n_density_bins),  # z=1  M_g
         )
         if not section_streams:
             section_streams.extend(
@@ -2090,7 +2239,7 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
             )
         # The sections write disjoint outputs -> run them concurrently.
         current = module.cuda.get_current_stream()
-        ready = current.record()                 # inputs staged on current stream
+        ready = current.record()  # inputs staged on current stream
         for z, (gx, gy) in enumerate(section_grids):
             if gx <= 0 or gy <= 0:
                 continue
@@ -2144,10 +2293,22 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
         n_shear = int(shear_map.shape[1])
         ss = _combination_layout(ss_comb[0], ss_comb[1], "triangle", n_shear)
         dd = _combination_layout(dd_comb[0], dd_comb[1], "triangle", n_density)
-        ds = _combination_layout(ds_comb[0], ds_comb[1], "cartesian", n_density, n_shear)
-        if ss is None or dd is None or ds is None or ss.mode != "triangle" or ss.rows is not None:
+        ds = _combination_layout(
+            ds_comb[0], ds_comb[1], "cartesian", n_density, n_shear
+        )
+        if (
+            ss is None
+            or dd is None
+            or ds is None
+            or ss.mode != "triangle"
+            or ss.rows is not None
+        ):
             return none
-        n_ss, n_dd, n_ds = 3 * ss.canonical_ncomb, 2 * dd.canonical_ncomb, 2 * ds.canonical_ncomb
+        n_ss, n_dd, n_ds = (
+            3 * ss.canonical_ncomb,
+            2 * dd.canonical_ncomb,
+            2 * ds.canonical_ncomb,
+        )
         budget = _cupy_3x2pt_tomo_pairs_kernel.max_accumulators
         if mode != "single" and n_ss + n_dd + n_ds > budget:
             return none
@@ -2164,12 +2325,22 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
             )
         else:
             rot = geometry[2]
-            complex_c_type = "cuFloatComplex" if rot.dtype == module.complex64 else "cuDoubleComplex"
+            complex_c_type = (
+                "cuFloatComplex" if rot.dtype == module.complex64 else "cuDoubleComplex"
+            )
             index_c_type = "int" if geometry[0].dtype == module.int32 else "long long"
             raw_kernel = build(
                 "gpu_tiled_tomo_reduce_3x2pt",
-                (map_c_type, complex_c_type, n_density, n_shear, auto_only, *do,
-                 index_c_type, acc_c_type),
+                (
+                    map_c_type,
+                    complex_c_type,
+                    n_density,
+                    n_shear,
+                    auto_only,
+                    *do,
+                    index_c_type,
+                    acc_c_type,
+                ),
             )
         if raw_kernel is None:
             return none
@@ -2184,14 +2355,27 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
         xig_num, xig_den = target(dd, out_xig_num), target(dd, out_xig_den)
         xit_num, xit_den = target(ds, out_xit_num), target(ds, out_xit_den)
         geom_args = (
-            (geometry[0], bin_offsets, geometry[1]) if packed else (*geometry, bin_offsets)
+            (geometry[0], bin_offsets, geometry[1])
+            if packed
+            else (*geometry, bin_offsets)
         )
         raw_kernel(
             (max(1, nbins_total), 1, 1),
             (256,),
-            (density_map, shear_map, density_weights, shear_weights, *geom_args,
-             out_xipm_num, out_xipm_den, xig_num, xig_den, xit_num, xit_den,
-             np.int64(nbins_total)),
+            (
+                density_map,
+                shear_map,
+                density_weights,
+                shear_weights,
+                *geom_args,
+                out_xipm_num,
+                out_xipm_den,
+                xig_num,
+                xig_den,
+                xit_num,
+                xit_den,
+                np.int64(nbins_total),
+            ),
         )
         if dd.rows is not None:
             _scatter_canonical_rows(module, dd, xig_num, out_xig_num)
@@ -2292,6 +2476,7 @@ def _build_cupy_xipm_auto_corr_kernel(module: Any) -> Any:
         "gpu_xipm_auto_corr_kernel",
         options=_CUPY_FASTMATH_OPTIONS,
     )
+
 
 _SAFE_DIVIDE_KERNEL: Optional[Any] = None
 
@@ -2417,9 +2602,7 @@ class Backend:
         self.kernel_density_density_tomo_vectorized = (
             kernel_density_density_tomo_vectorized
         )
-        self.kernel_density_shear_tomo_vectorized = (
-            kernel_density_shear_tomo_vectorized
-        )
+        self.kernel_density_shear_tomo_vectorized = kernel_density_shear_tomo_vectorized
         self.kernel_density_density_tomo_packed = kernel_density_density_tomo_packed
         self.kernel_density_shear_tomo_packed = kernel_density_shear_tomo_packed
         # CPU: the Numba kernel computing all six 3x2pt outputs.  GPU: the
@@ -2455,9 +2638,9 @@ class Backend:
         (page-locked) host memory the transfer is truly asynchronous —
         the call returns before the copy completes.
         """
-        if self.name == 'numpy':
+        if self.name == "numpy":
             return np.asarray(array)
-        elif self.name == 'cupy':
+        elif self.name == "cupy":
             with self.module.cuda.Device(self.device_id):
                 if stream is not None:
                     with stream:
@@ -2471,9 +2654,9 @@ class Backend:
         When *stream* is provided and the backend is CuPy, the transfer is
         scheduled on that CUDA stream.
         """
-        if self.name == 'numpy':
+        if self.name == "numpy":
             return np.asarray(array)
-        elif self.name == 'cupy':
+        elif self.name == "cupy":
             if stream is not None:
                 with stream:
                     return self.module.asnumpy(array)
@@ -2481,7 +2664,7 @@ class Backend:
         return np.asarray(array)
 
     def get_memory_pool(self) -> Optional[Any]:
-        if self.name == 'cupy':
+        if self.name == "cupy":
             return self.module.get_default_memory_pool()
         return None
 
@@ -2492,7 +2675,7 @@ class Backend:
 
         Returns ``None`` on CPU backends.
         """
-        if self.name != 'cupy':
+        if self.name != "cupy":
             return None
         with self.module.cuda.Device(self.device_id):
             return self.module.cuda.Stream(non_blocking=non_blocking)
@@ -2503,7 +2686,7 @@ class Backend:
         If *stream* is ``None``, synchronizes the current device.
         No-op on CPU backends.
         """
-        if self.name != 'cupy':
+        if self.name != "cupy":
             return
         with self.module.cuda.Device(self.device_id):
             if stream is not None:
@@ -2518,7 +2701,7 @@ class Backend:
         inside the context will be enqueued on *stream*.  On CPU backends
         or when *stream* is ``None`` this returns a no-op context.
         """
-        if self.name == 'cupy' and stream is not None:
+        if self.name == "cupy" and stream is not None:
             return stream
         return nullcontext()
 
@@ -2533,7 +2716,7 @@ class Backend:
 
         On CPU backends returns a regular numpy array.
         """
-        if self.name != 'cupy':
+        if self.name != "cupy":
             return np.empty(shape, dtype=dtype)
         dtype = np.dtype(dtype)
         count = int(np.prod(shape))
@@ -2559,7 +2742,7 @@ class Backend:
         run in a given environment.  No-op on GPU backends (CUDA kernels
         are compiled per tomographic-bin-count template on first launch).
         """
-        if self.name != 'numpy':
+        if self.name != "numpy":
             return
 
         map_dtype = np.dtype(map_dtype)
@@ -2584,33 +2767,149 @@ class Backend:
             return np.zeros(shape, dtype=map_dtype)
 
         self.aperture_density_kernel(inds, q_val, q_offsets, v1, ones1, q_area, outb(1))
-        self.aperture_shear_kernel(inds, q_val, q_val, q_val, q_offsets, v1, v1, ones1, q_area, outb(1))
-        self.kernel_density_density(v1, v1, ones1, ones1, inds, inds, offsets, outb(1), outb(1), outb(1), outb(1))
-        self.kernel_density_shear(v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1), outb(1))
-        self.xipm_auto_corr_kernel(v1, v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1))
-        self.xipm_cross_corr_kernel(v1, v1, v1, v1, ones1, ones1, inds, inds, rot, rot, offsets, outb(1), outb(1), outb(1), outb(1), outb(1), outb(1))
-        self.kernel_density_density_tomo_vectorized(m, m, inds, inds, offsets, comb, comb, outb(1, 1), outb(1, 1))
-        self.kernel_density_shear_tomo_vectorized(m, shear, m, m, inds, inds, rot, rot, offsets, comb, comb, outb(1, 1), outb(1, 1))
-        self.xipm_tomo_vectorized_kernel(shear, m, inds, inds, rot, rot, offsets, comb, comb, outb(1, 1), outb(1, 1), outb(1, 1))
+        self.aperture_shear_kernel(
+            inds, q_val, q_val, q_val, q_offsets, v1, v1, ones1, q_area, outb(1)
+        )
+        self.kernel_density_density(
+            v1,
+            v1,
+            ones1,
+            ones1,
+            inds,
+            inds,
+            offsets,
+            outb(1),
+            outb(1),
+            outb(1),
+            outb(1),
+        )
+        self.kernel_density_shear(
+            v1,
+            v1,
+            v1,
+            ones1,
+            ones1,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            outb(1),
+            outb(1),
+            outb(1),
+            outb(1),
+        )
+        self.xipm_auto_corr_kernel(
+            v1,
+            v1,
+            v1,
+            v1,
+            ones1,
+            ones1,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            outb(1),
+            outb(1),
+            outb(1),
+        )
+        self.xipm_cross_corr_kernel(
+            v1,
+            v1,
+            v1,
+            v1,
+            ones1,
+            ones1,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            outb(1),
+            outb(1),
+            outb(1),
+            outb(1),
+            outb(1),
+            outb(1),
+        )
+        self.kernel_density_density_tomo_vectorized(
+            m, m, inds, inds, offsets, comb, comb, outb(1, 1), outb(1, 1)
+        )
+        self.kernel_density_shear_tomo_vectorized(
+            m,
+            shear,
+            m,
+            m,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            comb,
+            comb,
+            outb(1, 1),
+            outb(1, 1),
+        )
+        self.xipm_tomo_vectorized_kernel(
+            shear,
+            m,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            comb,
+            comb,
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
+        )
         self.kernel_3x2pt_tomo_fused(
-            m, shear, m, m,
-            inds, inds, rot, rot, offsets,
-            inds.astype(np.uint32), q_val.astype(map_dtype), q_val.astype(map_dtype),
-            q_val.astype(map_dtype), q_offsets, q_area.astype(map_dtype),
-            comb, comb, comb, comb, comb, comb,
-            outb(nz, 1), outb(nz, 1), outb(nz, 1), outb(nz, 1),
-            outb(1, 1), outb(1, 1), outb(1, 1),
-            outb(1, 1), outb(1, 1), outb(1, 1), outb(1, 1),
+            m,
+            shear,
+            m,
+            m,
+            inds,
+            inds,
+            rot,
+            rot,
+            offsets,
+            inds.astype(np.uint32),
+            q_val.astype(map_dtype),
+            q_val.astype(map_dtype),
+            q_val.astype(map_dtype),
+            q_offsets,
+            q_area.astype(map_dtype),
+            comb,
+            comb,
+            comb,
+            comb,
+            comb,
+            comb,
+            outb(nz, 1),
+            outb(nz, 1),
+            outb(nz, 1),
+            outb(nz, 1),
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
+            outb(1, 1),
         )
 
 
-def get_backend(device: Union[str, int] = 'auto') -> "Backend":
+def get_backend(device: Union[str, int] = "auto") -> "Backend":
     """
     Get the appropriate backend (numpy or cupy).
 
     Args:
         device (str or int): 'cpu', 'gpu', 'auto', or a GPU ID (int).
-                             If 'gpu' is specified, it uses the first available GPU (ID 0).
+                             If 'gpu' is specified, the first
+                             available GPU (ID 0) is used.
                              If an int is provided, it uses that specific GPU ID.
 
     Returns:
@@ -2618,14 +2917,14 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
     """
     if isinstance(device, int):
         device_id = device
-        device_type = 'gpu'
-    elif device.lower() == 'gpu':
+        device_type = "gpu"
+    elif device.lower() == "gpu":
         device_id = 0
-        device_type = 'gpu'
-    elif device.lower() == 'cpu':
+        device_type = "gpu"
+    elif device.lower() == "cpu":
         device_id = None
-        device_type = 'cpu'
-    elif device.lower() == 'auto':
+        device_type = "cpu"
+    elif device.lower() == "auto":
         # 'auto' promises a working backend, so probe for a usable *device*
         # and not merely for an importable cupy.  A driver/runtime mismatch,
         # CUDA_VISIBLE_DEVICES="", an unusable card -- all of these import
@@ -2638,11 +2937,11 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             if cupy.cuda.runtime.getDeviceCount() < 1:
                 raise RuntimeError("no CUDA device is visible")
             device_id = 0
-            device_type = 'gpu'
+            device_type = "gpu"
         except ImportError:
             warnings.warn("Cupy not installed, falling back to CPU (numpy).")
             device_id = None
-            device_type = 'cpu'
+            device_type = "cpu"
         except Exception as exc:
             warnings.warn(
                 f"Cupy is installed but no usable CUDA device was found "
@@ -2650,13 +2949,13 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 f"Pass device='gpu' or a device id to make this an error."
             )
             device_id = None
-            device_type = 'cpu'
+            device_type = "cpu"
     else:
         raise ValueError(f"Unknown device: {device}")
 
-    if device_type == 'cpu':
+    if device_type == "cpu":
         return Backend(
-            'numpy',
+            "numpy",
             np,
             xipm_cross_corr_kernel=_cpu_xipm_cross_corr_kernel,
             xipm_auto_corr_kernel=_cpu_xipm_auto_corr_kernel,
@@ -2665,21 +2964,22 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
             aperture_shear_kernel=_cpu_aperture_shear_kernel,
             kernel_density_density=_cpu_density_density_corr_kernel,
             kernel_density_shear=_cpu_density_shear_corr_kernel,
-            kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,
-            kernel_density_shear_tomo_vectorized=_cpu_density_shear_tomo_vectorized_kernel,
+            kernel_density_density_tomo_vectorized=_cpu_density_density_tomo_vectorized_kernel,  # noqa: E501
+            kernel_density_shear_tomo_vectorized=_cpu_density_shear_tomo_vectorized_kernel,  # noqa: E501
             kernel_3x2pt_tomo_fused=_cpu_3x2pt_tomo_fused_kernel,
             kernel_3pcf_multipoles=_cpu_3pcf_multipoles,
         )
 
-    elif device_type == 'gpu':
+    elif device_type == "gpu":
         try:
             import cupy
+
             # Check if the requested device is available
             if device_id >= cupy.cuda.runtime.getDeviceCount():
                 raise ValueError(f"GPU ID {device_id} not found.")
 
             return Backend(
-                'cupy',
+                "cupy",
                 cupy,
                 device_id,
                 xipm_cross_corr_kernel=_build_cupy_xipm_cross_corr_kernel(cupy),
@@ -2689,21 +2989,31 @@ def get_backend(device: Union[str, int] = 'auto') -> "Backend":
                 aperture_density_kernel=_build_cupy_aperture_density_kernel(cupy),
                 aperture_shear_kernel=_build_cupy_aperture_shear_kernel(cupy),
                 aperture_tomo_shear_kernel=_build_cupy_aperture_tomo_shear_kernel(cupy),
-                aperture_tomo_density_kernel=_build_cupy_aperture_tomo_density_kernel(cupy),
+                aperture_tomo_density_kernel=_build_cupy_aperture_tomo_density_kernel(
+                    cupy
+                ),
                 kernel_density_density=_build_cupy_density_density_corr_kernel(cupy),
                 kernel_density_shear=_build_cupy_density_shear_corr_kernel(cupy),
-                kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(cupy),
-                kernel_density_shear_tomo_vectorized=_build_cupy_density_shear_tomo_vectorized_kernel(cupy),
-                kernel_density_density_tomo_packed=_build_cupy_density_density_tomo_packed_kernel(cupy),
-                kernel_density_shear_tomo_packed=_build_cupy_density_shear_tomo_packed_kernel(cupy),
+                kernel_density_density_tomo_vectorized=_build_cupy_density_density_tomo_vectorized_kernel(  # noqa: E501
+                    cupy
+                ),
+                kernel_density_shear_tomo_vectorized=_build_cupy_density_shear_tomo_vectorized_kernel(  # noqa: E501
+                    cupy
+                ),
+                kernel_density_density_tomo_packed=_build_cupy_density_density_tomo_packed_kernel(  # noqa: E501
+                    cupy
+                ),
+                kernel_density_shear_tomo_packed=_build_cupy_density_shear_tomo_packed_kernel(  # noqa: E501
+                    cupy
+                ),
                 kernel_3x2pt_tomo_aperture=_build_cupy_3x2pt_tomo_aperture_kernel(cupy),
                 kernel_3x2pt_tomo_pairs=_build_cupy_3x2pt_tomo_pairs_kernel(cupy),
                 degrade_rows_kernel=_build_cupy_degrade_rows_kernel(cupy),
                 kernel_3pcf_multipoles=build_cupy_3pcf_multipoles_kernel(cupy),
             )
         except ImportError:
-            if device == 'auto':
+            if device == "auto":
                 warnings.warn("Cupy not installed, falling back to CPU (numpy).")
-                return Backend('numpy', np)
+                return Backend("numpy", np)
             else:
                 raise ImportError("Cupy not installed but GPU requested.")

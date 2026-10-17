@@ -14,7 +14,9 @@ def _frame(nside, pix):
     ra, dec = ph, np.pi / 2 - th
     p = np.stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)], -1)
     e = np.stack([-np.sin(ra), np.cos(ra), np.zeros_like(ra)], -1)
-    n = np.stack([-np.sin(dec) * np.cos(ra), -np.sin(dec) * np.sin(ra), np.cos(dec)], -1)
+    n = np.stack(
+        [-np.sin(dec) * np.cos(ra), -np.sin(dec) * np.sin(ra), np.cos(dec)], -1
+    )
     return p, e, n
 
 
@@ -72,7 +74,11 @@ def brute_force(nside, pix, fields, components, binedges, n_max):
                         continue
                     vk, wk = proj(f3, k, psi[a3], c3)
                     ph = np.exp(-1j * ns * (phi[a3] - phi[a2]))[:, None, None, None]
-                    acc[:, :, :, :, b[j], b[k]] += ph * np.einsum("a,b,c->abc", vc, vj, vk)[None]
-                    den[:, :, :, :, b[j], b[k]] += ph * np.einsum("a,b,c->abc", wc, wj, wk)[None]
+                    acc[:, :, :, :, b[j], b[k]] += (
+                        ph * np.einsum("a,b,c->abc", vc, vj, vk)[None]
+                    )
+                    den[:, :, :, :, b[j], b[k]] += (
+                        ph * np.einsum("a,b,c->abc", wc, wj, wk)[None]
+                    )
         num[label], norm[label] = acc, den
     return num, norm

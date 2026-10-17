@@ -206,8 +206,7 @@ class ZetaWriter:
         """
         if not isinstance(result, IntegratedResult):
             raise TypeError(
-                "submit() takes an IntegratedResult, "
-                f"not {type(result).__name__}"
+                "submit() takes an IntegratedResult, " f"not {type(result).__name__}"
             )
         self._raise_deferred()
         if self._closed:

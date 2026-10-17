@@ -33,14 +33,13 @@ returns the *full* angles (needed for odd multipoles) at both ends.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Tuple
 
 import healpy as hp
 import numpy as np
 from numba import njit, prange
 
 from .treecode import is_power_of_two
-
 
 # ── tiles ─────────────────────────────────────────────────────────────────
 
@@ -92,8 +91,17 @@ class TileSet:
         order = np.argsort(inv, kind="stable")
         indptr = np.zeros(tile_ids.size + 1, dtype=np.int64)
         indptr[1:] = np.cumsum(np.bincount(inv, minlength=tile_ids.size))
-        vec = np.asarray(hp.pix2vec(tile_nside, tile_ids, nest=True), dtype=np.float64).T
-        return cls(nside, tile_nside, tile_ids.astype(np.int64), indptr, order.astype(np.int64), vec)
+        vec = np.asarray(
+            hp.pix2vec(tile_nside, tile_ids, nest=True), dtype=np.float64
+        ).T
+        return cls(
+            nside,
+            tile_nside,
+            tile_ids.astype(np.int64),
+            indptr,
+            order.astype(np.int64),
+            vec,
+        )
 
     @property
     def n_tiles(self) -> int:
@@ -389,7 +397,9 @@ def unique_pairs(
     fastmath: bool = True,
 ) -> Tuple[np.ndarray, ...]:
     cos_edges = np.cos(np.asarray(binedges, dtype=core_xyz.dtype))
-    return _kernel("unique", fastmath)(core_ids, core_xyz, cand_ids, cand_xyz, cos_edges)
+    return _kernel("unique", fastmath)(
+        core_ids, core_xyz, cand_ids, cand_xyz, cos_edges
+    )
 
 
 def ordered_pairs(
@@ -401,4 +411,6 @@ def ordered_pairs(
     fastmath: bool = True,
 ) -> Tuple[np.ndarray, ...]:
     cos_edges = np.cos(np.asarray(binedges, dtype=core_xyz.dtype))
-    return _kernel("ordered", fastmath)(core_ids, core_xyz, cand_ids, cand_xyz, cos_edges)
+    return _kernel("ordered", fastmath)(
+        core_ids, core_xyz, cand_ids, cand_xyz, cos_edges
+    )

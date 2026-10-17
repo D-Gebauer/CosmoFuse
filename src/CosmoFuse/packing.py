@@ -93,9 +93,7 @@ def pack_patch(
 
 def block_edges(block_sizes: np.ndarray) -> np.ndarray:
     """Start/stop offsets of the per-group row blocks of one patch."""
-    return np.concatenate(
-        ([0], np.cumsum(np.asarray(block_sizes, dtype=np.int64)))
-    )
+    return np.concatenate(([0], np.cumsum(np.asarray(block_sizes, dtype=np.int64))))
 
 
 def unpack_rows(

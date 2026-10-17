@@ -114,7 +114,9 @@ def level_groups(level_nside: np.ndarray) -> List[Tuple[int, int, int]]:
     return groups
 
 
-def effective_resolution_factor(binedges: np.ndarray, level_nside: np.ndarray) -> np.ndarray:
+def effective_resolution_factor(
+    binedges: np.ndarray, level_nside: np.ndarray
+) -> np.ndarray:
     """theta_lo / pixel size for every bin."""
     resol = np.array([hp.nside2resol(int(ns)) for ns in level_nside])
     return np.asarray(binedges[:-1], dtype=np.float64) / resol
@@ -225,7 +227,9 @@ def build_patch_cells(
         indptr = np.zeros(n_cells + 1, dtype=np.int64)
         indptr[1:] = np.cumsum(np.bincount(inv_prev, minlength=n_cells))
         cells.child_indptr.append(indptr)
-        cells.child_indices.append(pix_ring[order] if level == 0 else order.astype(np.int64))
+        cells.child_indices.append(
+            pix_ring[order] if level == 0 else order.astype(np.int64)
+        )
 
         prev_ids = cell_ids
         prev_shift = shift
@@ -278,7 +282,10 @@ class TreecodeGeometry:
 
     @classmethod
     def from_patches(
-        cls, base_nside: int, coarse_nsides: Sequence[int], patches: Sequence[PatchCells]
+        cls,
+        base_nside: int,
+        coarse_nsides: Sequence[int],
+        patches: Sequence[PatchCells],
     ) -> "TreecodeGeometry":
         n_levels = len(coarse_nsides)
         n_patches = len(patches)
@@ -306,10 +313,14 @@ class TreecodeGeometry:
                 np.concatenate(indices) if indices else np.zeros(0, dtype=np.int64)
             )
             cell_ra.append(
-                np.concatenate([p.ra[level] for p in patches]) if patches else np.zeros(0)
+                np.concatenate([p.ra[level] for p in patches])
+                if patches
+                else np.zeros(0)
             )
             cell_dec.append(
-                np.concatenate([p.dec[level] for p in patches]) if patches else np.zeros(0)
+                np.concatenate([p.dec[level] for p in patches])
+                if patches
+                else np.zeros(0)
             )
         return cls(
             base_nside=int(base_nside),
@@ -324,10 +335,15 @@ class TreecodeGeometry:
     def slice_patches(self, start: int, stop: int) -> "TreecodeGeometry":
         """Geometry restricted to patches ``start:stop`` (cells renumbered)."""
         n_levels = self.n_levels
-        offsets = self.cell_offsets[:, start : stop + 1] - self.cell_offsets[:, start : start + 1]
+        offsets = (
+            self.cell_offsets[:, start : stop + 1]
+            - self.cell_offsets[:, start : start + 1]
+        )
         child_indptr, child_indices, cell_ra, cell_dec = [], [], [], []
         for level in range(n_levels):
-            a, b = int(self.cell_offsets[level, start]), int(self.cell_offsets[level, stop])
+            a, b = int(self.cell_offsets[level, start]), int(
+                self.cell_offsets[level, stop]
+            )
             indptr = self.child_indptr[level][a : b + 1]
             i0, i1 = int(indptr[0]), int(indptr[-1])
             idx = self.child_indices[level][i0:i1]

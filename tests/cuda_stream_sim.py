@@ -83,7 +83,8 @@ def _step():
     independent on real hardware, so every interleaving that respects the
     recorded dependencies is legal."""
     runnable = [
-        s for s in Stream.all_streams
+        s
+        for s in Stream.all_streams
         if s.queue and (s.queue[0][1] is None or s.queue[0][1].done)
     ]
     if not runnable:

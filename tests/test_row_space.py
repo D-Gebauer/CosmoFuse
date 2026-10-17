@@ -17,8 +17,8 @@ import numpy as np
 
 from CosmoFuse.correlations import Integrated3PCF
 
-from .test_gpu_kernel_emulation import emulated_gpu
 from ._results import fields_of
+from .test_gpu_kernel_emulation import emulated_gpu
 
 NSIDE = 32
 NPIX = hp.nside2npix(NSIDE)
@@ -29,7 +29,9 @@ def _make_mask() -> np.ndarray:
     dec = 90.0 - np.degrees(theta)
     mask = (dec > -50.0) & (dec < 25.0) & (np.degrees(phi) < 120.0)
     # a hole inside the footprint
-    hole = hp.query_disc(NSIDE, hp.ang2vec(np.radians(100.0), np.radians(40.0)), np.radians(4.0))
+    hole = hp.query_disc(
+        NSIDE, hp.ang2vec(np.radians(100.0), np.radians(40.0)), np.radians(4.0)
+    )
     mask[hole] = False
     return mask
 
@@ -140,7 +142,13 @@ class TestRowSpace(unittest.TestCase):
     def test_wrong_length_maps_raise(self):
         bad = np.ones((3, 2, NPIX // 4))
         with self.assertRaisesRegex(ValueError, "map arrays must have either npix"):
-            fields_of(self.corr.gg(bad, np.ones((3, NPIX // 4)), return_device=False, apertures=False), "xi_p", "xi_m")
+            fields_of(
+                self.corr.gg(
+                    bad, np.ones((3, NPIX // 4)), return_device=False, apertures=False
+                ),
+                "xi_p",
+                "xi_m",
+            )
 
     def test_geometry_outside_mask_raises(self):
         other = _make_corr(self.mask)
@@ -152,68 +160,220 @@ class TestRowSpace(unittest.TestCase):
 
     # -- every public measurement method ------------------------------------
     def test_aperture_single_map(self):
-        self.check(lambda c, f: c._m_a_single(
-            f(self.shear[0, 0]), f(self.shear[0, 1]), f(self.w_s[0]), return_device=False))
-        self.check(lambda c, f: c._m_g_single(
-            f(self.dens[0]), f(self.w_d[0]), return_device=False))
+        self.check(
+            lambda c, f: c._m_a_single(
+                f(self.shear[0, 0]),
+                f(self.shear[0, 1]),
+                f(self.w_s[0]),
+                return_device=False,
+            )
+        )
+        self.check(
+            lambda c, f: c._m_g_single(
+                f(self.dens[0]), f(self.w_d[0]), return_device=False
+            )
+        )
 
     def test_single_pair_2pcf(self):
         s, w = self.shear, self.w_s
-        self.check(lambda c, f: c._gg_single(
-            *(lambda g1, g2, ww: (g1, g2, g1, g2, ww, ww))(f(s[0, 0]), f(s[0, 1]), f(w[0])),
-            return_device=False))
-        self.check(lambda c, f: c._gg_single(
-            f(s[0, 0]), f(s[0, 1]), f(s[1, 0]), f(s[1, 1]), f(w[0]), f(w[1]), return_device=False))
-        self.check(lambda c, f: c._kk_single(
-            f(self.dens[0]), f(self.dens[1]), f(self.w_d[0]), f(self.w_d[1]), return_device=False))
-        self.check(lambda c, f: c._kg_single(
-            f(self.dens[0]), f(s[1, 0]), f(s[1, 1]), f(self.w_d[0]), f(w[1]), return_device=False))
+        self.check(
+            lambda c, f: c._gg_single(
+                *(lambda g1, g2, ww: (g1, g2, g1, g2, ww, ww))(
+                    f(s[0, 0]), f(s[0, 1]), f(w[0])
+                ),
+                return_device=False,
+            )
+        )
+        self.check(
+            lambda c, f: c._gg_single(
+                f(s[0, 0]),
+                f(s[0, 1]),
+                f(s[1, 0]),
+                f(s[1, 1]),
+                f(w[0]),
+                f(w[1]),
+                return_device=False,
+            )
+        )
+        self.check(
+            lambda c, f: c._kk_single(
+                f(self.dens[0]),
+                f(self.dens[1]),
+                f(self.w_d[0]),
+                f(self.w_d[1]),
+                return_device=False,
+            )
+        )
+        self.check(
+            lambda c, f: c._kg_single(
+                f(self.dens[0]),
+                f(s[1, 0]),
+                f(s[1, 1]),
+                f(self.w_d[0]),
+                f(w[1]),
+                return_device=False,
+            )
+        )
 
     def test_vectorized_tomography(self):
         for flips in ({}, {"flip_g1": True}, {"flip_g2": True}):
-            self.check(lambda c, f: fields_of(c.gg(
-                f(self.shear), f(self.w_s), return_device=False, **flips, apertures=False), "xi_p", "xi_m"))
-            self.check(lambda c, f: c.kg(
-                f(self.dens), f(self.shear), f(self.w_d), f(self.w_s), return_device=False, **flips).xi_t)
-        self.check(lambda c, f: c.kk(
-            f(self.dens), f(self.w_d), return_device=False, apertures=False).xi_g)
-        self.check(lambda c, f: c.kk(
-            f(self.dens), f(self.w_d), auto_only=True, return_device=False, apertures=False).xi_g)
+            self.check(
+                lambda c, f: fields_of(
+                    c.gg(
+                        f(self.shear),
+                        f(self.w_s),
+                        return_device=False,
+                        **flips,
+                        apertures=False,
+                    ),
+                    "xi_p",
+                    "xi_m",
+                )
+            )
+            self.check(
+                lambda c, f: c.kg(
+                    f(self.dens),
+                    f(self.shear),
+                    f(self.w_d),
+                    f(self.w_s),
+                    return_device=False,
+                    **flips,
+                ).xi_t
+            )
+        self.check(
+            lambda c, f: c.kk(
+                f(self.dens), f(self.w_d), return_device=False, apertures=False
+            ).xi_g
+        )
+        self.check(
+            lambda c, f: c.kk(
+                f(self.dens),
+                f(self.w_d),
+                auto_only=True,
+                return_device=False,
+                apertures=False,
+            ).xi_g
+        )
 
     def test_full_tomo_and_fused(self):
-        self.check(lambda c, f: fields_of(c.gg(
-            f(self.shear), f(self.w_s), flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"))
-        self.check(lambda c, f: fields_of(c.kk(
-            f(self.dens), f(self.w_d), return_device=False), "M_g", "xi_g"))
-        self.check(lambda c, f: fields_of(c.kg(
-            f(self.dens), f(self.shear), f(self.w_d), f(self.w_s),
-            m_g=True, m_a=True, flip_g2=True, return_device=False), "xi_t", "M_g", "M_a"))
+        self.check(
+            lambda c, f: fields_of(
+                c.gg(f(self.shear), f(self.w_s), flip_g1=True, return_device=False),
+                "M_a",
+                "xi_p",
+                "xi_m",
+            )
+        )
+        self.check(
+            lambda c, f: fields_of(
+                c.kk(f(self.dens), f(self.w_d), return_device=False), "M_g", "xi_g"
+            )
+        )
+        self.check(
+            lambda c, f: fields_of(
+                c.kg(
+                    f(self.dens),
+                    f(self.shear),
+                    f(self.w_d),
+                    f(self.w_s),
+                    m_g=True,
+                    m_a=True,
+                    flip_g2=True,
+                    return_device=False,
+                ),
+                "xi_t",
+                "M_g",
+                "M_a",
+            )
+        )
         for flips in ({}, {"flip_g1": True, "flip_g2": True}):
-            self.check(lambda c, f: tuple(np.array(o, copy=True) for o in fields_of(c.three_by_two_pt(
-                shear_maps=f(self.shear), k_maps=f(self.dens),
-                weights=(f(self.w_s), f(self.w_d)), return_device=False, **flips), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")))
+            self.check(
+                lambda c, f: tuple(
+                    np.array(o, copy=True)
+                    for o in fields_of(
+                        c.three_by_two_pt(
+                            shear_maps=f(self.shear),
+                            k_maps=f(self.dens),
+                            weights=(f(self.w_s), f(self.w_d)),
+                            return_device=False,
+                            **flips,
+                        ),
+                        "M_a",
+                        "M_g",
+                        "xi_p",
+                        "xi_m",
+                        "xi_g",
+                        "xi_t",
+                    )
+                )
+            )
         # unit weights are created in row space
-        self.check(lambda c, f: tuple(np.array(o, copy=True) for o in fields_of(c.three_by_two_pt(
-            shear_maps=f(self.shear), k_maps=f(self.dens), return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t")))
+        self.check(
+            lambda c, f: tuple(
+                np.array(o, copy=True)
+                for o in fields_of(
+                    c.three_by_two_pt(
+                        shear_maps=f(self.shear),
+                        k_maps=f(self.dens),
+                        return_device=False,
+                    ),
+                    "M_a",
+                    "M_g",
+                    "xi_p",
+                    "xi_m",
+                    "xi_g",
+                    "xi_t",
+                )
+            )
+        )
 
     def test_gpu_orchestrator_paths(self):
         cpu = {
-            "shear": fields_of(self.corr.gg(self.shear, self.w_s, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"),
-            "dd": self.corr.kk(self.dens, self.w_d, return_device=False, apertures=False).xi_g,
+            "shear": fields_of(
+                self.corr.gg(self.shear, self.w_s, flip_g1=True, return_device=False),
+                "M_a",
+                "xi_p",
+                "xi_m",
+            ),
+            "dd": self.corr.kk(
+                self.dens, self.w_d, return_device=False, apertures=False
+            ).xi_g,
             "ds": self.corr.kg(
-                self.dens, self.shear, self.w_d, self.w_s, return_device=False).xi_t,
+                self.dens, self.shear, self.w_d, self.w_s, return_device=False
+            ).xi_t,
         }
-        for corr, to_input in ((self.corr, self.rows), (self.corr, lambda a: a), (self.legacy, lambda a: a)):
+        for corr, to_input in (
+            (self.corr, self.rows),
+            (self.corr, lambda a: a),
+            (self.legacy, lambda a: a),
+        ):
             with emulated_gpu(corr) as calls:
                 corr.compute_context.Q_inds_dev = None
                 gpu = {
-                    "shear": fields_of(corr.gg(
-                        to_input(self.shear), to_input(self.w_s), flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"),
+                    "shear": fields_of(
+                        corr.gg(
+                            to_input(self.shear),
+                            to_input(self.w_s),
+                            flip_g1=True,
+                            return_device=False,
+                        ),
+                        "M_a",
+                        "xi_p",
+                        "xi_m",
+                    ),
                     "dd": corr.kk(
-                        to_input(self.dens), to_input(self.w_d), return_device=False, apertures=False).xi_g,
+                        to_input(self.dens),
+                        to_input(self.w_d),
+                        return_device=False,
+                        apertures=False,
+                    ).xi_g,
                     "ds": corr.kg(
-                        to_input(self.dens), to_input(self.shear), to_input(self.w_d),
-                        to_input(self.w_s), return_device=False).xi_t,
+                        to_input(self.dens),
+                        to_input(self.shear),
+                        to_input(self.w_d),
+                        to_input(self.w_s),
+                        return_device=False,
+                    ).xi_t,
                 }
                 self.assertGreater(calls["xipm_tomo_vectorized_kernel"], 0)
                 self.assertGreater(calls["aperture_tomo_shear_kernel"], 0)
@@ -229,15 +389,26 @@ class TestRowSpace(unittest.TestCase):
         corr = _make_corr(self.mask)
         corr.prepare()
         w = self.w_s.copy()
-        ref = fields_of(corr.gg(self.shear, w, return_device=False, apertures=False), "xi_p", "xi_m")
+        ref = fields_of(
+            corr.gg(self.shear, w, return_device=False, apertures=False), "xi_p", "xi_m"
+        )
         w.flags.writeable = False
         first = corr._coerce_map_input_array(w)
         self.assertIs(corr._coerce_map_input_array(w), first)
         self.assertEqual(first.shape[-1], corr.n_active)
-        self.assert_same(fields_of(corr.gg(self.shear, w, return_device=False, apertures=False), "xi_p", "xi_m"), ref)
+        self.assert_same(
+            fields_of(
+                corr.gg(self.shear, w, return_device=False, apertures=False),
+                "xi_p",
+                "xi_m",
+            ),
+            ref,
+        )
         # writable arrays are never memoised
         w2 = self.w_s.copy()
-        self.assertIsNot(corr._coerce_map_input_array(w2), corr._coerce_map_input_array(w2))
+        self.assertIsNot(
+            corr._coerce_map_input_array(w2), corr._coerce_map_input_array(w2)
+        )
 
     def test_pickle_roundtrip_keeps_row_space(self):
         import pickle
@@ -246,8 +417,23 @@ class TestRowSpace(unittest.TestCase):
         clone.prepare()
         self.assertTrue(np.array_equal(clone.row_pix, self.corr.row_pix))
         self.assert_same(
-            fields_of(clone.gg(self.rows(self.shear), self.rows(self.w_s), return_device=False, apertures=False), "xi_p", "xi_m"),
-            fields_of(self.corr.gg(self.shear, self.w_s, return_device=False, apertures=False), "xi_p", "xi_m"),
+            fields_of(
+                clone.gg(
+                    self.rows(self.shear),
+                    self.rows(self.w_s),
+                    return_device=False,
+                    apertures=False,
+                ),
+                "xi_p",
+                "xi_m",
+            ),
+            fields_of(
+                self.corr.gg(
+                    self.shear, self.w_s, return_device=False, apertures=False
+                ),
+                "xi_p",
+                "xi_m",
+            ),
         )
 
 

@@ -2,6 +2,7 @@ import itertools
 
 import numpy as np
 import pytest
+
 from CosmoFuse.correlation_helpers import (
     Q_crittenden,
     Q_schneider,
@@ -16,6 +17,7 @@ from CosmoFuse.correlation_helpers import (
     zeta_g_plus,
     zeta_g_t,
 )
+
 
 def test_get_pair_index():
     # nbins = 3
@@ -40,9 +42,9 @@ def _reference_zeta(center, annulus):
                 pair_idx = _get_pair_index(nzbins, z2, z3)
                 c = center[:, z1, :]
                 a = annulus[:, pair_idx, :, :]
-                out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(
-                    c, axis=1
-                )[:, None] * np.mean(a, axis=1)
+                out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(c, axis=1)[
+                    :, None
+                ] * np.mean(a, axis=1)
                 k += 1
     return out
 
@@ -76,6 +78,7 @@ def test_all_8_zeta_variants_match_reference():
     for measured, expected in expectations.values():
         assert measured.shape == (nmaps, 4, nbins)
         np.testing.assert_allclose(measured, expected)
+
 
 def test_calculate_all_zetas():
     nmaps = 2
@@ -228,17 +231,17 @@ def test_zeta_t_validation_raises_on_patch_count_mismatch():
         zeta_g_t(center, xi_t)
 
 
-
 # ---------------------------------------------------------------------------
 # Aperture filter functions
 # ---------------------------------------------------------------------------
+
 
 def test_Q_crittenden_formula():
     theta_Q_arcmin = 90.0
     theta_ap = np.radians(theta_Q_arcmin / 60)
     theta = np.linspace(0.0, 5 * theta_ap, 64)
-    expected = theta**2 / (4 * np.pi * theta_ap**4) * np.exp(
-        -(theta**2) / (2 * theta_ap**2)
+    expected = (
+        theta**2 / (4 * np.pi * theta_ap**4) * np.exp(-(theta**2) / (2 * theta_ap**2))
     )
     np.testing.assert_allclose(Q_crittenden(theta, theta_Q_arcmin), expected)
     # peak at theta = sqrt(2) * theta_ap
@@ -343,9 +346,7 @@ def test_reduction_does_not_depend_on_how_many_map_sets_are_stacked():
     one_at_a_time = {
         key: np.concatenate(
             [
-                calculate_all_zetas(
-                    M_a=center[i : i + 1], xi_p=annulus[i : i + 1]
-                )[key]
+                calculate_all_zetas(M_a=center[i : i + 1], xi_p=annulus[i : i + 1])[key]
                 for i in range(nmaps)
             ]
         )
@@ -438,9 +439,9 @@ def test_batching_falls_back_rather_than_promoting_a_dtype():
         xi_m=np.zeros((1, 3, 7, 2), dtype=np.float64),
     )
     mixed = calculate_all_zetas(**fields)
-    assert mixed["zeta_g_plus"].dtype == zeta_g_plus(
-        fields["M_g"], fields["xi_p"]
-    ).dtype
+    assert (
+        mixed["zeta_g_plus"].dtype == zeta_g_plus(fields["M_g"], fields["xi_p"]).dtype
+    )
 
     fields["xi_m"] = fields["xi_m"].astype(np.float32)
     uniform = calculate_all_zetas(**fields)
@@ -469,9 +470,9 @@ def _reference_cross_zeta(center, annulus):
         for comb in range(ncomb):
             c = center[:, z1, :]
             a = annulus[:, comb, :, :]
-            out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(
-                c, axis=1
-            )[:, None] * np.mean(a, axis=1)
+            out[:, k, :] = np.mean(c[:, :, None] * a, axis=1) - np.mean(c, axis=1)[
+                :, None
+            ] * np.mean(a, axis=1)
             k += 1
     return out
 
@@ -495,13 +496,19 @@ def test_all_eight_zetas_with_four_source_and_five_lens_bins():
     f = _mixed_fields()
     out = calculate_all_zetas(**f)
     assert set(out) == {
-        "zeta_a_plus", "zeta_a_minus", "zeta_g_g",
-        "zeta_g_plus", "zeta_g_minus", "zeta_a_g", "zeta_g_t", "zeta_a_t",
+        "zeta_a_plus",
+        "zeta_a_minus",
+        "zeta_g_g",
+        "zeta_g_plus",
+        "zeta_g_minus",
+        "zeta_a_g",
+        "zeta_g_t",
+        "zeta_a_t",
     }
     # same-sample estimators keep the upper-triangle layout
-    assert out["zeta_a_plus"].shape[1] == 4 * 5 * 6 // 6      # C(4+2, 3) = 20
+    assert out["zeta_a_plus"].shape[1] == 4 * 5 * 6 // 6  # C(4+2, 3) = 20
     assert out["zeta_a_minus"].shape[1] == 20
-    assert out["zeta_g_g"].shape[1] == 5 * 6 * 7 // 6         # C(5+2, 3) = 35
+    assert out["zeta_g_g"].shape[1] == 5 * 6 * 7 // 6  # C(5+2, 3) = 35
     # cross-sample estimators are centre-major, centre x annulus
     assert out["zeta_g_plus"].shape[1] == 5 * 10
     assert out["zeta_g_minus"].shape[1] == 5 * 10
@@ -522,8 +529,11 @@ def test_mixed_tomography_matches_the_definition():
         ("zeta_a_t", "M_a", "xi_t"),
     ):
         np.testing.assert_allclose(
-            out[name], _reference_cross_zeta(f[centre], f[annulus]),
-            rtol=0, atol=1e-14, err_msg=name,
+            out[name],
+            _reference_cross_zeta(f[centre], f[annulus]),
+            rtol=0,
+            atol=1e-14,
+            err_msg=name,
         )
     for name, centre, annulus in (
         ("zeta_a_plus", "M_a", "xi_p"),
@@ -531,8 +541,11 @@ def test_mixed_tomography_matches_the_definition():
         ("zeta_g_g", "M_g", "xi_g"),
     ):
         np.testing.assert_allclose(
-            out[name], _reference_zeta(f[centre], f[annulus]),
-            rtol=0, atol=1e-14, err_msg=name,
+            out[name],
+            _reference_zeta(f[centre], f[annulus]),
+            rtol=0,
+            atol=1e-14,
+            err_msg=name,
         )
 
 
@@ -563,7 +576,7 @@ def test_equal_source_and_lens_counts_keep_the_old_layout_by_default():
     """
     f = _mixed_fields(n_source=4, n_lens=4)
     out = calculate_all_zetas(**f)
-    assert out["zeta_g_plus"].shape[1] == 20           # upper triangle, as before
+    assert out["zeta_g_plus"].shape[1] == 20  # upper triangle, as before
     assert out["zeta_a_g"].shape[1] == 20
 
     forced = calculate_all_zetas(
@@ -571,8 +584,10 @@ def test_equal_source_and_lens_counts_keep_the_old_layout_by_default():
     )
     assert forced["zeta_g_plus"].shape[1] == 4 * 10
     np.testing.assert_allclose(
-        forced["zeta_g_plus"], _reference_cross_zeta(f["M_g"], f["xi_p"]),
-        rtol=0, atol=1e-14,
+        forced["zeta_g_plus"],
+        _reference_cross_zeta(f["M_g"], f["xi_p"]),
+        rtol=0,
+        atol=1e-14,
     )
     # the same-sample estimators are untouched by the override
     np.testing.assert_array_equal(forced["zeta_a_plus"], out["zeta_a_plus"])
@@ -587,8 +602,10 @@ def test_symmetric_override_rejects_an_unknown_estimator_name():
 def test_symmetric_override_beats_xi_t_symmetric():
     f = _mixed_fields(n_source=4, n_lens=4)
     out = calculate_all_zetas(
-        M_a=f["M_a"], xi_t=f["xi_p"],          # 10 combinations = triangle of 4
-        xi_t_symmetric=True, symmetric={"zeta_a_t": False},
+        M_a=f["M_a"],
+        xi_t=f["xi_p"],  # 10 combinations = triangle of 4
+        xi_t_symmetric=True,
+        symmetric={"zeta_a_t": False},
     )
     assert out["zeta_a_t"].shape[1] == 4 * 10
 
@@ -603,5 +620,10 @@ def test_zeta_cross_triplets_is_the_row_order():
             zip(indices.centers.tolist(), indices.pairs.tolist())
         ) == Integrated3PCF.zeta_cross_triplets(n_centre, n_comb)
     assert Integrated3PCF.zeta_cross_triplets(2, 3) == [
-        (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 1),
+        (1, 2),
     ]

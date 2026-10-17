@@ -13,12 +13,11 @@ import healpy as hp
 import numpy as np
 import pytest
 
-from CosmoFuse import Integrated3PCF, calculate_all_zetas
-from CosmoFuse import packing
+from CosmoFuse import Integrated3PCF, calculate_all_zetas, packing
 
+from ._results import fields_of
 from .cuda_emulation import LAUNCH_LOG
 from .test_gpu_kernel_emulation import emulated_gpu
-from ._results import fields_of
 
 NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
@@ -30,10 +29,20 @@ def make_setup(pack, k=2.0, n_side_centers=4):
     rng = np.random.default_rng(1)
     mask[rng.choice(NPIX, NPIX // 30, replace=False)] = False
     corr = Integrated3PCF.from_mask(
-        NSIDE, mask, n_side_centers, patch_size=600, theta_Q=200, f_mask=0.3,
-        nbins=5, theta_min=120, theta_max=1100, device="cpu",
-        map_precision="float64", rotation_precision="float64",
-        resolution_factor=k, pack_pairs=pack,
+        NSIDE,
+        mask,
+        n_side_centers,
+        patch_size=600,
+        theta_Q=200,
+        f_mask=0.3,
+        nbins=5,
+        theta_min=120,
+        theta_max=1100,
+        device="cpu",
+        map_precision="float64",
+        rotation_precision="float64",
+        resolution_factor=k,
+        pack_pairs=pack,
     )
     corr.preprocess()
     return corr, mask
@@ -52,14 +61,17 @@ class TestCodec(unittest.TestCase):
         err = np.angle(back * np.conj(z))
         self.assertLessEqual(np.max(np.abs(err)), np.pi / 65536 * (1 + 1e-9))
         # round-to-nearest: unbiased, uniform error
-        self.assertLess(abs(err.mean()), 4 * (2 * np.pi / 65536) / np.sqrt(12 * err.size))
+        self.assertLess(
+            abs(err.mean()), 4 * (2 * np.pi / 65536) / np.sqrt(12 * err.size)
+        )
         self.assertEqual(packing.decode_angles(codes, np.complex64).dtype, np.complex64)
 
     def test_pack_patch_reconstructs_rows(self):
         rng = np.random.default_rng(2)
         counts = np.array([5, 0, 7, 3])
         rows = np.concatenate(
-            [rng.integers(100, 140, (2, 12)), rng.integers(9000, 9010, (2, 3))], axis=1)
+            [rng.integers(100, 140, (2, 12)), rng.integers(9000, 9010, (2, 3))], axis=1
+        )
         exp = np.exp(1j * rng.uniform(-3, 3, (2, 15)))
         groups = [(64, 0, 3), (32, 3, 4)]
         packed, blocks, block_of_bin = packing.pack_patch(rows, exp, counts, groups)
@@ -76,8 +88,11 @@ class TestCodec(unittest.TestCase):
         try:
             with self.assertRaisesRegex(ValueError, "pack_pairs=False"):
                 packing.pack_patch(
-                    np.arange(20).reshape(2, 10), np.ones((2, 10), complex),
-                    np.array([10]), [(64, 0, 1)])
+                    np.arange(20).reshape(2, 10),
+                    np.ones((2, 10), complex),
+                    np.array([10]),
+                    [(64, 0, 1)],
+                )
         finally:
             packing.MAX_LOCAL_ROWS = old
 
@@ -92,9 +107,9 @@ class TestPackedMeasurement(unittest.TestCase):
         cls.exact, cls.mask = make_setup(pack=False)
         cls.packed, _ = make_setup(pack=True)
         rng = np.random.default_rng(3)
-        nz = 2          # pure-Python kernels under NUMBA_DISABLE_JIT: keep it small
+        nz = 2  # pure-Python kernels under NUMBA_DISABLE_JIT: keep it small
         cls.nmaps = 4
-        cls.shear = rng.normal(size=(cls.nmaps, nz, 2, NPIX)) * 0.3   # shape-noise like
+        cls.shear = rng.normal(size=(cls.nmaps, nz, 2, NPIX)) * 0.3  # shape-noise like
         cls.w = rng.uniform(0.2, 2.0, size=(nz, NPIX))
 
     def test_geometry(self):
@@ -107,23 +122,35 @@ class TestPackedMeasurement(unittest.TestCase):
         offsets = np.asarray(b.tot_bins_reduceat_dev)
         block = np.repeat(np.arange(offsets.size - 1), np.diff(offsets))
         rows = ctx.packed_perm_dev[
-            ctx.packed_row_base_dev[block][:, None] + ctx.packed_pairs_dev[:, :2]]
+            ctx.packed_row_base_dev[block][:, None] + ctx.packed_pairs_dev[:, :2]
+        ]
         np.testing.assert_array_equal(rows.T, np.asarray(a.inds_dev))
         # CPU kernels use the same quantised rotations
         np.testing.assert_array_equal(
             np.asarray(b.exp2phi_dev),
-            packing.decode_angles(ctx.packed_pairs_dev[:, 2:].T, np.complex128))
+            packing.decode_angles(ctx.packed_pairs_dev[:, 2:].T, np.complex128),
+        )
         err = np.angle(np.asarray(b.exp2phi_dev) * np.conj(np.asarray(a.exp2phi_dev)))
         self.assertLessEqual(np.max(np.abs(err)), np.pi / 65536 * (1 + 1e-6))
         self.assertIsNone(a.compute_context.packed_pairs_dev)
 
     def test_emulated_gpu_packed_kernel_equals_cpu(self):
         corr = self.packed
-        cpu = fields_of(corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
+        cpu = fields_of(
+            corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False),
+            "M_a",
+            "xi_p",
+            "xi_m",
+        )
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
             del LAUNCH_LOG[:]
-            gpu = fields_of(corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m")
+            gpu = fields_of(
+                corr.gg(self.shear[0], self.w, flip_g1=True, return_device=False),
+                "M_a",
+                "xi_p",
+                "xi_m",
+            )
             self.assertEqual(calls["xipm_tomo_packed_kernel"], 1)
             self.assertIn("gpu_tiled_packed_reduce_xipm", LAUNCH_LOG)
             self.assertNotIn("gpu_tiled_tomo_reduce_xipm", LAUNCH_LOG)
@@ -141,15 +168,36 @@ class TestPackedMeasurement(unittest.TestCase):
         calls_ref = dict(
             dd=lambda: fields_of(corr.kk(dens, wd, return_device=False), "M_g", "xi_g"),
             dd_auto=lambda: corr.kk(
-                dens, wd, auto_only=True, return_device=False, apertures=False).xi_g,
-            ggl=lambda: fields_of(corr.kg(
-                dens, self.shear[0], wd, self.w, m_g=True, return_device=False), "xi_t", "M_g"),
+                dens, wd, auto_only=True, return_device=False, apertures=False
+            ).xi_g,
+            ggl=lambda: fields_of(
+                corr.kg(dens, self.shear[0], wd, self.w, m_g=True, return_device=False),
+                "xi_t",
+                "M_g",
+            ),
             ggl_sub=lambda: corr.kg(
-                dens, self.shear[0], wd, self.w, combinations=[(1, 0)],
-                return_device=False).xi_t,
-            fused=lambda: fields_of(corr.three_by_two_pt(
-                shear_maps=self.shear[0], k_maps=dens,
-                weights={"shear": self.w, "density": wd}, flip_g1=True, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+                dens,
+                self.shear[0],
+                wd,
+                self.w,
+                combinations=[(1, 0)],
+                return_device=False,
+            ).xi_t,
+            fused=lambda: fields_of(
+                corr.three_by_two_pt(
+                    shear_maps=self.shear[0],
+                    k_maps=dens,
+                    weights={"shear": self.w, "density": wd},
+                    flip_g1=True,
+                    return_device=False,
+                ),
+                "M_a",
+                "M_g",
+                "xi_p",
+                "xi_m",
+                "xi_g",
+                "xi_t",
+            ),
         )
         cpu = {k: f() for k, f in calls_ref.items()}
         with emulated_gpu(corr) as calls:
@@ -165,14 +213,19 @@ class TestPackedMeasurement(unittest.TestCase):
         self.assertEqual(calls["kernel_density_density_tomo_vectorized"], 0)
         self.assertEqual(calls["kernel_density_shear_tomo_vectorized"], 0)
         self.assertEqual(calls["xipm_tomo_vectorized_kernel"], 0)
-        for name in ("gpu_tiled_packed_reduce_dd", "gpu_tiled_packed_reduce_ds",
-                     "gpu_tiled_packed_reduce_3x2pt",
-                     "gpu_3x2pt_tomo_aperture_fused"):
+        for name in (
+            "gpu_tiled_packed_reduce_dd",
+            "gpu_tiled_packed_reduce_ds",
+            "gpu_tiled_packed_reduce_3x2pt",
+            "gpu_3x2pt_tomo_aperture_fused",
+        ):
             self.assertIn(name, LAUNCH_LOG)
         for key in cpu:
             for x, y in zip(cpu[key], gpu[key]):
                 x, y = np.asarray(x), np.asarray(y)
-                np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key)
+                np.testing.assert_allclose(
+                    y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key
+                )
 
     def test_gpu_without_unpacked_geometry(self):
         """On a real GPU the 24 B geometry is not uploaded: no tomographic
@@ -180,10 +233,24 @@ class TestPackedMeasurement(unittest.TestCase):
         corr, _ = make_setup(pack=True)
         dens = np.ones((2, NPIX)) + 0.1 * self.shear[1, :, 0]
         ref = dict(
-            ss=fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
+            ss=fields_of(
+                corr.gg(self.shear[0], self.w, return_device=False, apertures=False),
+                "xi_p",
+                "xi_m",
+            ),
             dd=corr.kk(dens, self.w, return_device=False, apertures=False).xi_g,
             ds=corr.kg(dens, self.shear[0], self.w, self.w, return_device=False).xi_t,
-            fused=fields_of(corr.three_by_two_pt(shear_maps=self.shear[0], k_maps=dens, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+            fused=fields_of(
+                corr.three_by_two_pt(
+                    shear_maps=self.shear[0], k_maps=dens, return_device=False
+                ),
+                "M_a",
+                "M_g",
+                "xi_p",
+                "xi_m",
+                "xi_g",
+                "xi_t",
+            ),
         )
         with emulated_gpu(corr):
             corr.inds_dev = None
@@ -191,29 +258,67 @@ class TestPackedMeasurement(unittest.TestCase):
             corr.compute_context.inds_i_dev = corr.compute_context.inds_j_dev = None
             corr.compute_context.Q_inds_dev = None
             got = dict(
-                ss=fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
+                ss=fields_of(
+                    corr.gg(
+                        self.shear[0], self.w, return_device=False, apertures=False
+                    ),
+                    "xi_p",
+                    "xi_m",
+                ),
                 dd=corr.kk(dens, self.w, return_device=False, apertures=False).xi_g,
-                ds=corr.kg(dens, self.shear[0], self.w, self.w, return_device=False).xi_t,
-                fused=fields_of(corr.three_by_two_pt(shear_maps=self.shear[0], k_maps=dens, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+                ds=corr.kg(
+                    dens, self.shear[0], self.w, self.w, return_device=False
+                ).xi_t,
+                fused=fields_of(
+                    corr.three_by_two_pt(
+                        shear_maps=self.shear[0], k_maps=dens, return_device=False
+                    ),
+                    "M_a",
+                    "M_g",
+                    "xi_p",
+                    "xi_m",
+                    "xi_g",
+                    "xi_t",
+                ),
             )
-            as_list = lambda r: list(r) if isinstance(r, tuple) else [r]
+
+            def as_list(r):
+                return list(r) if isinstance(r, tuple) else [r]
+
             for key in ref:
                 for x, y in zip(as_list(ref[key]), as_list(got[key])):
                     x, y = np.asarray(x), np.asarray(y)
-                    np.testing.assert_allclose(y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key)
+                    np.testing.assert_allclose(
+                        y, x, rtol=0, atol=1e-13 * np.max(np.abs(x)), err_msg=key
+                    )
             with self.assertRaisesRegex(NotImplementedError, "pack_pairs=False"):
                 corr._gg_single(
-                    self.shear[0, 0, 0], self.shear[0, 0, 1], self.shear[0, 0, 0],
-                    self.shear[0, 0, 1], self.w[0], self.w[0])
+                    self.shear[0, 0, 0],
+                    self.shear[0, 0, 1],
+                    self.shear[0, 0, 0],
+                    self.shear[0, 0, 1],
+                    self.w[0],
+                    self.w[0],
+                )
 
     def test_quantisation_errors_average_out(self):
-        exact = [fields_of(self.exact.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m") for m in self.shear]
-        packed = [fields_of(self.packed.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m") for m in self.shear]
+        exact = [
+            fields_of(
+                self.exact.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m"
+            )
+            for m in self.shear
+        ]
+        packed = [
+            fields_of(
+                self.packed.gg(m, self.w, return_device=False), "M_a", "xi_p", "xi_m"
+            )
+            for m in self.shear
+        ]
         for idx, name in ((1, "xi+"), (2, "xi-")):
-            e = np.array([r[idx] for r in exact])          # (maps, comb, patch, bin)
+            e = np.array([r[idx] for r in exact])  # (maps, comb, patch, bin)
             p = np.array([r[idx] for r in packed])
-            self.assertFalse(np.array_equal(e, p))         # it *is* a different rounding
-            sigma = e.std(axis=(0, 2), keepdims=True)      # scatter over maps x patches
+            self.assertFalse(np.array_equal(e, p))  # it *is* a different rounding
+            sigma = e.std(axis=(0, 2), keepdims=True)  # scatter over maps x patches
             z = (p - e) / sigma
             # every single estimate moves by a tiny fraction of its own noise
             self.assertLess(np.max(np.abs(z)), 3e-4, name)
@@ -223,18 +328,24 @@ class TestPackedMeasurement(unittest.TestCase):
             self.assertLess(abs(z.mean()), 5 * z.std() / np.sqrt(n), name)
             # ... and errors do not accumulate in averages over patches:
             # the shift of the patch mean shrinks like 1/sqrt(n_patches)
-            shift_mean = (p.mean(axis=2) - e.mean(axis=2)) / (sigma[:, :, 0] / np.sqrt(e.shape[2]))
+            shift_mean = (p.mean(axis=2) - e.mean(axis=2)) / (
+                sigma[:, :, 0] / np.sqrt(e.shape[2])
+            )
             self.assertLess(np.max(np.abs(shift_mean)), 3e-4, name)
         # aperture mass does not use pair rotations at all
         for a, b in zip(exact, packed):
             self.assertTrue(np.array_equal(a[0], b[0]))
         # i3PCF level
-        ze = calculate_all_zetas(M_a=np.array([r[0] for r in exact]),
-                                 xi_p=np.array([r[1] for r in exact]),
-                                 xi_m=np.array([r[2] for r in exact]))
-        zp = calculate_all_zetas(M_a=np.array([r[0] for r in packed]),
-                                 xi_p=np.array([r[1] for r in packed]),
-                                 xi_m=np.array([r[2] for r in packed]))
+        ze = calculate_all_zetas(
+            M_a=np.array([r[0] for r in exact]),
+            xi_p=np.array([r[1] for r in exact]),
+            xi_m=np.array([r[2] for r in exact]),
+        )
+        zp = calculate_all_zetas(
+            M_a=np.array([r[0] for r in packed]),
+            xi_p=np.array([r[1] for r in packed]),
+            xi_m=np.array([r[2] for r in packed]),
+        )
         for key in ze:
             if ze[key] is None:
                 continue
@@ -246,14 +357,29 @@ class TestPackedMeasurement(unittest.TestCase):
 
         corr, _ = make_setup(pack=True, k=None, n_side_centers=2)
         ref, _ = make_setup(pack=False, k=None, n_side_centers=2)
-        a = fields_of(corr.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")
-        b = fields_of(ref.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")
+        a = fields_of(
+            corr.gg(self.shear[0], self.w, return_device=False, apertures=False),
+            "xi_p",
+            "xi_m",
+        )
+        b = fields_of(
+            ref.gg(self.shear[0], self.w, return_device=False, apertures=False),
+            "xi_p",
+            "xi_m",
+        )
         for x, y in zip(a, b):
             np.testing.assert_allclose(x, y, rtol=0, atol=2e-4 * np.max(np.abs(y)))
         clone = pickle.loads(pickle.dumps(corr))
         self.assertTrue(clone.pack_pairs)
         clone.prepare()
-        for x, y in zip(a, fields_of(clone.gg(self.shear[0], self.w, return_device=False, apertures=False), "xi_p", "xi_m")):
+        for x, y in zip(
+            a,
+            fields_of(
+                clone.gg(self.shear[0], self.w, return_device=False, apertures=False),
+                "xi_p",
+                "xi_m",
+            ),
+        ):
             self.assertTrue(np.array_equal(x, y))
 
 

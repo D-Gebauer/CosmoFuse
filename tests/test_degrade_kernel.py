@@ -21,9 +21,9 @@ import pytest
 
 from CosmoFuse import Integrated3PCF
 
+from ._results import fields_of
 from .cuda_emulation import LAUNCH_LOG
 from .test_gpu_kernel_emulation import emulated_gpu
-from ._results import fields_of
 
 NSIDE = 64
 NPIX = hp.nside2npix(NSIDE)
@@ -57,10 +57,14 @@ def reset_corr(corr):
     return corr
 
 
-def make_corr(k=2.0, aperture_nside=None, map_precision="float64",
-              accumulation_precision="same", n_side_centers=4):
-    key = (k, aperture_nside, map_precision, accumulation_precision,
-           n_side_centers)
+def make_corr(
+    k=2.0,
+    aperture_nside=None,
+    map_precision="float64",
+    accumulation_precision="same",
+    n_side_centers=4,
+):
+    key = (k, aperture_nside, map_precision, accumulation_precision, n_side_centers)
     cached = _CORR_CACHE.get(key)
     if cached is not None:
         return reset_corr(cached)
@@ -68,18 +72,29 @@ def make_corr(k=2.0, aperture_nside=None, map_precision="float64",
     return corr
 
 
-def _build_corr(k, aperture_nside, map_precision, accumulation_precision,
-                n_side_centers):
+def _build_corr(
+    k, aperture_nside, map_precision, accumulation_precision, n_side_centers
+):
     theta, phi = hp.pix2ang(NSIDE, np.arange(NPIX))
     mask = (np.degrees(phi) < 200.0) & (np.abs(90 - np.degrees(theta)) < 55)
     rng = np.random.default_rng(1)
     mask[rng.choice(NPIX, NPIX // 30, replace=False)] = False
     corr = Integrated3PCF.from_mask(
-        NSIDE, mask, n_side_centers, patch_size=600, theta_Q=200, f_mask=0.3,
-        nbins=4, theta_min=120, theta_max=1100, device="cpu",
-        map_precision=map_precision, rotation_precision="float64",
+        NSIDE,
+        mask,
+        n_side_centers,
+        patch_size=600,
+        theta_Q=200,
+        f_mask=0.3,
+        nbins=4,
+        theta_min=120,
+        theta_max=1100,
+        device="cpu",
+        map_precision=map_precision,
+        rotation_precision="float64",
         accumulation_precision=accumulation_precision,
-        resolution_factor=k, aperture_nside=aperture_nside,
+        resolution_factor=k,
+        aperture_nside=aperture_nside,
     )
     corr.preprocess()
     return corr
@@ -101,8 +116,9 @@ class FusedDegradeBase(unittest.TestCase):
         """Run `fn(corr)` with the fused kernels active."""
         with emulated_gpu(corr) as calls:
             corr.compute_context.Q_inds_dev = None
-            with patch.object(Integrated3PCF, "_use_fused_degrade",
-                              lambda self, w: True):
+            with patch.object(
+                Integrated3PCF, "_use_fused_degrade", lambda self, w: True
+            ):
                 del LAUNCH_LOG[:]
                 out = fn(corr)
         corr.compute_context.Q_inds_dev = None
@@ -130,8 +146,8 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
     def test_kernels_are_actually_used(self):
         corr = self.corr
         _, calls = self.fused(
-            corr, lambda c: c._expand_rows(
-                (self.shear[0], self.shear[1]), self.w, "pairs")
+            corr,
+            lambda c: c._expand_rows((self.shear[0], self.shear[1]), self.w, "pairs"),
         )
         self.assertIn("gpu_degrade_level", LAUNCH_LOG)
         self.assertIn("gpu_degrade_finalize", LAUNCH_LOG)
@@ -146,7 +162,10 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
         ):
             for blocks in ("pairs", "all"):
                 with self.subTest(values=name, blocks=blocks):
-                    call = lambda c: c._expand_rows(values, self.w, blocks)
+
+                    def call(c):
+                        return c._expand_rows(values, self.w, blocks)
+
                     (v_f, w_f), _ = self.fused(corr, call)
                     v_s, w_s = self.sparse(corr, call)
                     self.assert_close(tuple(v_f), tuple(v_s), f"{name}/{blocks}")
@@ -158,19 +177,26 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
         n_ap = corr.n_aperture_cells
         self.assertGreater(n_ap, 0)
         n_active = corr.n_active
-        call = lambda c: c._expand_rows((self.dens,), self.w, "aperture")
+
+        def call(c):
+            return c._expand_rows((self.dens,), self.w, "aperture")
+
         (v_f, w_f), _ = self.fused(corr, call)
         # aperture rows filled, treecode rows untouched -> exactly zero
-        self.assertTrue(np.any(np.asarray(w_f)[:, n_active:n_active + n_ap] != 0))
-        self.assertTrue(np.all(np.asarray(w_f)[:, n_active + n_ap:] == 0))
-        self.assertTrue(np.all(np.asarray(v_f[0])[:, n_active + n_ap:] == 0))
+        self.assertTrue(np.any(np.asarray(w_f)[:, n_active : n_active + n_ap] != 0))
+        self.assertTrue(np.all(np.asarray(w_f)[:, n_active + n_ap :] == 0))
+        self.assertTrue(np.all(np.asarray(v_f[0])[:, n_active + n_ap :] == 0))
 
     def test_aperture_level_matches(self):
         corr = make_corr(aperture_nside=32)
         for blocks in ("aperture", "all"):
             with self.subTest(blocks=blocks):
-                call = lambda c: c._expand_rows(
-                    (self.shear[0], self.shear[1]), self.w, blocks)
+
+                def call(c):
+                    return c._expand_rows(
+                        (self.shear[0], self.shear[1]), self.w, blocks
+                    )
+
                 (v_f, w_f), _ = self.fused(corr, call)
                 v_s, w_s = self.sparse(corr, call)
                 self.assert_close(tuple(v_f), tuple(v_s), f"aperture/{blocks}")
@@ -180,7 +206,10 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
         """T3, independently of either implementation: a level-0 cell must
         hold sum(w) and sum(w*v)/sum(w) over its member pixels."""
         corr = self.corr
-        call = lambda c: c._expand_rows((self.dens,), self.w, "pairs")
+
+        def call(c):
+            return c._expand_rows((self.dens,), self.w, "pairs")
+
         (v_f, w_f), _ = self.fused(corr, call)
         v_f, w_f = np.asarray(v_f[0]), np.asarray(w_f)
         n_active, n_ap = corr.n_active, corr.n_aperture_cells
@@ -193,7 +222,7 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
         start = int(tree.level_starts(first=n_ap)[0])
         checked = 0
         for cell in range(0, min(400, int(indptr.size - 1))):
-            child = indices[int(indptr[cell]):int(indptr[cell + 1])].astype(np.int64)
+            child = indices[int(indptr[cell]) : int(indptr[cell + 1])].astype(np.int64)
             if child.size == 0:
                 continue
             for lead in range(self.w.shape[0]):
@@ -207,8 +236,10 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
 
     def test_deterministic(self):
         corr = self.corr
-        call = lambda c: c._expand_rows(
-            (self.shear[0], self.shear[1]), self.w, "all")
+
+        def call(c):
+            return c._expand_rows((self.shear[0], self.shear[1]), self.w, "all")
+
         (a, wa), _ = self.fused(corr, call)
         (b, wb), _ = self.fused(corr, call)
         self.assertTrue(np.array_equal(np.asarray(a[0]), np.asarray(b[0])))
@@ -218,18 +249,22 @@ class TestRowsMatchTheSparseChain(FusedDegradeBase):
         """With map_precision=float32 and accumulation_precision=float64 the
         level chain must run at float64, as the sparse path's acc-dtype
         intermediates do -- not at the map dtype."""
-        corr = make_corr(map_precision="float32",
-                         accumulation_precision="float64")
+        corr = make_corr(map_precision="float32", accumulation_precision="float64")
         w32 = self.w.astype(np.float32)
         d32 = self.dens.astype(np.float32)
-        call = lambda c: c._expand_rows((d32,), w32, "pairs")
+
+        def call(c):
+            return c._expand_rows((d32,), w32, "pairs")
+
         (v_f, w_f), _ = self.fused(corr, call)
         v_s, w_s = self.sparse(corr, call)
         self.assertEqual(np.asarray(w_f).dtype, np.float32)
-        self.assert_close(np.asarray(v_f[0]), np.asarray(v_s[0]),
-                          "float32 maps", atol_scale=1e-6)
-        self.assert_close(np.asarray(w_f), np.asarray(w_s),
-                          "float32 weights", atol_scale=1e-6)
+        self.assert_close(
+            np.asarray(v_f[0]), np.asarray(v_s[0]), "float32 maps", atol_scale=1e-6
+        )
+        self.assert_close(
+            np.asarray(w_f), np.asarray(w_s), "float32 weights", atol_scale=1e-6
+        )
 
 
 @pytest.mark.slow
@@ -239,21 +274,37 @@ class TestPublicMethodsMatch(FusedDegradeBase):
     def test_methods(self):
         corr = self.corr
         cases = {
-            "gg": lambda c: fields_of(c.gg(
-                self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"),
-            "gg_pairs": lambda c: fields_of(c.gg(
-                self.shear, self.w, return_device=False, apertures=False), "xi_p", "xi_m"),
-            "kk": lambda c: fields_of(c.kk(
-                self.dens, self.w, return_device=False), "M_g", "xi_g"),
+            "gg": lambda c: fields_of(
+                c.gg(self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"
+            ),
+            "gg_pairs": lambda c: fields_of(
+                c.gg(self.shear, self.w, return_device=False, apertures=False),
+                "xi_p",
+                "xi_m",
+            ),
+            "kk": lambda c: fields_of(
+                c.kk(self.dens, self.w, return_device=False), "M_g", "xi_g"
+            ),
             "kg": lambda c: c.kg(
-                self.dens, self.shear, self.w, self.w, return_device=False).xi_t,
-            "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(
-                shear_maps=self.shear, k_maps=self.dens,
-                weights={"shear": self.w, "density": self.w},
-                return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+                self.dens, self.shear, self.w, self.w, return_device=False
+            ).xi_t,
+            "three_by_two_pt": lambda c: fields_of(
+                c.three_by_two_pt(
+                    shear_maps=self.shear,
+                    k_maps=self.dens,
+                    weights={"shear": self.w, "density": self.w},
+                    return_device=False,
+                ),
+                "M_a",
+                "M_g",
+                "xi_p",
+                "xi_m",
+                "xi_g",
+                "xi_t",
+            ),
             "_m_a_single": lambda c: c._m_a_single(
-                self.shear[0, 0], self.shear[0, 1], self.w[0],
-                return_device=False),
+                self.shear[0, 0], self.shear[0, 1], self.w[0], return_device=False
+            ),
         }
         for name, call in cases.items():
             with self.subTest(method=name):

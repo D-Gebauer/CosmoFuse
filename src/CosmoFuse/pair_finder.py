@@ -13,7 +13,7 @@ Pairs are sorted by angular bin for cache-efficient access during
 the correlation measurement kernels.
 """
 
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -66,7 +66,9 @@ class PairFinder:
         patch_inds_local = np.asarray(patch_inds, dtype=self.index_dtype)
 
         if patch_inds_local.size < 2:
-            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
+            all_inds = [
+                np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)
+            ]
             return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
 
         # Compute angular separations and rotation angles for all pixel pairs
@@ -87,7 +89,9 @@ class PairFinder:
 
         npairs = inds_a.size
         if npairs == 0:
-            all_inds = [np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)]
+            all_inds = [
+                np.empty((2, 0), dtype=self.index_dtype) for _ in range(self.nbins)
+            ]
             return all_inds, np.empty((2, 0), dtype=self.rotation_complex_dtype)
 
         # The kernel already writes pairs grouped by angular bin (rows in

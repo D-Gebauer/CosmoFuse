@@ -9,6 +9,7 @@ import healpy as hp
 import numpy as np
 
 from CosmoFuse import Integrated3PCF, MapFileLoader
+
 from ._results import fields_of
 
 NSIDE = 32
@@ -19,9 +20,18 @@ def make_corr():
     theta, phi = hp.pix2ang(NSIDE, np.arange(NPIX))
     mask = (np.degrees(phi) < 140.0) & (np.abs(90 - np.degrees(theta)) < 40)
     corr = Integrated3PCF(
-        NSIDE, np.radians([40.0, 70.0]), np.radians([90.0, 100.0]), nbins=3,
-        theta_min=150, theta_max=900, patch_size=500, theta_Q=150, mask=mask,
-        device="cpu", rotation_precision="float64", resolution_factor=2.0,
+        NSIDE,
+        np.radians([40.0, 70.0]),
+        np.radians([90.0, 100.0]),
+        nbins=3,
+        theta_min=150,
+        theta_max=900,
+        patch_size=500,
+        theta_Q=150,
+        mask=mask,
+        device="cpu",
+        rotation_precision="float64",
+        resolution_factor=2.0,
     )
     corr.preprocess()
     return corr, mask
@@ -36,7 +46,8 @@ class TestMapFileLoader(unittest.TestCase):
         cls.archive = rng.normal(size=(cls.nmaps, 2, 2, cls.corr.n_active)) * 0.05
         cls.w = np.ones((2, cls.corr.n_active))
         cls.serial = [
-            fields_of(cls.corr.gg(m, cls.w, return_device=False), "M_a", "xi_p", "xi_m") for m in cls.archive
+            fields_of(cls.corr.gg(m, cls.w, return_device=False), "M_a", "xi_p", "xi_m")
+            for m in cls.archive
         ]
 
     def run_loader(self, n_slots, n_readers, jitter):
@@ -55,8 +66,12 @@ class TestMapFileLoader(unittest.TestCase):
                 active["now"] -= 1
 
         loader = MapFileLoader(
-            self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
-            read_fn=read, n_slots=n_slots, n_readers=n_readers,
+            self.corr,
+            {"shear": (2, 2, self.corr.n_active)},
+            sources=range(self.nmaps),
+            read_fn=read,
+            n_slots=n_slots,
+            n_readers=n_readers,
             row_pix_hash=self.corr.row_pix_hash,
         )
         self.assertEqual(len(loader), self.nmaps)
@@ -65,7 +80,14 @@ class TestMapFileLoader(unittest.TestCase):
             order.append(k)
             if k % 5 == 0:
                 time.sleep(jitter)  # a slow consumer must not lose maps
-            results.append(fields_of(self.corr.gg(dev["shear"], self.w, return_device=False), "M_a", "xi_p", "xi_m"))
+            results.append(
+                fields_of(
+                    self.corr.gg(dev["shear"], self.w, return_device=False),
+                    "M_a",
+                    "xi_p",
+                    "xi_m",
+                )
+            )
         self.assertEqual(order, list(range(self.nmaps)))
         for got, want in zip(results, self.serial):
             for a, b in zip(got, want):
@@ -93,11 +115,20 @@ class TestMapFileLoader(unittest.TestCase):
         nmaps = 40
         rng = np.random.default_rng(9)
         archive = rng.normal(size=(nmaps, 3, 50))
-        for n_slots, n_readers, sched_seed in ((2, 1, 0), (3, 2, 1), (4, 4, 2), (3, 1, 3), (6, 2, 4)):
+        for n_slots, n_readers, sched_seed in (
+            (2, 1, 0),
+            (3, 2, 1),
+            (4, 4, 2),
+            (3, 1, 3),
+            (6, 2, 4),
+        ):
             with self.subTest(n_slots=n_slots, n_readers=n_readers):
                 sim.seed(sched_seed)
                 corr = SimpleNamespace(
-                    backend=sim.SimBackend(), map_dtype=np.dtype(np.float64), row_pix_hash="x")
+                    backend=sim.SimBackend(),
+                    map_dtype=np.dtype(np.float64),
+                    row_pix_hash="x",
+                )
                 jitter = np.random.default_rng(n_slots)
 
                 def read(source, out):
@@ -105,7 +136,13 @@ class TestMapFileLoader(unittest.TestCase):
                     out["m"][...] = archive[source]
 
                 loader = MapFileLoader(
-                    corr, {"m": (3, 50)}, range(nmaps), read, n_slots=n_slots, n_readers=n_readers)
+                    corr,
+                    {"m": (3, 50)},
+                    range(nmaps),
+                    read,
+                    n_slots=n_slots,
+                    n_readers=n_readers,
+                )
                 seen = []
                 for _k, dev in loader:
                     sim.enqueue_kernel(dev["m"], seen)  # runs (much) later
@@ -127,12 +164,18 @@ class TestMapFileLoader(unittest.TestCase):
         for sched_seed in range(6):
             with self.subTest(sched_seed=sched_seed):
                 sim.seed(sched_seed)
-                corr = SimpleNamespace(backend=sim.SimBackend(), map_dtype=np.dtype(np.float64))
+                corr = SimpleNamespace(
+                    backend=sim.SimBackend(), map_dtype=np.dtype(np.float64)
+                )
                 pipe = MapLoader(corr, {"m": (3, 20)})
                 seen = []
                 dev = pipe.wait(pipe.stage({"m": archive[0]}))
                 for k in range(len(archive)):
-                    nxt = pipe.stage({"m": archive[k + 1]}) if k + 1 < len(archive) else None
+                    nxt = (
+                        pipe.stage({"m": archive[k + 1]})
+                        if k + 1 < len(archive)
+                        else None
+                    )
                     sim.enqueue_kernel(dev["m"], seen)
                     dev = pipe.wait(nxt)
                 sim.synchronize_all()
@@ -147,8 +190,13 @@ class TestMapFileLoader(unittest.TestCase):
 
         before = threading.active_count()
         loader = MapFileLoader(
-            self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
-            read_fn=read, n_slots=3, n_readers=2)
+            self.corr,
+            {"shear": (2, 2, self.corr.n_active)},
+            sources=range(self.nmaps),
+            read_fn=read,
+            n_slots=3,
+            n_readers=2,
+        )
         with self.assertRaisesRegex(OSError, "corrupt map file"):
             for _k, _dev in loader:
                 pass
@@ -157,9 +205,13 @@ class TestMapFileLoader(unittest.TestCase):
     def test_early_exit_stops_threads(self):
         before = threading.active_count()
         loader = MapFileLoader(
-            self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=range(self.nmaps),
+            self.corr,
+            {"shear": (2, 2, self.corr.n_active)},
+            sources=range(self.nmaps),
             read_fn=lambda s, out: out["shear"].__setitem__(Ellipsis, self.archive[s]),
-            n_slots=4, n_readers=3)
+            n_slots=4,
+            n_readers=3,
+        )
         for k, _dev in loader:
             if k == 3:
                 break
@@ -168,12 +220,18 @@ class TestMapFileLoader(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
 
     def test_hash_mismatch_raises(self):
-        other = Integrated3PCF(NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu")
+        other = Integrated3PCF(
+            NSIDE, np.radians([40.0]), np.radians([90.0]), device="cpu"
+        )
         self.assertNotEqual(other.row_pix_hash, self.corr.row_pix_hash)
         with self.assertRaisesRegex(ValueError, "row_pix hash mismatch"):
             MapFileLoader(
-                self.corr, {"shear": (2, 2, self.corr.n_active)}, sources=[0],
-                read_fn=lambda s, o: None, row_pix_hash=other.row_pix_hash)
+                self.corr,
+                {"shear": (2, 2, self.corr.n_active)},
+                sources=[0],
+                read_fn=lambda s, o: None,
+                row_pix_hash=other.row_pix_hash,
+            )
         with self.assertRaises(ValueError):
             MapFileLoader(self.corr, {}, sources=[], read_fn=None, n_slots=1)
 

@@ -38,7 +38,7 @@ from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 # Enough patches that the fused grid still fills a large device, so the
 # npatches guard is not what is under test here.
 NPATCHES = 512
-VISITS = 300          # disc pixels per patch: several BLOCK_SIZE strides
+VISITS = 300  # disc pixels per patch: several BLOCK_SIZE strides
 NROWS = 4096
 
 
@@ -47,11 +47,11 @@ def aperture_geometry(rng, q_dtype, npatches=NPATCHES, visits=VISITS, n_rows=NRO
     total = npatches * visits
     return (
         rng.integers(0, n_rows, size=total, dtype=np.uint32),
-        rng.uniform(-1.0, 1.0, size=total).astype(q_dtype),      # q_cos
-        rng.uniform(-1.0, 1.0, size=total).astype(q_dtype),      # q_sin
-        rng.uniform(0.0, 3.0, size=total).astype(q_dtype),       # q_val
-        (np.arange(npatches + 1, dtype=np.int64) * visits),      # q_offsets
-        rng.uniform(0.5, 1.5, size=npatches).astype(q_dtype),    # q_patch_area
+        rng.uniform(-1.0, 1.0, size=total).astype(q_dtype),  # q_cos
+        rng.uniform(-1.0, 1.0, size=total).astype(q_dtype),  # q_sin
+        rng.uniform(0.0, 3.0, size=total).astype(q_dtype),  # q_val
+        (np.arange(npatches + 1, dtype=np.int64) * visits),  # q_offsets
+        rng.uniform(0.5, 1.5, size=npatches).astype(q_dtype),  # q_patch_area
     )
 
 
@@ -87,9 +87,7 @@ class TestFusedApertureSelection(unittest.TestCase):
             )
         )
         self.assertTrue(
-            _use_fused_aperture(
-                EmulatedCupyModule, _MAX_FUSED_APERTURE_BINS, NPATCHES
-            )
+            _use_fused_aperture(EmulatedCupyModule, _MAX_FUSED_APERTURE_BINS, NPATCHES)
         )
 
     def test_small_patch_sets_fall_back(self):
@@ -132,8 +130,10 @@ class FusedApertureAgreementBase:
 
     def run_shear(self, kernel, shear, weights, geom, nz, dtype, fused):
         xp = self.xp
-        out = (xp.zeros((nz, NPATCHES), dtype=dtype),
-               xp.zeros((nz, NPATCHES), dtype=dtype))
+        out = (
+            xp.zeros((nz, NPATCHES), dtype=dtype),
+            xp.zeros((nz, NPATCHES), dtype=dtype),
+        )
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
         with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
             ok = kernel(shear[:, 0], shear[:, 1], weights, *geom, *out)
@@ -150,10 +150,12 @@ class FusedApertureAgreementBase:
                     geom = aperture_geometry(rng, q_dtype)
                     shear, weights = self.to_device(shear), self.to_device(weights)
                     geom = tuple(self.to_device(g) for g in geom)
-                    got = self.run_shear(kernel, shear, weights, geom, nz,
-                                         dtype, fused=True)
-                    ref = self.run_shear(kernel, shear, weights, geom, nz,
-                                         dtype, fused=False)
+                    got = self.run_shear(
+                        kernel, shear, weights, geom, nz, dtype, fused=True
+                    )
+                    ref = self.run_shear(
+                        kernel, shear, weights, geom, nz, dtype, fused=False
+                    )
                     self.assertTrue(np.array_equal(got[0], ref[0]))
                     self.assertTrue(np.array_equal(got[1], ref[1]))
                     # a non-trivial comparison, not two buffers of zeros
@@ -161,8 +163,10 @@ class FusedApertureAgreementBase:
 
     def run_density(self, kernel, values, weights, geom, nz, dtype, fused):
         xp = self.xp
-        out = (xp.zeros((nz, NPATCHES), dtype=dtype),
-               xp.zeros((nz, NPATCHES), dtype=dtype))
+        out = (
+            xp.zeros((nz, NPATCHES), dtype=dtype),
+            xp.zeros((nz, NPATCHES), dtype=dtype),
+        )
         q_inds, _q_cos, _q_sin, q_val, q_offsets, q_area = geom
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
         with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
@@ -181,20 +185,24 @@ class FusedApertureAgreementBase:
                     geom = aperture_geometry(rng, q_dtype)
                     values, weights = self.to_device(values), self.to_device(weights)
                     geom = tuple(self.to_device(g) for g in geom)
-                    got = self.run_density(kernel, values, weights, geom, nz,
-                                           dtype, fused=True)
-                    ref = self.run_density(kernel, values, weights, geom, nz,
-                                           dtype, fused=False)
+                    got = self.run_density(
+                        kernel, values, weights, geom, nz, dtype, fused=True
+                    )
+                    ref = self.run_density(
+                        kernel, values, weights, geom, nz, dtype, fused=False
+                    )
                     self.assertTrue(np.array_equal(got[0], ref[0]))
                     self.assertTrue(np.array_equal(got[1], ref[1]))
                     self.assertTrue(np.any(np.asarray(ref[0]) != 0))
 
     def run_3x2pt(self, kernel, maps, geom, n_density, n_shear, acc, fused):
         xp = self.xp
-        out = (xp.zeros((n_shear, NPATCHES), dtype=acc),
-               xp.zeros((n_shear, NPATCHES), dtype=acc),
-               xp.zeros((n_density, NPATCHES), dtype=acc),
-               xp.zeros((n_density, NPATCHES), dtype=acc))
+        out = (
+            xp.zeros((n_shear, NPATCHES), dtype=acc),
+            xp.zeros((n_shear, NPATCHES), dtype=acc),
+            xp.zeros((n_density, NPATCHES), dtype=acc),
+            xp.zeros((n_density, NPATCHES), dtype=acc),
+        )
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
         with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
             ok = kernel(*maps, *geom, *out)
@@ -208,17 +216,21 @@ class FusedApertureAgreementBase:
             # float32 maps accumulate at float64 in this path
             acc = np.float64
             for n_density, n_shear in ((1, 1), (2, 4), (5, 3)):
-                with self.subTest(dtype=np.dtype(dtype).name,
-                                  nd=n_density, ns=n_shear):
+                with self.subTest(dtype=np.dtype(dtype).name, nd=n_density, ns=n_shear):
                     rng = np.random.default_rng(37 + n_shear)
-                    maps = tuple(self.to_device(m) for m in
-                                 aos_maps(rng, n_density, n_shear, dtype))
-                    geom = tuple(self.to_device(g)
-                                 for g in aperture_geometry(rng, q_dtype))
-                    got = self.run_3x2pt(kernel, maps, geom, n_density,
-                                         n_shear, acc, fused=True)
-                    ref = self.run_3x2pt(kernel, maps, geom, n_density,
-                                         n_shear, acc, fused=False)
+                    maps = tuple(
+                        self.to_device(m)
+                        for m in aos_maps(rng, n_density, n_shear, dtype)
+                    )
+                    geom = tuple(
+                        self.to_device(g) for g in aperture_geometry(rng, q_dtype)
+                    )
+                    got = self.run_3x2pt(
+                        kernel, maps, geom, n_density, n_shear, acc, fused=True
+                    )
+                    ref = self.run_3x2pt(
+                        kernel, maps, geom, n_density, n_shear, acc, fused=False
+                    )
                     for a, b in zip(got, ref):
                         self.assertTrue(np.array_equal(a, b))
                     self.assertTrue(np.any(np.asarray(ref[0]) != 0))

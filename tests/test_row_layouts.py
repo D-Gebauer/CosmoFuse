@@ -25,9 +25,9 @@ import pytest
 
 from CosmoFuse import Integrated3PCF
 
+from ._results import fields_of
 from .test_degrade_kernel import FusedDegradeBase, make_corr
 from .test_gpu_kernel_emulation import emulated_gpu
-from ._results import fields_of
 
 
 def arr(x):
@@ -41,76 +41,116 @@ class TestLayoutsAgree(FusedDegradeBase):
         corr = self.corr
         for blocks in ("pairs", "all"):
             with self.subTest(blocks=blocks):
-                soa, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-                    self.shear, self.w, blocks=blocks))
-                aos, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-                    self.shear, self.w, blocks=blocks, layout="aos"))
-                self.assertEqual(arr(aos[0]).shape,
-                                 (corr.n_rows, self.shear.shape[0], 2))
-                self.assertTrue(np.array_equal(
-                    arr(aos[0]), np.transpose(arr(soa[0]), (2, 0, 1))))
-                self.assertTrue(np.array_equal(
-                    arr(aos[1]), np.transpose(arr(soa[1]), (1, 0))))
+                soa, _ = self.fused(
+                    corr,
+                    lambda c: c._expand_shear_rows(self.shear, self.w, blocks=blocks),
+                )
+                aos, _ = self.fused(
+                    corr,
+                    lambda c: c._expand_shear_rows(
+                        self.shear, self.w, blocks=blocks, layout="aos"
+                    ),
+                )
+                self.assertEqual(
+                    arr(aos[0]).shape, (corr.n_rows, self.shear.shape[0], 2)
+                )
+                self.assertTrue(
+                    np.array_equal(arr(aos[0]), np.transpose(arr(soa[0]), (2, 0, 1)))
+                )
+                self.assertTrue(
+                    np.array_equal(arr(aos[1]), np.transpose(arr(soa[1]), (1, 0)))
+                )
 
     def test_aos_scalar_values_match(self):
         corr = self.corr
-        soa, _ = self.fused(corr, lambda c: c._expand_rows(
-            (self.dens,), self.w, "pairs"))
-        aos, _ = self.fused(corr, lambda c: c._expand_rows_aos(
-            (self.dens,), self.w, "pairs"))
-        self.assertTrue(np.array_equal(
-            arr(aos[0][0]), np.transpose(arr(soa[0][0]), (1, 0))))
-        self.assertTrue(np.array_equal(
-            arr(aos[1]), np.transpose(arr(soa[1]), (1, 0))))
+        soa, _ = self.fused(
+            corr, lambda c: c._expand_rows((self.dens,), self.w, "pairs")
+        )
+        aos, _ = self.fused(
+            corr, lambda c: c._expand_rows_aos((self.dens,), self.w, "pairs")
+        )
+        self.assertTrue(
+            np.array_equal(arr(aos[0][0]), np.transpose(arr(soa[0][0]), (1, 0)))
+        )
+        self.assertTrue(np.array_equal(arr(aos[1]), np.transpose(arr(soa[1]), (1, 0))))
 
     def test_interleaved_shear_is_the_stack_of_the_components(self):
         """`_expand_shear_rows` used to stack the two component buffers;
         the interleaved layout is that stack, written in place."""
         corr = self.corr
-        stacked, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs"))
-        parts, _ = self.fused(corr, lambda c: c._expand_rows(
-            (self.shear[:, 0], self.shear[:, 1]), self.w, "pairs"))
-        self.assertTrue(np.array_equal(
-            arr(stacked[0]), np.stack([arr(parts[0][0]), arr(parts[0][1])],
-                                      axis=1)))
+        stacked, _ = self.fused(
+            corr, lambda c: c._expand_shear_rows(self.shear, self.w, blocks="pairs")
+        )
+        parts, _ = self.fused(
+            corr,
+            lambda c: c._expand_rows(
+                (self.shear[:, 0], self.shear[:, 1]), self.w, "pairs"
+            ),
+        )
+        self.assertTrue(
+            np.array_equal(
+                arr(stacked[0]), np.stack([arr(parts[0][0]), arr(parts[0][1])], axis=1)
+            )
+        )
 
     def test_aos_buffers_are_contiguous(self):
         """The pair kernels index them as flat AoS memory."""
         corr = self.corr
-        aos, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs", layout="aos"))
+        aos, _ = self.fused(
+            corr,
+            lambda c: c._expand_shear_rows(
+                self.shear, self.w, blocks="pairs", layout="aos"
+            ),
+        )
         self.assertTrue(arr(aos[0]).flags["C_CONTIGUOUS"])
         self.assertTrue(arr(aos[1]).flags["C_CONTIGUOUS"])
-        dens, _ = self.fused(corr, lambda c: c._expand_rows_aos(
-            (self.dens,), self.w, "pairs"))
+        dens, _ = self.fused(
+            corr, lambda c: c._expand_rows_aos((self.dens,), self.w, "pairs")
+        )
         self.assertTrue(arr(dens[0][0]).flags["C_CONTIGUOUS"])
 
     def test_sparse_fallback_produces_the_same_layouts(self):
         """The AoS layout is not a fused-only feature: the sparse chain
         reaches it by transposing, and must land on the same bits."""
         corr = self.corr
-        fused, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs", layout="aos"))
-        sparse = self.sparse(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs", layout="aos"))
+        fused, _ = self.fused(
+            corr,
+            lambda c: c._expand_shear_rows(
+                self.shear, self.w, blocks="pairs", layout="aos"
+            ),
+        )
+        sparse = self.sparse(
+            corr,
+            lambda c: c._expand_shear_rows(
+                self.shear, self.w, blocks="pairs", layout="aos"
+            ),
+        )
         self.assertEqual(arr(fused[0]).shape, arr(sparse[0]).shape)
-        np.testing.assert_allclose(arr(fused[0]), arr(sparse[0]),
-                                   rtol=0, atol=1e-13 * np.abs(arr(sparse[0])).max())
+        np.testing.assert_allclose(
+            arr(fused[0]),
+            arr(sparse[0]),
+            rtol=0,
+            atol=1e-13 * np.abs(arr(sparse[0])).max(),
+        )
 
 
 class TestSignsAreFoldedIn(FusedDegradeBase):
     """A folded sign must equal flipping the maps, exactly."""
 
     def signed(self, corr, signs, **kw):
-        out, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs", signs=signs, **kw))
+        out, _ = self.fused(
+            corr,
+            lambda c: c._expand_shear_rows(
+                self.shear, self.w, blocks="pairs", signs=signs, **kw
+            ),
+        )
         return out
 
     def flipped_input(self, corr, signs, **kw):
         shear = self.shear * np.asarray(signs).reshape(1, 2, 1)
-        out, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            shear, self.w, blocks="pairs", **kw))
+        out, _ = self.fused(
+            corr, lambda c: c._expand_shear_rows(shear, self.w, blocks="pairs", **kw)
+        )
         return out
 
     def test_shear_signs_match_flipping_the_maps(self):
@@ -125,20 +165,27 @@ class TestSignsAreFoldedIn(FusedDegradeBase):
 
     def test_scalar_signs_match_flipping_the_maps(self):
         corr = self.corr
-        got, _ = self.fused(corr, lambda c: c._expand_rows(
-            (self.dens,), self.w, "pairs", signs=(-1,)))
-        want, _ = self.fused(corr, lambda c: c._expand_rows(
-            (-self.dens,), self.w, "pairs"))
+        got, _ = self.fused(
+            corr, lambda c: c._expand_rows((self.dens,), self.w, "pairs", signs=(-1,))
+        )
+        want, _ = self.fused(
+            corr, lambda c: c._expand_rows((-self.dens,), self.w, "pairs")
+        )
         self.assertTrue(np.array_equal(arr(got[0][0]), arr(want[0][0])))
 
     def test_the_cell_rows_carry_the_sign_too(self):
         """Not just the pixel rows: level 0 reads the already-signed rows,
         so every virtual row must come out negated as well."""
         corr = self.corr
-        plain, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs"))
-        flipped, _ = self.fused(corr, lambda c: c._expand_shear_rows(
-            self.shear, self.w, blocks="pairs", signs=(-1, -1)))
+        plain, _ = self.fused(
+            corr, lambda c: c._expand_shear_rows(self.shear, self.w, blocks="pairs")
+        )
+        flipped, _ = self.fused(
+            corr,
+            lambda c: c._expand_shear_rows(
+                self.shear, self.w, blocks="pairs", signs=(-1, -1)
+            ),
+        )
         n_active = corr.n_active
         cells_plain = arr(plain[0])[:, :, n_active:]
         cells_flipped = arr(flipped[0])[:, :, n_active:]
@@ -150,10 +197,12 @@ class TestSignsAreFoldedIn(FusedDegradeBase):
 
     def test_sparse_fallback_applies_the_signs(self):
         corr = self.corr
-        got = self.sparse(corr, lambda c: c._expand_rows(
-            (self.dens,), self.w, "pairs", signs=(-1,)))
-        want = self.sparse(corr, lambda c: c._expand_rows(
-            (-self.dens,), self.w, "pairs"))
+        got = self.sparse(
+            corr, lambda c: c._expand_rows((self.dens,), self.w, "pairs", signs=(-1,))
+        )
+        want = self.sparse(
+            corr, lambda c: c._expand_rows((-self.dens,), self.w, "pairs")
+        )
         self.assertTrue(np.array_equal(arr(got[0][0]), arr(want[0][0])))
 
     def test_trivial_signs_do_not_copy(self):
@@ -193,31 +242,65 @@ class TestOneExpansionPerCall(FusedDegradeBase):
 
     def test_shear_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
-            self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"))
+        seen = self.count_expansions(
+            corr,
+            lambda c: fields_of(
+                c.gg(self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"
+            ),
+        )
         self.assertEqual(seen, ["interleaved"])
 
     def test_density_degrades_once_in_soa(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: fields_of(c.kk(
-            self.dens, self.w, return_device=False), "M_g", "xi_g"))
+        seen = self.count_expansions(
+            corr,
+            lambda c: fields_of(
+                c.kk(self.dens, self.w, return_device=False), "M_g", "xi_g"
+            ),
+        )
         self.assertEqual(seen, ["soa"])
 
     def test_a_flip_does_not_cost_a_second_expansion(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
-            self.shear, self.w, flip_g1=True, return_device=False), "M_a", "xi_p", "xi_m"))
+        seen = self.count_expansions(
+            corr,
+            lambda c: fields_of(
+                c.gg(self.shear, self.w, flip_g1=True, return_device=False),
+                "M_a",
+                "xi_p",
+                "xi_m",
+            ),
+        )
         self.assertEqual(seen, ["interleaved"])
 
     def test_pair_only_calls_take_aos_from_the_degrade(self):
         corr = self.corr
-        seen = self.count_expansions(corr, lambda c: fields_of(c.gg(
-            self.shear, self.w, return_device=False, apertures=False), "xi_p", "xi_m"))
+        seen = self.count_expansions(
+            corr,
+            lambda c: fields_of(
+                c.gg(self.shear, self.w, return_device=False, apertures=False),
+                "xi_p",
+                "xi_m",
+            ),
+        )
         self.assertEqual(seen, ["aos"])
-        seen = self.count_expansions(corr, lambda c: fields_of(c.three_by_two_pt(
-            shear_maps=self.shear, k_maps=self.dens,
-            weights={"shear": self.w, "density": self.w},
-            return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"))
+        seen = self.count_expansions(
+            corr,
+            lambda c: fields_of(
+                c.three_by_two_pt(
+                    shear_maps=self.shear,
+                    k_maps=self.dens,
+                    weights={"shear": self.w, "density": self.w},
+                    return_device=False,
+                ),
+                "M_a",
+                "M_g",
+                "xi_p",
+                "xi_m",
+                "xi_g",
+                "xi_t",
+            ),
+        )
         self.assertEqual(sorted(seen), ["aos", "aos"])
 
     def test_the_scope_decides_the_pair_layout(self):
@@ -231,16 +314,20 @@ class TestOneExpansionPerCall(FusedDegradeBase):
         """Only the route changes, never what the kernels get."""
         corr = self.corr
         with emulated_gpu(corr):
-            with patch.object(Integrated3PCF, "_use_fused_degrade",
-                              lambda self, w: True):
+            with patch.object(
+                Integrated3PCF, "_use_fused_degrade", lambda self, w: True
+            ):
                 direct = corr._pair_shear_rows(self.shear, self.w, "pairs")
                 with corr._expansion_scope(layout="soa"):
                     via_soa = corr._pair_shear_rows(self.shear, self.w, "pairs")
         corr.compute_context.degrade_csr = None
         self.assertEqual(arr(direct[0]).shape, arr(via_soa[0]).shape)
         np.testing.assert_allclose(
-            arr(direct[0]), arr(via_soa[0]), rtol=0,
-            atol=1e-13 * np.abs(arr(via_soa[0])).max())
+            arr(direct[0]),
+            arr(via_soa[0]),
+            rtol=0,
+            atol=1e-13 * np.abs(arr(via_soa[0])).max(),
+        )
         self.assertTrue(np.array_equal(arr(direct[1]), arr(via_soa[1])))
 
 
@@ -250,26 +337,59 @@ class TestPublicFlipsUnchanged(FusedDegradeBase):
 
     def cases(self, corr, shear, flip_g1, flip_g2):
         return {
-            "gg": lambda c: fields_of(c.gg(
-                shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
-                return_device=False), "M_a", "xi_p", "xi_m"),
-            "gg_pairs": lambda c: fields_of(c.gg(
-                shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2,
-                return_device=False, apertures=False), "xi_p", "xi_m"),
+            "gg": lambda c: fields_of(
+                c.gg(
+                    shear, self.w, flip_g1=flip_g1, flip_g2=flip_g2, return_device=False
+                ),
+                "M_a",
+                "xi_p",
+                "xi_m",
+            ),
+            "gg_pairs": lambda c: fields_of(
+                c.gg(
+                    shear,
+                    self.w,
+                    flip_g1=flip_g1,
+                    flip_g2=flip_g2,
+                    return_device=False,
+                    apertures=False,
+                ),
+                "xi_p",
+                "xi_m",
+            ),
             "kg": lambda c: c.kg(
-                self.dens, shear, self.w, self.w, flip_g1=flip_g1,
-                flip_g2=flip_g2, return_device=False).xi_t,
-            "three_by_two_pt": lambda c: fields_of(c.three_by_two_pt(
-                shear_maps=shear, k_maps=self.dens,
-                weights={"shear": self.w, "density": self.w},
-                flip_g1=flip_g1, flip_g2=flip_g2, return_device=False), "M_a", "M_g", "xi_p", "xi_m", "xi_g", "xi_t"),
+                self.dens,
+                shear,
+                self.w,
+                self.w,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=False,
+            ).xi_t,
+            "three_by_two_pt": lambda c: fields_of(
+                c.three_by_two_pt(
+                    shear_maps=shear,
+                    k_maps=self.dens,
+                    weights={"shear": self.w, "density": self.w},
+                    flip_g1=flip_g1,
+                    flip_g2=flip_g2,
+                    return_device=False,
+                ),
+                "M_a",
+                "M_g",
+                "xi_p",
+                "xi_m",
+                "xi_g",
+                "xi_t",
+            ),
         }
 
     def test_flip_flags_equal_pre_flipped_maps(self):
         corr = self.corr
         for flip_g1, flip_g2 in ((True, False), (False, True), (True, True)):
-            signs = np.array([-1.0 if flip_g1 else 1.0,
-                              -1.0 if flip_g2 else 1.0]).reshape(1, 2, 1)
+            signs = np.array(
+                [-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0]
+            ).reshape(1, 2, 1)
             pre = self.shear * signs
             flagged = self.cases(corr, self.shear, flip_g1, flip_g2)
             plain = self.cases(corr, pre, False, False)
@@ -300,10 +420,11 @@ class TestFullResolutionPath(unittest.TestCase):
         corr = self.corr
         with emulated_gpu(corr):
             aos, w_aos = corr._expand_shear_rows(
-                self.shear, self.w, blocks="pairs", signs=(-1, 1),
-                layout="aos")
-        want = np.transpose(self.shear * np.array([-1.0, 1.0]).reshape(1, 2, 1),
-                            (2, 0, 1))
+                self.shear, self.w, blocks="pairs", signs=(-1, 1), layout="aos"
+            )
+        want = np.transpose(
+            self.shear * np.array([-1.0, 1.0]).reshape(1, 2, 1), (2, 0, 1)
+        )
         self.assertTrue(np.array_equal(arr(aos), want))
         self.assertTrue(np.array_equal(arr(w_aos), np.transpose(self.w, (1, 0))))
         self.assertTrue(arr(aos).flags["C_CONTIGUOUS"])
@@ -311,8 +432,7 @@ class TestFullResolutionPath(unittest.TestCase):
     def test_soa_without_signs_returns_the_input_untouched(self):
         corr = self.corr
         with emulated_gpu(corr):
-            rows, w_rows = corr._expand_shear_rows(
-                self.shear, self.w, blocks="pairs")
+            rows, w_rows = corr._expand_shear_rows(self.shear, self.w, blocks="pairs")
         self.assertIs(rows, self.shear)
         self.assertIs(w_rows, self.w)
 

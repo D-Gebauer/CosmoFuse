@@ -80,7 +80,11 @@ def _cpu_3pcf_multipoles_impl(
                     # float32 maps must not be combined at float32
                     w = np.float64(wts[f, j])
                     if spin[f] == 2:
-                        a[f] = -w * complex(np.float64(vre[f, j]), np.float64(vim[f, j])) * rot
+                        a[f] = (
+                            -w
+                            * complex(np.float64(vre[f, j]), np.float64(vim[f, j]))
+                            * rot
+                        )
                     else:
                         a[f] = w * np.float64(vre[f, j])
                 pc = phi_c[p]
@@ -137,8 +141,20 @@ def _cpu_3pcf_multipoles(
     out: np.ndarray,
 ) -> bool:
     cpu_3pcf_multipoles_kernel(True)(
-        offsets, int(c0), int(n_centres), int(nbins), nbr, phi_c, phi_n,
-        vre, vim, wts, spin, *desc, int(E), out,
+        offsets,
+        int(c0),
+        int(n_centres),
+        int(nbins),
+        nbr,
+        phi_c,
+        phi_n,
+        vre,
+        vim,
+        wts,
+        spin,
+        *desc,
+        int(E),
+        out,
     )
     return True
 
@@ -156,7 +172,9 @@ def build_cupy_3pcf_multipoles_kernel(module: Any) -> Optional[Callable[..., boo
 
     if not _has_raw_cuda_compiler(module):
         return None
-    build = _make_raw_kernel_builder(module, "threepoint_multipoles.cu", "3PCF multipoles")
+    build = _make_raw_kernel_builder(
+        module, "threepoint_multipoles.cu", "3PCF multipoles"
+    )
     ctype = {np.dtype(np.float32): "float", np.dtype(np.float64): "double"}
 
     def _kernel(

@@ -4,32 +4,26 @@ import weakref
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import h5py
 import healpy as hp
 import numpy as np
 from numba import njit, prange
 from scipy.special import binom
-from tqdm import trange
 
 from .backend import get_backend, safe_divide
 from .compute_context import ComputeContext
+from .correlation_helpers import calculate_all_zetas as _calculate_all_zetas_helper
+from .correlation_helpers import zeta_a_g as _zeta_a_g_helper
+from .correlation_helpers import zeta_a_minus as _zeta_a_minus_helper
+from .correlation_helpers import zeta_a_plus as _zeta_a_plus_helper
+from .correlation_helpers import zeta_a_t as _zeta_a_t_helper
+from .correlation_helpers import zeta_g_g as _zeta_g_g_helper
+from .correlation_helpers import zeta_g_minus as _zeta_g_minus_helper
+from .correlation_helpers import zeta_g_plus as _zeta_g_plus_helper
+from .correlation_helpers import zeta_g_t as _zeta_g_t_helper
 from .io_handler import PairIOHandler
-from .pair_geometry import PairGeometry
-from .correlation_helpers import (
-    Q_crittenden,
-    Q_schneider,
-    calculate_all_zetas as _calculate_all_zetas_helper,
-    zeta_a_g as _zeta_a_g_helper,
-    zeta_a_minus as _zeta_a_minus_helper,
-    zeta_a_plus as _zeta_a_plus_helper,
-    zeta_a_t as _zeta_a_t_helper,
-    zeta_g_g as _zeta_g_g_helper,
-    zeta_g_minus as _zeta_g_minus_helper,
-    zeta_g_plus as _zeta_g_plus_helper,
-    zeta_g_t as _zeta_g_t_helper,
-)
 from .packing import block_edges, decode_angles, pack_patch, unpack_rows
 from .pair_finder import PairFinder
+from .pair_geometry import PairGeometry
 from .results import IntegratedResult
 from .treecode import (
     TreecodeGeometry,
@@ -39,7 +33,7 @@ from .treecode import (
     level_groups,
     validate_resolution_factor,
 )
-from .utils import live_object_serial, pixel2RaDec, select_patch_centers
+from .utils import live_object_serial, select_patch_centers
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +54,7 @@ def _frozen_memo_bytes(memo: Dict[Any, Any]) -> int:
             total += int(getattr(block, "nbytes", 0))
     return total
 
+
 _ALLOWED_FLOAT_PRECISIONS = {
     "float32": np.float32,
     "float64": np.float64,
@@ -72,6 +67,7 @@ _ROTATION_COMPLEX_PRECISION = {
 # A buffer as the degrade kernels address it:
 # (array, base, lead_stride, comp_stride, row_stride), in elements.
 _Desc = Tuple[Any, int, int, int, int]
+
 
 def _compute_aperture_shear_all_patches(
     Q_inds: np.ndarray,
@@ -226,8 +222,10 @@ def _compute_pairs_impl(
                 else:
                     hi = mid
             bin_idx = lo - 1
-            if bin_idx < 0 or bin_idx >= nbins or not (
-                cos_theta > cos_binedges[bin_idx + 1]
+            if (
+                bin_idx < 0
+                or bin_idx >= nbins
+                or not (cos_theta > cos_binedges[bin_idx + 1])
             ):
                 continue
             out_idx = cursor[i, bin_idx]
@@ -245,7 +243,8 @@ def _compute_pairs_impl(
 
             # Compute cos(2*theta1) and sin(2*theta1) directly
             # theta1 = pi/2 - C1 => 2*theta1 = pi - 2*C1
-            # c1 = cos(2*theta1) = -cos(2*C1) = -(cos^2 C1 - sin^2 C1) = sin^2 C1 - cos^2 C1
+            # c1 = cos(2*theta1) = -cos(2*C1)
+            #    = -(cos^2 C1 - sin^2 C1) = sin^2 C1 - cos^2 C1
             # s1 = sin(2*theta1) = sin(2*C1) = 2*sinC1*cosC1
             # Using unnormalized vectors:
             R2_C1 = sinC1 * sinC1 + cosC1 * cosC1
@@ -254,7 +253,7 @@ def _compute_pairs_impl(
                 c1 = (sinC1 * sinC1 - cosC1 * cosC1) * inv_R2_C1
                 s1 = (2.0 * sinC1 * cosC1) * inv_R2_C1
             else:
-                c1 = -1.0 # implies theta1 = pi/2 (C1=0)
+                c1 = -1.0  # implies theta1 = pi/2 (C1=0)
                 s1 = 0.0
 
             # Compute C2 sine and cosine terms (unnormalized)
@@ -501,9 +500,7 @@ class Integrated3PCF:
             )
         self.accumulation_precision = accumulation_precision
         self.acc_dtype = (
-            self.map_dtype
-            if accumulation_precision == "same"
-            else np.dtype(np.float64)
+            self.map_dtype if accumulation_precision == "same" else np.dtype(np.float64)
         )
         npix = hp.nside2npix(nside)
         self.index_dtype = np.dtype(np.int32) if npix < 2**31 else np.dtype(np.int64)
@@ -721,18 +718,18 @@ class Integrated3PCF:
         state = self.__dict__.copy()
         # map_mask is rebuilt from map_inds in __setstate__; dropping it keeps
         # the full-sky boolean array out of every pickle.
-        state.pop('map_mask', None)
-        state.pop('_aperture_cells_cache', None)
-        if 'backend' in state:
-            del state['backend']
-        if '_compute_pairs_kernel' in state:
-            del state['_compute_pairs_kernel']
-        if '_pair_finder' in state:
-            del state['_pair_finder']
-        if 'compute_context' in state:
-            del state['compute_context']
-        if '_compute_context' in state:
-            del state['_compute_context']
+        state.pop("map_mask", None)
+        state.pop("_aperture_cells_cache", None)
+        if "backend" in state:
+            del state["backend"]
+        if "_compute_pairs_kernel" in state:
+            del state["_compute_pairs_kernel"]
+        if "_pair_finder" in state:
+            del state["_pair_finder"]
+        if "compute_context" in state:
+            del state["compute_context"]
+        if "_compute_context" in state:
+            del state["_compute_context"]
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
@@ -910,12 +907,6 @@ class Integrated3PCF:
         # back against new host geometry.
         self._invalidate_aperture_device_buffers()
 
-    def _invalidate_aperture_device_buffers(self) -> None:
-        """Drop the device aperture buffers derived from the host flats."""
-        ctx = self.compute_context
-        for name, value in ctx._APERTURE_DEVICE_DEFAULTS:
-            setattr(ctx, name, value)
-
     # ---- which row of a returned data vector is which pair of bins -------
 
     @staticmethod
@@ -941,9 +932,7 @@ class Integrated3PCF:
         """
         if auto_only:
             return [(i, i) for i in range(int(nzbins))]
-        return [
-            (i, j) for i in range(int(nzbins)) for j in range(i, int(nzbins))
-        ]
+        return [(i, j) for i in range(int(nzbins)) for j in range(i, int(nzbins))]
 
     @staticmethod
     def kg_combinations(
@@ -963,9 +952,7 @@ class Integrated3PCF:
         if combinations is not None:
             return [(int(a), int(b)) for a, b in combinations]
         return [
-            (i, j)
-            for i in range(int(nlens_bins))
-            for j in range(int(nsource_bins))
+            (i, j) for i in range(int(nlens_bins)) for j in range(int(nsource_bins))
         ]
 
     @staticmethod
@@ -1129,7 +1116,7 @@ class Integrated3PCF:
         for idx, pair in enumerate(combinations):
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
                 raise ValueError(
-                    "ggl_bin_combinations must be an iterable of (lens_bin, source_bin) pairs."
+                    "combinations must be an iterable of (lens_bin, source_bin) pairs."
                 )
 
             lens_bin = int(pair[0])
@@ -1258,13 +1245,19 @@ class Integrated3PCF:
             self.backend.to_device(q_inds_u32)
         )
         self.compute_context.Q_cos_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_cos_flat, dtype=self.rotation_dtype))
+            self.backend.to_device(
+                np.asarray(self.Q_cos_flat, dtype=self.rotation_dtype)
+            )
         )
         self.compute_context.Q_sin_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_sin_flat, dtype=self.rotation_dtype))
+            self.backend.to_device(
+                np.asarray(self.Q_sin_flat, dtype=self.rotation_dtype)
+            )
         )
         self.compute_context.Q_val_dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(self.Q_val_flat, dtype=self.rotation_dtype))
+            self.backend.to_device(
+                np.asarray(self.Q_val_flat, dtype=self.rotation_dtype)
+            )
         )
         self.compute_context.Q_offsets_dev = module.ascontiguousarray(
             self.backend.to_device(np.asarray(self.Q_offsets, dtype=np.int64))
@@ -1301,7 +1294,7 @@ class Integrated3PCF:
             ("out_ma_den", (n_shear_bins, n_patches)),
             ("out_mg_num", (n_density_bins, n_patches)),
             ("out_mg_den", (n_density_bins, n_patches)),
-            ("out_xipm_num", (2, ss_ncomb, nbins_total)),   # [xi+ | xi-]
+            ("out_xipm_num", (2, ss_ncomb, nbins_total)),  # [xi+ | xi-]
             ("out_xipm_den", (ss_ncomb, nbins_total)),
             ("out_xig_num", (dd_ncomb, nbins_total)),
             ("out_xig_den", (dd_ncomb, nbins_total)),
@@ -1400,7 +1393,8 @@ class Integrated3PCF:
         kernel = getattr(self.backend, "aperture_shear_kernel", None)
         if kernel is None:
             raise RuntimeError(
-                "Backend does not provide an aperture-shear kernel; use a supported backend."
+                "Backend does not provide an aperture-shear kernel; "
+                "use a supported backend."
             )
 
         if self.backend.name == "numpy":
@@ -1465,7 +1459,17 @@ class Integrated3PCF:
         weighted_num, weighted_den = self._get_aperture_scratch(
             Q_inds_dev.shape[0], backend_dtype
         )
-        kernel(Q_inds_dev, Q_cos_dev, Q_sin_dev, Q_val_dev, g1_dev, g2_dev, w_dev, weighted_num, weighted_den)
+        kernel(
+            Q_inds_dev,
+            Q_cos_dev,
+            Q_sin_dev,
+            Q_val_dev,
+            g1_dev,
+            g2_dev,
+            w_dev,
+            weighted_num,
+            weighted_den,
+        )
 
         weighted_num_patch = module.add.reduceat(weighted_num, Q_offsets_dev[:-1])
         weighted_den_patch = module.add.reduceat(weighted_den, Q_offsets_dev[:-1])
@@ -1497,7 +1501,8 @@ class Integrated3PCF:
         kernel = getattr(self.backend, "aperture_density_kernel", None)
         if kernel is None:
             raise RuntimeError(
-                "Backend does not provide an aperture-density kernel; use a supported backend."
+                "Backend does not provide an aperture-density kernel; "
+                "use a supported backend."
             )
 
         if self.backend.name == "numpy":
@@ -1802,7 +1807,8 @@ class Integrated3PCF:
             raise NotImplementedError(
                 f"{what} is not available with pack_pairs=True on a GPU backend; "
                 "use the tomographic methods (gg, kk, kg, "
-                "three_by_two_pt) or construct the Integrated3PCF with pack_pairs=False."
+                "three_by_two_pt) or construct the Integrated3PCF with "
+                "pack_pairs=False."
             )
 
     def _pair_index_arrays(self) -> Tuple[Any, Any]:
@@ -1838,7 +1844,9 @@ class Integrated3PCF:
         self._require_unpacked_pairs("_gg_single")
         return_numpy = not (return_device and self.backend.name == "cupy")
         if (g11 is g12) and (g21 is g22) and (w1 is w2):
-            return self._xipm_auto(g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy)
+            return self._xipm_auto(
+                g11, g21, w1, sumofweights=sumofweights, return_numpy=return_numpy
+            )
 
         return self._xipm_cross(
             g11,
@@ -1891,7 +1899,8 @@ class Integrated3PCF:
         density_density_kernel = getattr(self.backend, "kernel_density_density", None)
         if density_density_kernel is None:
             raise RuntimeError(
-                "Backend does not provide a density-density kernel; use a supported backend."
+                "Backend does not provide a density-density kernel; "
+                "use a supported backend."
             )
 
         if self.backend.name == "numpy":
@@ -1995,7 +2004,8 @@ class Integrated3PCF:
         density_shear_kernel = getattr(self.backend, "kernel_density_shear", None)
         if density_shear_kernel is None:
             raise RuntimeError(
-                "Backend does not provide a density-shear kernel; use a supported backend."
+                "Backend does not provide a density-shear kernel; "
+                "use a supported backend."
             )
 
         if self.backend.name == "numpy":
@@ -2086,7 +2096,8 @@ class Integrated3PCF:
         xipm_auto_corr_kernel = getattr(self.backend, "xipm_auto_corr_kernel", None)
         if xipm_auto_corr_kernel is None:
             raise RuntimeError(
-                "Backend does not provide an xipm auto-correlation kernel; use a supported backend."
+                "Backend does not provide an xipm auto-correlation kernel; "
+                "use a supported backend."
             )
 
         if self.backend.name == "numpy":
@@ -2118,9 +2129,7 @@ class Integrated3PCF:
                 sumofweights_dev = out_w
         else:
             if sumofweights_dev is None:
-                sumofweights_dev = self._get_xipm_sumofweights(
-                    w_in, w_in, w_dev, w_dev
-                )
+                sumofweights_dev = self._get_xipm_sumofweights(w_in, w_in, w_dev, w_dev)
             # The kernel computes at map precision and emits the real
             # parts directly.
             out_p, out_m = self._get_pair_scratch(self.acc_dtype, 2)
@@ -2142,7 +2151,9 @@ class Integrated3PCF:
 
             xip_num = self._reduce_pairs(out_p)
             xim_num = self._reduce_pairs(out_m)
-        xip_dev, xim_dev = self._normalize_xipm_pairs(xip_num, xim_num, sumofweights_dev)
+        xip_dev, xim_dev = self._normalize_xipm_pairs(
+            xip_num, xim_num, sumofweights_dev
+        )
 
         if return_numpy:
             return (
@@ -2170,8 +2181,12 @@ class Integrated3PCF:
         g22_dev = self._map_to_device(g22)
         w1_in = self._map_to_device(w1)
         w2_in = self._map_to_device(w2)
-        (g11_dev, g21_dev), w1_dev = self._expand_rows((g11_dev, g21_dev), w1_in, "pairs")
-        (g12_dev, g22_dev), w2_dev = self._expand_rows((g12_dev, g22_dev), w2_in, "pairs")
+        (g11_dev, g21_dev), w1_dev = self._expand_rows(
+            (g11_dev, g21_dev), w1_in, "pairs"
+        )
+        (g12_dev, g22_dev), w2_dev = self._expand_rows(
+            (g12_dev, g22_dev), w2_in, "pairs"
+        )
 
         if sumofweights_ab is not None:
             sum_ab = self._normalize_xipm_sumofweights(sumofweights_ab)
@@ -2323,23 +2338,35 @@ class Integrated3PCF:
             if s.ndim == 2 and s.shape == (nzbin_combs, nbins_total):
                 return s.astype(backend_dtype, copy=False)
             if s.ndim == 3 and s.shape == (nzbin_combs, self.n_patches, self.nbins):
-                return s.reshape(nzbin_combs, nbins_total).astype(backend_dtype, copy=False)
-            if s.ndim == 2 and nzbin_combs == 1 and s.shape == (self.n_patches, self.nbins):
+                return s.reshape(nzbin_combs, nbins_total).astype(
+                    backend_dtype, copy=False
+                )
+            if (
+                s.ndim == 2
+                and nzbin_combs == 1
+                and s.shape == (self.n_patches, self.nbins)
+            ):
                 return s.reshape(1, nbins_total).astype(backend_dtype, copy=False)
             if s.ndim == 1 and s.size == nzbin_combs * nbins_total:
-                return s.reshape(nzbin_combs, nbins_total).astype(backend_dtype, copy=False)
+                return s.reshape(nzbin_combs, nbins_total).astype(
+                    backend_dtype, copy=False
+                )
             if s.ndim == 1 and nzbin_combs == 1 and s.size == nbins_total:
                 return s.reshape(1, nbins_total).astype(backend_dtype, copy=False)
             # scalar / per-combination broadcasts fall through to the host path
         sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
 
         if sum_np.ndim == 0:
-            expanded = np.full((nzbin_combs, nbins_total), sum_np.item(), dtype=self.map_dtype)
+            expanded = np.full(
+                (nzbin_combs, nbins_total), sum_np.item(), dtype=self.map_dtype
+            )
             return self.backend.to_device(expanded)
 
         if sum_np.ndim == 1:
             if sum_np.size == nzbin_combs:
-                expanded = np.repeat(sum_np.reshape(nzbin_combs, 1), nbins_total, axis=1)
+                expanded = np.repeat(
+                    sum_np.reshape(nzbin_combs, 1), nbins_total, axis=1
+                )
                 return self.backend.to_device(expanded)
             if nzbin_combs == 1 and sum_np.size == nbins_total:
                 return self.backend.to_device(sum_np.reshape(1, nbins_total))
@@ -2352,7 +2379,11 @@ class Integrated3PCF:
             if nzbin_combs == 1 and sum_np.shape == (self.n_patches, self.nbins):
                 return self.backend.to_device(sum_np.reshape(1, nbins_total))
 
-        if sum_np.ndim == 3 and sum_np.shape == (nzbin_combs, self.n_patches, self.nbins):
+        if sum_np.ndim == 3 and sum_np.shape == (
+            nzbin_combs,
+            self.n_patches,
+            self.nbins,
+        ):
             return self.backend.to_device(sum_np.reshape(nzbin_combs, nbins_total))
 
         raise ValueError(
@@ -2408,8 +2439,12 @@ class Integrated3PCF:
             )
 
         if self._is_backend_native_array(sumofweights) and directional(sumofweights):
-            sum_ab = self._normalize_tomo_sumofweights_per_comb(sumofweights[0], nzbin_combs)
-            sum_ba = self._normalize_tomo_sumofweights_per_comb(sumofweights[1], nzbin_combs)
+            sum_ab = self._normalize_tomo_sumofweights_per_comb(
+                sumofweights[0], nzbin_combs
+            )
+            sum_ba = self._normalize_tomo_sumofweights_per_comb(
+                sumofweights[1], nzbin_combs
+            )
             return self.backend.module.stack((sum_ab, sum_ba), axis=0)
         sum_np = np.asarray(self.backend.to_numpy(sumofweights), dtype=self.map_dtype)
         if directional(sum_np):
@@ -2443,7 +2478,11 @@ class Integrated3PCF:
         return True
 
     def _to_backend_array(self, array: Any, dtype: Optional[Any] = None) -> Any:
-        backend_array = array if self._is_backend_native_array(array) else self.backend.to_device(array)
+        backend_array = (
+            array
+            if self._is_backend_native_array(array)
+            else self.backend.to_device(array)
+        )
         if dtype is not None:
             backend_array = backend_array.astype(dtype, copy=False)
         return backend_array
@@ -2876,8 +2915,7 @@ class Integrated3PCF:
         Built once per (factors, dtype): uploading a two-element array per
         call cost more than the multiply it feeds.
         """
-        key = (tuple(float(s) for s in scales), np.dtype(dtype).name,
-               xp is np)
+        key = (tuple(float(s) for s in scales), np.dtype(dtype).name, xp is np)
         cache = getattr(self, "_sign_scale_cache", None)
         if cache is None:
             cache = self._sign_scale_cache = {}
@@ -2932,7 +2970,7 @@ class Integrated3PCF:
             return None
         kern = self.backend.degrade_rows_kernel
         n_val = len(values)
-        if n_val > 2:                      # the kernel is templated for 0..2
+        if n_val > 2:  # the kernel is templated for 0..2
             return None
 
         xp = self.backend.module
@@ -2946,14 +2984,21 @@ class Integrated3PCF:
             xp, n_lead, n_val, n_rows, layout
         )
         self._fill_pixel_rows(
-            xp, w_rows, v_rows, weights, values, stacked, signs,
-            n_lead, n_val, n_active, layout,
+            xp,
+            w_rows,
+            v_rows,
+            weights,
+            values,
+            stacked,
+            signs,
+            n_lead,
+            n_val,
+            n_active,
+            layout,
         )
 
         w_app = xp.zeros((n_lead, n_appended), dtype=acc)
-        v_app = (
-            xp.zeros((n_val * n_lead, n_appended), dtype=acc) if n_val else w_app
-        )
+        v_app = xp.zeros((n_val * n_lead, n_appended), dtype=acc) if n_val else w_app
 
         def scratch(base: int) -> Tuple[Any, Any]:
             return (
@@ -2964,12 +3009,28 @@ class Integrated3PCF:
         csr = self._degrade_csr_device()
         filled: List[Tuple[int, int]] = []
 
-        def run(indptr: Any, indices: Any, n_cells: int, src: Tuple[Any, Any],
-                dst_base: int, weighted: bool) -> bool:
+        def run(
+            indptr: Any,
+            indices: Any,
+            n_cells: int,
+            src: Tuple[Any, Any],
+            dst_base: int,
+            weighted: bool,
+        ) -> bool:
             w_dst, v_dst = scratch(dst_base)
             return bool(
-                kern.level(indptr, indices, src[0], src[1], w_dst, v_dst,
-                           n_cells, n_lead, n_val, weighted)
+                kern.level(
+                    indptr,
+                    indices,
+                    src[0],
+                    src[1],
+                    w_dst,
+                    v_dst,
+                    n_cells,
+                    n_lead,
+                    n_val,
+                    weighted,
+                )
             )
 
         pixel_src = (w_desc, v_desc)
@@ -3014,18 +3075,34 @@ class Integrated3PCF:
         v_tail = (v_desc[0], n_active * v_desc[4], v_desc[2], v_desc[3], v_desc[4])
         for lo, hi in filled:
             if not kern.finalize(
-                w_app, v_app, n_appended, w_tail, v_tail,
-                n_lead, lo, hi, n_val, row_inner=(layout != "aos"),
+                w_app,
+                v_app,
+                n_appended,
+                w_tail,
+                v_tail,
+                n_lead,
+                lo,
+                hi,
+                n_val,
+                row_inner=(layout != "aos"),
             ):
                 return None
 
         return v_rows, w_rows
 
     def _fill_pixel_rows(
-        self, xp: Any, w_rows: Any, v_rows: Any, weights: Any,
-        values: Sequence[Any], stacked: Optional[Any],
-        signs: Optional[Sequence[float]], n_lead: int, n_val: int,
-        n_active: int, layout: str,
+        self,
+        xp: Any,
+        w_rows: Any,
+        v_rows: Any,
+        weights: Any,
+        values: Sequence[Any],
+        stacked: Optional[Any],
+        signs: Optional[Sequence[float]],
+        n_lead: int,
+        n_val: int,
+        n_active: int,
+        layout: str,
     ) -> None:
         """Copy the pixel rows (and any sign flip) into the row buffers."""
         w2 = weights.reshape(n_lead, n_active)
@@ -3037,15 +3114,17 @@ class Integrated3PCF:
             return
         scales = None
         if signs is not None and any(float(s) != 1.0 for s in signs):
-            scales = [None if float(s) == 1.0 else self.map_dtype.type(s)
-                      for s in signs]
+            scales = [
+                None if float(s) == 1.0 else self.map_dtype.type(s) for s in signs
+            ]
         if stacked is not None and layout in ("aos", "interleaved"):
             # One copy for the whole map-set instead of one per component,
             # reading the caller's contiguous (n_lead, K, n_active) array.
             scale = None
             if scales is not None:
                 scale = self._sign_scale_array(
-                    xp, [1.0 if s is None else s for s in scales],
+                    xp,
+                    [1.0 if s is None else s for s in scales],
                     self.map_dtype,
                 )
             src = stacked.reshape(n_lead, n_val, n_active)
@@ -3056,14 +3135,18 @@ class Integrated3PCF:
                 )
             else:
                 self._scaled_copy(
-                    xp, src, v_rows[:, :, :n_active],
+                    xp,
+                    src,
+                    v_rows[:, :, :n_active],
                     None if scale is None else scale[:, None],
                 )
             return
         if layout == "aos":
             for k, v in enumerate(values):
                 self._scaled_copy(
-                    xp, v.reshape(n_lead, n_active).T, v_rows[:n_active, :, k],
+                    xp,
+                    v.reshape(n_lead, n_active).T,
+                    v_rows[:n_active, :, k],
                     None if scales is None else scales[k],
                 )
             return
@@ -3074,7 +3157,9 @@ class Integrated3PCF:
                 else v_rows[k * n_lead : (k + 1) * n_lead, :n_active]
             )
             self._scaled_copy(
-                xp, v.reshape(n_lead, n_active), dst,
+                xp,
+                v.reshape(n_lead, n_active),
+                dst,
                 None if scales is None else scales[k],
             )
 
@@ -3199,9 +3284,7 @@ class Integrated3PCF:
         """
         n_appended = self.n_appended
         scales = self._sign_scales(signs, len(values))
-        if n_appended == 0 or (
-            blocks == "aperture" and self.n_aperture_cells == 0
-        ):
+        if n_appended == 0 or (blocks == "aperture" and self.n_aperture_cells == 0):
             # aperture indices address pixel rows; nothing to append
             return self._scaled_values(values, scales), weights
         n_active = self.n_active
@@ -3256,7 +3339,8 @@ class Integrated3PCF:
             X = xp.empty((n_active, len(values) * n_lead), dtype=acc)
             for k, v in enumerate(values):
                 xp.multiply(
-                    w2.T, v.reshape(n_lead, n_active).T,
+                    w2.T,
+                    v.reshape(n_lead, n_active).T,
                     out=X[:, k * n_lead : (k + 1) * n_lead],
                 )
             block = self._append_block(X, blocks, use_cupy)
@@ -3333,7 +3417,10 @@ class Integrated3PCF:
             blocks = "all"  # fill everything once, share between the leaves
 
         fused = self._expand_rows_fused(
-            (shear[:, 0], shear[:, 1]), weights, blocks, signs=signs,
+            (shear[:, 0], shear[:, 1]),
+            weights,
+            blocks,
+            signs=signs,
             layout="aos" if layout == "aos" else "interleaved",
             stacked=shear,
         )
@@ -3345,9 +3432,7 @@ class Integrated3PCF:
             )
             shear_rows = xp.stack((g1, g2), axis=1)
             if layout == "aos":
-                shear_rows = xp.ascontiguousarray(
-                    xp.transpose(shear_rows, (2, 0, 1))
-                )
+                shear_rows = xp.ascontiguousarray(xp.transpose(shear_rows, (2, 0, 1)))
                 w_rows = xp.ascontiguousarray(xp.transpose(w_rows, (1, 0)))
         if memo is not None:
             memo[key] = (shear_rows, w_rows, shear, weights)
@@ -3417,20 +3502,24 @@ class Integrated3PCF:
     # coalescing is worth.
 
     def _pair_shear_rows(
-        self, shear: Any, weights: Any, blocks: str = "pairs",
+        self,
+        shear: Any,
+        weights: Any,
+        blocks: str = "pairs",
         signs: Optional[Sequence[float]] = None,
     ) -> Tuple[Any, Any]:
         if self._pair_row_layout() == "aos":
             return self._expand_shear_rows(
                 shear, weights, blocks, signs=signs, layout="aos"
             )
-        rows, w_rows = self._expand_shear_rows(
-            shear, weights, blocks, signs=signs
-        )
+        rows, w_rows = self._expand_shear_rows(shear, weights, blocks, signs=signs)
         return self._transpose_tomo_inputs_aos(rows, w_rows)
 
     def _pair_value_rows(
-        self, values: Sequence[Any], weights: Any, blocks: str = "pairs",
+        self,
+        values: Sequence[Any],
+        weights: Any,
+        blocks: str = "pairs",
         signs: Optional[Sequence[float]] = None,
     ) -> Tuple[List[Any], Any]:
         if self._pair_row_layout() == "aos":
@@ -3443,8 +3532,12 @@ class Integrated3PCF:
         )
 
     def _shear_rows_no_append(
-        self, xp: Any, shear: Any, weights: Any,
-        scales: Optional[Tuple[float, ...]], layout: str,
+        self,
+        xp: Any,
+        shear: Any,
+        weights: Any,
+        scales: Optional[Tuple[float, ...]],
+        layout: str,
     ) -> Tuple[Any, Any]:
         """Full-resolution shear rows: no virtual rows to append.
 
@@ -3457,7 +3550,9 @@ class Integrated3PCF:
             out = xp.empty_like(shear)
             for k, s in enumerate(scales):
                 self._scaled_copy(
-                    xp, shear[:, k], out[:, k],
+                    xp,
+                    shear[:, k],
+                    out[:, k],
                     None if s == 1.0 else self.map_dtype.type(s),
                 )
             return out, weights
@@ -3471,7 +3566,7 @@ class Integrated3PCF:
 
     @property
     def _index_device_dtype(self) -> Any:
-        """Backend-native dtype matching self.index_dtype (e.g. cupy.int32 or numpy.int64)."""
+        """Backend-native dtype of ``self.index_dtype`` (cupy.int32 / numpy.int64)."""
         return getattr(self.backend.module, self.index_dtype.name)
 
     def _get_pair_scratch(self, dtype: Any, count: int) -> Tuple[Any, ...]:
@@ -3517,9 +3612,7 @@ class Integrated3PCF:
         ctx.aperture_scratch = (key, num, den)
         return num, den
 
-    def _fingerprint_weights(
-        self, w_np: Any
-    ) -> Tuple[Tuple[int, ...], str, str]:
+    def _fingerprint_weights(self, w_np: Any) -> Tuple[Tuple[int, ...], str, str]:
         if self._is_backend_native_array(w_np):
             shape = tuple(getattr(w_np, "shape", ()))
             dtype_str = np.dtype(getattr(w_np, "dtype", self.map_dtype)).str
@@ -3638,7 +3731,8 @@ class Integrated3PCF:
                 reduced = self.backend.add.reduceat(values_dev, starts, axis=-1)
             except TypeError:
                 reduced = self.backend.module.stack(
-                    [self.backend.add.reduceat(row, starts) for row in values_dev], axis=0
+                    [self.backend.add.reduceat(row, starts) for row in values_dev],
+                    axis=0,
                 )
         else:
             reduced = self.backend.zeros(output_shape, dtype=values_dev.dtype)
@@ -3699,7 +3793,8 @@ class Integrated3PCF:
             migrated_cache: Dict[Any, Any] = {}
             if (
                 cache is not None
-                and self.compute_context._xipm_sumofweights_cache_w_fingerprint is not None
+                and self.compute_context._xipm_sumofweights_cache_w_fingerprint
+                is not None
                 and self.compute_context._xipm_sumofweights_cache_prepare_version
                 == self.compute_context.prepare_version
             ):
@@ -3731,9 +3826,7 @@ class Integrated3PCF:
             cache.pop(next(iter(cache)))
         return sumofweights_dev
 
-    def compute_sumofweights(
-        self, weights: Any, nzbins: Optional[int] = None
-    ) -> Any:
+    def compute_sumofweights(self, weights: Any, nzbins: Optional[int] = None) -> Any:
         """Precompute the pair weight sums the ``sumofweights=`` argument takes.
 
         Every tomographic method accepts ``sumofweights=`` so that a weight
@@ -3787,10 +3880,14 @@ class Integrated3PCF:
 
         return sumofweights_dev
 
-    def _transpose_tomo_inputs_aos(self, shear_maps_dev: Any, w_dev: Any) -> Tuple[Any, Any]:
+    def _transpose_tomo_inputs_aos(
+        self, shear_maps_dev: Any, w_dev: Any
+    ) -> Tuple[Any, Any]:
         """Convert tomography inputs from SoA to AoS for contiguous per-pixel loads."""
         module = self.backend.module
-        shear_aos = module.ascontiguousarray(module.transpose(shear_maps_dev, (2, 0, 1)))
+        shear_aos = module.ascontiguousarray(
+            module.transpose(shear_maps_dev, (2, 0, 1))
+        )
         weights_aos = module.ascontiguousarray(module.transpose(w_dev, (1, 0)))
         return shear_aos, weights_aos
 
@@ -3900,8 +3997,12 @@ class Integrated3PCF:
         acc_backend_dtype = getattr(module, self.acc_dtype.name)
         nbins_total = int(self.n_patches * self.nbins)
         # Allocated at the accumulation dtype: the kernel reduces into them.
-        out_num = self.backend.zeros((2, nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-        out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+        out_num = self.backend.zeros(
+            (2, nzbin_combs, nbins_total), dtype=acc_backend_dtype
+        )
+        out_den = self.backend.zeros(
+            (nzbin_combs, nbins_total), dtype=acc_backend_dtype
+        )
 
         ctx = self.compute_context
         if ctx.packed_pairs_dev is not None:
@@ -3941,7 +4042,9 @@ class Integrated3PCF:
             if not launched:
                 return None
 
-        return self._finish_xipm_tomo(out_num, out_den, sumofweights_dev, auto_comb, nzbin_combs)
+        return self._finish_xipm_tomo(
+            out_num, out_den, sumofweights_dev, auto_comb, nzbin_combs
+        )
 
     def _xipm_tomo_vectorized_cpu(
         self,
@@ -3952,9 +4055,7 @@ class Integrated3PCF:
         nzbin_combs: int,
     ) -> Tuple[Any, Any]:
         # Any sign flip has already been folded into the expansion.
-        shear_aos, weights_aos = self._transpose_tomo_inputs_aos(
-            shear_maps_dev, w_dev
-        )
+        shear_aos, weights_aos = self._transpose_tomo_inputs_aos(shear_maps_dev, w_dev)
 
         nbins_total = int(self.tot_bins_reduceat_dev.shape[0] - 1)
         # The numba kernel inherits its accumulator dtype from these arrays.
@@ -3983,7 +4084,9 @@ class Integrated3PCF:
             raise RuntimeError(
                 "Backend tomography vectorized kernel unavailable for CPU backend."
             )
-        return self._finish_xipm_tomo(out_num, out_w, sumofweights_dev, auto_comb, nzbin_combs)
+        return self._finish_xipm_tomo(
+            out_num, out_w, sumofweights_dev, auto_comb, nzbin_combs
+        )
 
     def _gg_pairs(
         self,
@@ -4021,12 +4124,17 @@ class Integrated3PCF:
                     "sumofweights must have at least two dimensions with "
                     "shape (2, nzbin_combs, ...)"
                 )
-            if sumofweights_arr.shape[0] != 2 or sumofweights_arr.shape[1] != nzbin_combs:
+            if (
+                sumofweights_arr.shape[0] != 2
+                or sumofweights_arr.shape[1] != nzbin_combs
+            ):
                 raise ValueError(
                     f"sumofweights must have first dimensions (2, {nzbin_combs}); "
                     f"got {sumofweights_arr.shape}"
                 )
-            sumofweights_dev = self._to_backend_array(sumofweights_arr, dtype=self.map_dtype)
+            sumofweights_dev = self._to_backend_array(
+                sumofweights_arr, dtype=self.map_dtype
+            )
 
         g1_fac, g2_fac = 1, 1
         if flip_g1:
@@ -4051,7 +4159,9 @@ class Integrated3PCF:
         xi_p, xi_m = vectorized_xipm
         if return_device and self.backend.name == "cupy":
             return self.backend.module.real(xi_p), self.backend.module.real(xi_m)
-        return np.real(self.backend.to_numpy(xi_p)), np.real(self.backend.to_numpy(xi_m))
+        return np.real(self.backend.to_numpy(xi_p)), np.real(
+            self.backend.to_numpy(xi_m)
+        )
 
     def m_a(
         self,
@@ -4134,7 +4244,9 @@ class Integrated3PCF:
         )
         for i in range(nzbins):
             M_a[i] = self._aperture_shear_rows(
-                shear_rows[i, 0], shear_rows[i, 1], w_rows[i],
+                shear_rows[i, 0],
+                shear_rows[i, 1],
+                w_rows[i],
                 return_device=keep_on_device,
             )
         return M_a
@@ -4196,7 +4308,9 @@ class Integrated3PCF:
         if keep_on_device:
             module = self.backend.module
             map_backend_dtype = getattr(module, self.map_dtype.name)
-            M_g = module.zeros((density_arr.shape[0], self.n_patches), dtype=map_backend_dtype)
+            M_g = module.zeros(
+                (density_arr.shape[0], self.n_patches), dtype=map_backend_dtype
+            )
         else:
             M_g = np.zeros((density_arr.shape[0], self.n_patches), dtype=self.map_dtype)
         (density_rows,), w_rows = self._expand_rows(
@@ -4324,9 +4438,7 @@ class Integrated3PCF:
         # ``aperture_tomo.cu`` leaf that fixes the layout at ``"soa"``; a
         # xi_t-only call keeps its direct AoS write.
         want_aperture = return_N_ap or return_M_ap
-        scope = (
-            self._expansion_scope(layout="soa") if want_aperture else nullcontext()
-        )
+        scope = self._expansion_scope(layout="soa") if want_aperture else nullcontext()
         with scope:
             xi_t = self._kg_pairs(
                 density_dev,
@@ -4377,10 +4489,13 @@ class Integrated3PCF:
     ) -> Any:
         self._ensure_prepared()
 
-        tomo_kernel = getattr(self.backend, "kernel_density_density_tomo_vectorized", None)
+        tomo_kernel = getattr(
+            self.backend, "kernel_density_density_tomo_vectorized", None
+        )
         if tomo_kernel is None:
             raise RuntimeError(
-                "Backend does not provide a vectorized density-density tomography kernel."
+                "Backend does not provide a vectorized density-density "
+                "tomography kernel."
             )
 
         module = self.backend.module
@@ -4390,9 +4505,7 @@ class Integrated3PCF:
         density_dev = self._map_to_device(density_maps)
         w_dev = self._map_to_device(weights)
         # Expanded straight into the kernels' AoS layout (no transpose).
-        (density_soa,), w_soa = self._pair_value_rows(
-            (density_dev,), w_dev, "pairs"
-        )
+        (density_soa,), w_soa = self._pair_value_rows((density_dev,), w_dev, "pairs")
 
         comb_i, comb_j, auto_comb, nzbin_combs = (
             self._get_selected_tomo_density_combination_indices(
@@ -4432,11 +4545,17 @@ class Integrated3PCF:
             )
         else:
             # Allocated at the accumulation dtype: the kernel reduces into them.
-            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+            out_num = self.backend.zeros(
+                (nzbin_combs, nbins_total), dtype=acc_backend_dtype
+            )
+            out_den = self.backend.zeros(
+                (nzbin_combs, nbins_total), dtype=acc_backend_dtype
+            )
             ctx = self.compute_context
             if ctx.packed_pairs_dev is not None:
-                packed_kernel = getattr(self.backend, "kernel_density_density_tomo_packed", None)
+                packed_kernel = getattr(
+                    self.backend, "kernel_density_density_tomo_packed", None
+                )
                 perm = ctx.packed_perm_dev
                 launched = packed_kernel is not None and packed_kernel(
                     module.ascontiguousarray(density_soa[perm]),
@@ -4452,7 +4571,8 @@ class Integrated3PCF:
                 if not launched:
                     raise RuntimeError(
                         "The packed density-density kernel is unavailable for this "
-                        f"configuration ({nzbins} tomographic bins); use pack_pairs=False."
+                        f"configuration ({nzbins} tomographic bins); "
+                        "use pack_pairs=False."
                     )
             else:
                 inds_i, inds_j = self._pair_index_arrays()
@@ -4492,7 +4612,9 @@ class Integrated3PCF:
     ) -> Any:
         self._ensure_prepared()
 
-        tomo_kernel = getattr(self.backend, "kernel_density_shear_tomo_vectorized", None)
+        tomo_kernel = getattr(
+            self.backend, "kernel_density_shear_tomo_vectorized", None
+        )
         if tomo_kernel is None:
             raise RuntimeError(
                 "Backend does not provide a vectorized density-shear tomography kernel."
@@ -4550,11 +4672,17 @@ class Integrated3PCF:
             )
         else:
             # Allocated at the accumulation dtype: the kernel reduces into them.
-            out_num = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
-            out_den = self.backend.zeros((nzbin_combs, nbins_total), dtype=acc_backend_dtype)
+            out_num = self.backend.zeros(
+                (nzbin_combs, nbins_total), dtype=acc_backend_dtype
+            )
+            out_den = self.backend.zeros(
+                (nzbin_combs, nbins_total), dtype=acc_backend_dtype
+            )
             ctx = self.compute_context
             if ctx.packed_pairs_dev is not None:
-                packed_kernel = getattr(self.backend, "kernel_density_shear_tomo_packed", None)
+                packed_kernel = getattr(
+                    self.backend, "kernel_density_shear_tomo_packed", None
+                )
                 perm = ctx.packed_perm_dev
                 launched = packed_kernel is not None and packed_kernel(
                     module.ascontiguousarray(density_soa[perm]),
@@ -4625,10 +4753,14 @@ class Integrated3PCF:
                     self.backend.to_numpy(sumofweights), dtype=self.map_dtype
                 )
                 if sum_np.ndim >= 2 and sum_np.shape[0] == 2:
-                    sum_dir = self._normalize_tomo_sumofweights_directional(sum_np, nzbin_combs)
+                    sum_dir = self._normalize_tomo_sumofweights_directional(
+                        sum_np, nzbin_combs
+                    )
                     sum_total = sum_dir[0] + sum_dir[1]
                 else:
-                    sum_total = self._normalize_tomo_sumofweights_per_comb(sum_np, nzbin_combs)
+                    sum_total = self._normalize_tomo_sumofweights_per_comb(
+                        sum_np, nzbin_combs
+                    )
 
         return self._finish_pair_sums((num_ab,), sum_total, nzbin_combs)[0]
 
@@ -4672,7 +4804,7 @@ class Integrated3PCF:
         flip_g2: bool = False,
         return_device: bool = True,
     ) -> np.ndarray:
-        """Compute tomographic density-shear correlation with directional Lens->Source ordering.
+        """Tomographic density-shear correlation, directional lens -> source.
 
         The first argument (`density_maps`) is always treated as the lens field and the
         second argument (`shear_maps`) as the source shear field.
@@ -4709,7 +4841,10 @@ class Integrated3PCF:
                 "shear_weights must have shape (n_source_bins, npix); "
                 f"got {ws_arr.shape}"
             )
-        if ws_arr.shape[0] != shear_arr.shape[0] or ws_arr.shape[1] != shear_arr.shape[2]:
+        if (
+            ws_arr.shape[0] != shear_arr.shape[0]
+            or ws_arr.shape[1] != shear_arr.shape[2]
+        ):
             raise ValueError(
                 "shear_weights must match shear_maps tomography/pixel dimensions; "
                 f"got {ws_arr.shape} and {shear_arr.shape}"
@@ -4830,7 +4965,10 @@ class Integrated3PCF:
                 "shear_weights must have shape (n_shear_bins, npix); "
                 f"got {shear_w_np.shape}"
             )
-        if shear_w_np.shape[0] != shear_np.shape[0] or shear_w_np.shape[1] != shear_np.shape[2]:
+        if (
+            shear_w_np.shape[0] != shear_np.shape[0]
+            or shear_w_np.shape[1] != shear_np.shape[2]
+        ):
             raise ValueError(
                 "shear_weights must match shear_maps tomography/pixel dimensions; "
                 f"got {shear_w_np.shape} and {shear_np.shape}"
@@ -4853,11 +4991,15 @@ class Integrated3PCF:
         if on_gpu:
             aperture_kernel = getattr(self.backend, "kernel_3x2pt_tomo_aperture", None)
             if aperture_kernel is None:
-                raise RuntimeError("Backend does not provide the fused 3x2pt aperture kernel.")
+                raise RuntimeError(
+                    "Backend does not provide the fused 3x2pt aperture kernel."
+                )
         else:
             fused_kernel = getattr(self.backend, "kernel_3x2pt_tomo_fused", None)
             if fused_kernel is None:
-                raise RuntimeError("Backend does not provide a fused 3x2pt tomography kernel.")
+                raise RuntimeError(
+                    "Backend does not provide a fused 3x2pt tomography kernel."
+                )
 
         density_dev = self._to_backend_array(density_np, dtype=self.map_dtype)
         shear_dev = self._to_backend_array(shear_np, dtype=self.map_dtype)
@@ -4889,10 +5031,12 @@ class Integrated3PCF:
                 gc_auto_correlations_only=gc_auto_correlations_only,
             )
         )
-        ds_comb_i, ds_comb_j, ds_ncomb = self._get_selected_tomo_cross_combination_indices(
-            n_density_bins,
-            n_shear_bins,
-            ggl_bin_combinations=ggl_bin_combinations,
+        ds_comb_i, ds_comb_j, ds_ncomb = (
+            self._get_selected_tomo_cross_combination_indices(
+                n_density_bins,
+                n_shear_bins,
+                ggl_bin_combinations=ggl_bin_combinations,
+            )
         )
 
         pair_offsets = module.ascontiguousarray(
@@ -4989,11 +5133,27 @@ class Integrated3PCF:
                 out_mg_den,
             )
             if not launched:
-                raise RuntimeError("Backend declined fused 3x2pt aperture kernel launch.")
+                raise RuntimeError(
+                    "Backend declined fused 3x2pt aperture kernel launch."
+                )
             self._launch_3x2pt_pair_kernels(
-                density_soa, shear_soa, density_w_soa, shear_w_soa, pair_offsets,
-                ss_comb_i, ss_comb_j, dd_comb_i, dd_comb_j, ds_comb_i, ds_comb_j,
-                out_xipm_num, out_xipm_den, out_xig_num, out_xig_den, out_xit_num, out_xit_den,
+                density_soa,
+                shear_soa,
+                density_w_soa,
+                shear_w_soa,
+                pair_offsets,
+                ss_comb_i,
+                ss_comb_j,
+                dd_comb_i,
+                dd_comb_j,
+                ds_comb_i,
+                ds_comb_j,
+                out_xipm_num,
+                out_xipm_den,
+                out_xig_num,
+                out_xig_den,
+                out_xit_num,
+                out_xit_den,
             )
 
         def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -5037,7 +5197,9 @@ class Integrated3PCF:
                 ),
             )
 
-        to_np = lambda arr: np.asarray(self.backend.to_numpy(arr), dtype=self.map_dtype)
+        def to_np(arr: Any) -> np.ndarray:
+            return np.asarray(self.backend.to_numpy(arr), dtype=self.map_dtype)
+
         M_a = _safe_div(to_np(out_ma_num), to_np(out_ma_den))
         M_g = _safe_div(to_np(out_mg_num), to_np(out_mg_den))
 
@@ -5091,7 +5253,10 @@ class Integrated3PCF:
         packed = ctx.packed_pairs_dev is not None
         if packed:
             perm = ctx.packed_perm_dev
-            g = lambda arr: module.ascontiguousarray(arr[perm])
+
+            def g(arr: Any) -> Any:
+                return module.ascontiguousarray(arr[perm])
+
             density_aos, shear_aos = g(density_aos), g(shear_aos)
             density_w_aos, shear_w_aos = g(density_w_aos), g(shear_w_aos)
             geometry: Tuple[Any, ...] = (ctx.packed_pairs_dev, ctx.packed_row_base_dev)
@@ -5110,9 +5275,21 @@ class Integrated3PCF:
         multi = getattr(backend, "kernel_3x2pt_tomo_pairs", None)
         if multi is not None:
             done = multi(
-                density_aos, shear_aos, density_w_aos, shear_w_aos, geometry, pair_offsets,
-                (ss_comb_i, ss_comb_j), (dd_comb_i, dd_comb_j), (ds_comb_i, ds_comb_j),
-                out_xipm_num, out_xipm_den, out_xig_num, out_xig_den, out_xit_num, out_xit_den,
+                density_aos,
+                shear_aos,
+                density_w_aos,
+                shear_w_aos,
+                geometry,
+                pair_offsets,
+                (ss_comb_i, ss_comb_j),
+                (dd_comb_i, dd_comb_j),
+                (ds_comb_i, ds_comb_j),
+                out_xipm_num,
+                out_xipm_den,
+                out_xig_num,
+                out_xig_den,
+                out_xit_num,
+                out_xit_den,
             )
         do_ss, do_dd, do_ds = (not flag for flag in done)
 
@@ -5120,17 +5297,52 @@ class Integrated3PCF:
             density_p, shear_p = density_aos, shear_aos
             density_w_p, shear_w_p = density_w_aos, shear_w_aos
             pairs, row_base = geometry
-            ok_ss = not do_ss or backend.xipm_tomo_packed_kernel is not None and backend.xipm_tomo_packed_kernel(
-                shear_p, shear_w_p, pairs, pair_offsets, row_base,
-                ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
+            ok_ss = (
+                not do_ss
+                or backend.xipm_tomo_packed_kernel is not None
+                and backend.xipm_tomo_packed_kernel(
+                    shear_p,
+                    shear_w_p,
+                    pairs,
+                    pair_offsets,
+                    row_base,
+                    ss_comb_i,
+                    ss_comb_j,
+                    out_xipm_num,
+                    out_xipm_den,
+                )
             )
-            ok_dd = not do_dd or backend.kernel_density_density_tomo_packed is not None and backend.kernel_density_density_tomo_packed(
-                density_p, density_w_p, pairs, pair_offsets, row_base,
-                dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
+            ok_dd = (
+                not do_dd
+                or backend.kernel_density_density_tomo_packed is not None
+                and backend.kernel_density_density_tomo_packed(
+                    density_p,
+                    density_w_p,
+                    pairs,
+                    pair_offsets,
+                    row_base,
+                    dd_comb_i,
+                    dd_comb_j,
+                    out_xig_num,
+                    out_xig_den,
+                )
             )
-            ok_ds = not do_ds or backend.kernel_density_shear_tomo_packed is not None and backend.kernel_density_shear_tomo_packed(
-                density_p, shear_p, density_w_p, shear_w_p, pairs, pair_offsets, row_base,
-                ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,
+            ok_ds = (
+                not do_ds
+                or backend.kernel_density_shear_tomo_packed is not None
+                and backend.kernel_density_shear_tomo_packed(
+                    density_p,
+                    shear_p,
+                    density_w_p,
+                    shear_w_p,
+                    pairs,
+                    pair_offsets,
+                    row_base,
+                    ds_comb_i,
+                    ds_comb_j,
+                    out_xit_num,
+                    out_xit_den,
+                )
             )
             if not (ok_ss and ok_dd and ok_ds):
                 raise RuntimeError(
@@ -5141,17 +5353,43 @@ class Integrated3PCF:
 
         inds_i, inds_j, rot_i, rot_j = geometry
         ok_ss = not do_ss or backend.xipm_tomo_vectorized_kernel(
-            shear_aos, shear_w_aos, inds_i, inds_j, rot_i, rot_j, pair_offsets,
-            ss_comb_i, ss_comb_j, out_xipm_num, out_xipm_den,
+            shear_aos,
+            shear_w_aos,
+            inds_i,
+            inds_j,
+            rot_i,
+            rot_j,
+            pair_offsets,
+            ss_comb_i,
+            ss_comb_j,
+            out_xipm_num,
+            out_xipm_den,
         )
         ok_dd = not do_dd or backend.kernel_density_density_tomo_vectorized(
-            density_aos, density_w_aos, inds_i, inds_j, pair_offsets,
-            dd_comb_i, dd_comb_j, out_xig_num, out_xig_den,
+            density_aos,
+            density_w_aos,
+            inds_i,
+            inds_j,
+            pair_offsets,
+            dd_comb_i,
+            dd_comb_j,
+            out_xig_num,
+            out_xig_den,
         )
         ok_ds = not do_ds or backend.kernel_density_shear_tomo_vectorized(
-            density_aos, shear_aos, density_w_aos, shear_w_aos,
-            inds_i, inds_j, rot_i, rot_j, pair_offsets,
-            ds_comb_i, ds_comb_j, out_xit_num, out_xit_den,
+            density_aos,
+            shear_aos,
+            density_w_aos,
+            shear_w_aos,
+            inds_i,
+            inds_j,
+            rot_i,
+            rot_j,
+            pair_offsets,
+            ds_comb_i,
+            ds_comb_j,
+            out_xit_num,
+            out_xit_den,
         )
         if not (ok_ss and ok_dd and ok_ds):
             raise RuntimeError("Backend declined a 3x2pt pair kernel launch.")
@@ -5222,7 +5460,8 @@ class Integrated3PCF:
                 density_w = weight_arr
             else:
                 raise ValueError(
-                    "When both shear_maps and density_maps are provided, weights must be a dict or (shear_weights, density_weights)."
+                    "When both shear_maps and density_maps are provided, weights "
+                    "must be a dict or (shear_weights, density_weights)."
                 )
 
         if shear_w is None:
@@ -5242,7 +5481,6 @@ class Integrated3PCF:
             flip_g2=flip_g2,
             return_device=return_device,
         )
-
 
     # ── public measurements (labelled results) ──────────────────────────────
 
@@ -5269,17 +5507,29 @@ class Integrated3PCF:
         """
         if apertures:
             M_a, xi_p, xi_m = self._gg_full(
-                shear_maps, w, sumofweights=sumofweights, aperture_filter=aperture_filter,
-                flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+                shear_maps,
+                w,
+                sumofweights=sumofweights,
+                aperture_filter=aperture_filter,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=return_device,
             )
         else:
             M_a = None
             xi_p, xi_m = self._gg_pairs(
-                shear_maps, w, sumofweights=sumofweights,
-                flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+                shear_maps,
+                w,
+                sumofweights=sumofweights,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
+                return_device=return_device,
             )
         return IntegratedResult(
-            binedges=np.asarray(self.binedges).copy(), M_a=M_a, xi_p=xi_p, xi_m=xi_m,
+            binedges=np.asarray(self.binedges).copy(),
+            M_a=M_a,
+            xi_p=xi_p,
+            xi_m=xi_m,
             gg_combinations=tuple(self.tomo_combinations(self._nz(shear_maps))),
         )
 
@@ -5302,17 +5552,26 @@ class Integrated3PCF:
         """
         if apertures:
             M_g, xi_g = self._kk_full(
-                k_maps, w, sumofweights=sumofweights, gc_auto_correlations_only=auto_only,
-                aperture_filter=aperture_filter, return_device=return_device,
+                k_maps,
+                w,
+                sumofweights=sumofweights,
+                gc_auto_correlations_only=auto_only,
+                aperture_filter=aperture_filter,
+                return_device=return_device,
             )
         else:
             M_g = None
             xi_g = self._kk_pairs(
-                k_maps, w, sumofweights=sumofweights, gc_auto_correlations_only=auto_only,
+                k_maps,
+                w,
+                sumofweights=sumofweights,
+                gc_auto_correlations_only=auto_only,
                 return_device=return_device,
             )
         return IntegratedResult(
-            binedges=np.asarray(self.binedges).copy(), M_g=M_g, xi_g=xi_g,
+            binedges=np.asarray(self.binedges).copy(),
+            M_g=M_g,
+            xi_g=xi_g,
             kk_combinations=tuple(self.tomo_combinations(self._nz(k_maps), auto_only)),
         )
 
@@ -5341,9 +5600,17 @@ class Integrated3PCF:
         combos = tuple(self.kg_combinations(nl, ns, combinations))
         if m_g or m_a:
             out = self._kg_full(
-                k_maps, shear_maps, k_weights, shear_weights, sumofweights=sumofweights,
-                ggl_bin_combinations=combinations, aperture_filter=aperture_filter,
-                return_N_ap=m_g, return_M_ap=m_a, flip_g1=flip_g1, flip_g2=flip_g2,
+                k_maps,
+                shear_maps,
+                k_weights,
+                shear_weights,
+                sumofweights=sumofweights,
+                ggl_bin_combinations=combinations,
+                aperture_filter=aperture_filter,
+                return_N_ap=m_g,
+                return_M_ap=m_a,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
                 return_device=return_device,
             )
             xi_t, rest = out[0], list(out[1:])
@@ -5352,12 +5619,21 @@ class Integrated3PCF:
         else:
             M_g = M_a = None
             xi_t = self._kg_pairs(
-                k_maps, shear_maps, k_weights, shear_weights, sumofweights=sumofweights,
-                ggl_bin_combinations=combinations, flip_g1=flip_g1, flip_g2=flip_g2,
+                k_maps,
+                shear_maps,
+                k_weights,
+                shear_weights,
+                sumofweights=sumofweights,
+                ggl_bin_combinations=combinations,
+                flip_g1=flip_g1,
+                flip_g2=flip_g2,
                 return_device=return_device,
             )
         return IntegratedResult(
-            binedges=np.asarray(self.binedges).copy(), M_a=M_a, M_g=M_g, xi_t=xi_t,
+            binedges=np.asarray(self.binedges).copy(),
+            M_a=M_a,
+            M_g=M_g,
+            xi_t=xi_t,
             kg_combinations=combos,
         )
 
@@ -5381,14 +5657,25 @@ class Integrated3PCF:
         both samples when they share the tomography.
         """
         M_a, M_g, xi_p, xi_m, xi_g, xi_t = self._three_by_two_pt_arrays(
-            shear_maps, k_maps, weights, gc_auto_correlations_only=auto_only,
-            ggl_bin_combinations=combinations, aperture_filter=aperture_filter,
-            flip_g1=flip_g1, flip_g2=flip_g2, return_device=return_device,
+            shear_maps,
+            k_maps,
+            weights,
+            gc_auto_correlations_only=auto_only,
+            ggl_bin_combinations=combinations,
+            aperture_filter=aperture_filter,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
+            return_device=return_device,
         )
         ns, nl = self._nz(shear_maps), self._nz(k_maps)
         return IntegratedResult(
             binedges=np.asarray(self.binedges).copy(),
-            M_a=M_a, M_g=M_g, xi_p=xi_p, xi_m=xi_m, xi_g=xi_g, xi_t=xi_t,
+            M_a=M_a,
+            M_g=M_g,
+            xi_p=xi_p,
+            xi_m=xi_m,
+            xi_g=xi_g,
+            xi_t=xi_t,
             gg_combinations=tuple(self.tomo_combinations(ns)),
             kk_combinations=tuple(self.tomo_combinations(nl, auto_only)),
             kg_combinations=tuple(self.kg_combinations(nl, ns, combinations)),

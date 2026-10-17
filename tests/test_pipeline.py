@@ -11,15 +11,16 @@ from CosmoFuse.pipeline import MapLoader
 
 class TestMapLoaderCPU(unittest.TestCase):
     def _make_corr_stub(self):
-        return SimpleNamespace(backend=get_backend("cpu"), map_dtype=np.dtype(np.float64))
+        return SimpleNamespace(
+            backend=get_backend("cpu"), map_dtype=np.dtype(np.float64)
+        )
 
     def test_stage_wait_round_trip(self):
         corr = self._make_corr_stub()
         shapes = {"shear": (2, 2, 8), "w": (2, 8)}
         rng = np.random.default_rng(42)
         maps = [
-            {"shear": rng.random((2, 2, 8)), "w": rng.random((2, 8))}
-            for _ in range(3)
+            {"shear": rng.random((2, 2, 8)), "w": rng.random((2, 8))} for _ in range(3)
         ]
 
         pipe = MapLoader(corr, shapes)

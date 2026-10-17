@@ -62,7 +62,10 @@ class TestApertureFilterKey(unittest.TestCase):
     def test_transient_filters_at_the_same_address_differ(self):
         keys, addresses = [], []
         for scale in (1.0, 2.0):
-            fn = lambda theta, theta_Q, _s=scale: _s * np.asarray(theta)
+
+            def fn(theta, theta_Q, _s=scale):
+                return _s * np.asarray(theta)
+
             addresses.append(id(fn))
             keys.append(PairGeometry.aperture_filter_key(fn))
             del fn
@@ -71,16 +74,16 @@ class TestApertureFilterKey(unittest.TestCase):
         self.assertNotEqual(keys[0], keys[1])
 
     def test_same_filter_still_hits(self):
-        fn = lambda theta, theta_Q: np.asarray(theta)
+        def fn(theta, theta_Q):
+            return np.asarray(theta)
+
         self.assertEqual(
             PairGeometry.aperture_filter_key(fn),
             PairGeometry.aperture_filter_key(fn),
         )
 
     def test_the_default_filter_keeps_its_stable_name(self):
-        self.assertEqual(
-            PairGeometry.aperture_filter_key(Q_crittenden), "Q_crittenden"
-        )
+        self.assertEqual(PairGeometry.aperture_filter_key(Q_crittenden), "Q_crittenden")
         self.assertNotEqual(
             PairGeometry.aperture_filter_key(Q_schneider), "Q_crittenden"
         )
@@ -146,9 +149,7 @@ class TestFrozenWeightFingerprint(unittest.TestCase):
         second = self.corr._fingerprint_weights(weights)
         self.assertEqual(first, second)
         # a hit, not a rehash: the memo did not grow
-        self.assertEqual(
-            len(correlations_module._FINGERPRINT_MEMO), len(before)
-        )
+        self.assertEqual(len(correlations_module._FINGERPRINT_MEMO), len(before))
 
     def test_the_memo_pins_nothing(self):
         from CosmoFuse import correlations as correlations_module
@@ -255,12 +256,11 @@ class TestCombinationLayoutCache(unittest.TestCase):
 
         _COMBINATION_LAYOUT_CACHE.clear()
         for i in range(400):
-            name, selection = (
-                ("first", first) if i % 2 == 0 else ("second", second)
-            )
+            name, selection = ("first", first) if i % 2 == 0 else ("second", second)
             layout, _ = self._layout(selection, 3, 3)
             np.testing.assert_array_equal(
-                np.asarray(layout.rows), truths[name],
+                np.asarray(layout.rows),
+                truths[name],
                 err_msg=f"iteration {i} got the other selection's layout",
             )
 

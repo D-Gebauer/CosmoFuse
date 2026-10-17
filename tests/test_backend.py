@@ -1,26 +1,24 @@
-
+import importlib
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import warnings
-import importlib
 
 import numpy as np
 
 import CosmoFuse.backend
 from CosmoFuse.backend import (
-    Backend,
     _MAX_FUSED_APERTURE_BINS,
     _MAX_VECTOR_TOMO_BINS,
-    _compile_raw_cuda_kernel,
+    Backend,
     _build_cupy_3x2pt_tomo_aperture_kernel,
     _build_cupy_3x2pt_tomo_pairs_kernel,
-    _cpu_aperture_density_kernel,
-    _cpu_aperture_shear_kernel,
-    _cpu_3x2pt_tomo_fused_kernel,
     _build_cupy_density_density_tomo_vectorized_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
     _build_cupy_tomo_vectorized_kernel,
+    _compile_raw_cuda_kernel,
+    _cpu_3x2pt_tomo_fused_kernel,
+    _cpu_aperture_density_kernel,
+    _cpu_aperture_shear_kernel,
     _cpu_density_density_corr_kernel,
     _cpu_density_density_tomo_vectorized_kernel,
     _cpu_density_shear_corr_kernel,
@@ -107,7 +105,7 @@ class TestBackend(unittest.TestCase):
         self.assertIsInstance(np_arr, np.ndarray)
 
     def test_compile_raw_cuda_kernel_rawmodule_legacy_signature_fallback(self):
-        source = "extern \"C\" __global__ void k(){}"
+        source = 'extern "C" __global__ void k(){}'
         kernel_name = "k"
 
         class LegacyRawModule:
@@ -138,6 +136,7 @@ class TestBackend(unittest.TestCase):
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_cupy_backend_creation(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         backend = get_backend(0)
         self.assertEqual(backend.name, "cupy")
@@ -146,6 +145,7 @@ class TestBackend(unittest.TestCase):
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_cupy_elementwise_kernels_use_fast_math(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         cupy.ElementwiseKernel.side_effect = [
             MagicMock(),
@@ -161,14 +161,17 @@ class TestBackend(unittest.TestCase):
         self.assertEqual(backend.name, "cupy")
         self.assertEqual(cupy.ElementwiseKernel.call_count, 6)
         for call in cupy.ElementwiseKernel.call_args_list:
-            self.assertEqual(call.kwargs.get("options"), ("--use_fast_math", "--std=c++14"))
+            self.assertEqual(
+                call.kwargs.get("options"), ("--use_fast_math", "--std=c++14")
+            )
 
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_to_device_cupy(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         cupy.asarray.return_value = "cupy_array"
-        
+
         backend = get_backend(0)
         arr = np.array([1, 2, 3])
         dev_arr = backend.to_device(arr)
@@ -179,20 +182,21 @@ class TestBackend(unittest.TestCase):
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_to_numpy_cupy(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         cupy.asnumpy.return_value = "numpy_array"
-        
+
         backend = get_backend(0)
-        arr = MagicMock() # mock a cupy array
+        arr = MagicMock()  # mock a cupy array
         np_arr = backend.to_numpy(arr)
 
         cupy.asnumpy.assert_called_once_with(arr)
         self.assertEqual(np_arr, "numpy_array")
 
-
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_get_memory_pool_cupy(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         cupy.get_default_memory_pool.return_value = "cupy_pool"
 
@@ -207,9 +211,10 @@ class TestBackend(unittest.TestCase):
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_get_backend_gpu_device_not_found(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         with self.assertRaises(ValueError):
-            get_backend(1) # Request device 1 when only 0 is available
+            get_backend(1)  # Request device 1 when only 0 is available
 
     @patch.dict(sys.modules, {"cupy": None})
     def test_get_backend_gpu_no_cupy(self):
@@ -219,14 +224,16 @@ class TestBackend(unittest.TestCase):
     def test_get_backend_cpu(self):
         backend = get_backend("cpu")
         self.assertEqual(backend.name, "numpy")
-        
+
     def test_get_backend_auto_no_cupy(self):
         with patch.dict(sys.modules, {"cupy": None}):
             with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
                 importlib.reload(CosmoFuse.backend)
-                backend = CosmoFuse.backend.get_backend('auto')
-                self.assertEqual(backend.name, 'numpy')
-                mock_warn.assert_called_once_with("Cupy not installed, falling back to CPU (numpy).")
+                backend = CosmoFuse.backend.get_backend("auto")
+                self.assertEqual(backend.name, "numpy")
+                mock_warn.assert_called_once_with(
+                    "Cupy not installed, falling back to CPU (numpy)."
+                )
 
     def test_get_backend_auto_import_error_in_gpu_block(self):
         real_import = __import__
@@ -284,6 +291,7 @@ class TestBackend(unittest.TestCase):
     @patch.dict(sys.modules, {"cupy": MagicMock()})
     def test_get_backend_auto_with_cupy(self):
         import cupy
+
         cupy.cuda.runtime.getDeviceCount.return_value = 1
         backend = get_backend("auto")
         self.assertEqual(backend.name, "cupy")
@@ -594,10 +602,14 @@ class TestBackend(unittest.TestCase):
             for idx in range(offsets[b], offsets[b + 1]):
                 i = ind_i[idx]
                 j = ind_j[idx]
-                gamma_t_ab = -g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
+                gamma_t_ab = (
+                    -g1_source[j] * exp_j[idx].real + g2_source[j] * exp_j[idx].imag
+                )
                 expected_ab[b] += w_lens[i] * w_source[j] * density_lens[i] * gamma_t_ab
                 expected_ab_w[b] += w_lens[i] * w_source[j]
-                gamma_t_ba = -g1_source[i] * exp_i[idx].real + g2_source[i] * exp_i[idx].imag
+                gamma_t_ba = (
+                    -g1_source[i] * exp_i[idx].real + g2_source[i] * exp_i[idx].imag
+                )
                 expected_ba[b] += w_lens[j] * w_source[i] * density_lens[j] * gamma_t_ba
                 expected_ba_w[b] += w_lens[j] * w_source[i]
 
@@ -738,10 +750,14 @@ class TestBackend(unittest.TestCase):
             out,
         )
 
-        expected0 = 1.0 * (
-            (weights[0] * map_values[0] * Q_val[0])
-            + (weights[1] * map_values[1] * Q_val[1])
-        ) / (weights[0] + weights[1])
+        expected0 = (
+            1.0
+            * (
+                (weights[0] * map_values[0] * Q_val[0])
+                + (weights[1] * map_values[1] * Q_val[1])
+            )
+            / (weights[0] + weights[1])
+        )
         expected1 = 2.0 * (weights[2] * map_values[2] * Q_val[2]) / weights[2]
         np.testing.assert_allclose(out, np.array([expected0, expected1]))
 
@@ -976,8 +992,12 @@ class TestBackend(unittest.TestCase):
 
         self.assertAlmostEqual(out_xig_den[1, 0], expected_den_ab + expected_den_ba)
         self.assertAlmostEqual(out_xig_num[1, 0], expected_num_ab + expected_num_ba)
-        self.assertAlmostEqual(out_xig_den[0, 0], density_weights[0, 0] * density_weights[1, 0])
-        self.assertAlmostEqual(out_xig_den[2, 0], density_weights[0, 1] * density_weights[1, 1])
+        self.assertAlmostEqual(
+            out_xig_den[0, 0], density_weights[0, 0] * density_weights[1, 0]
+        )
+        self.assertAlmostEqual(
+            out_xig_den[2, 0], density_weights[0, 1] * density_weights[1, 1]
+        )
 
     @staticmethod
     def _aperture_args(dtype, q_dtype, n_density=1, n_shear=1, npatches=1):
@@ -1105,7 +1125,9 @@ class TestBackend(unittest.TestCase):
                 return FakeKernel()
 
         kernel = _build_cupy_3x2pt_tomo_aperture_kernel(FakeModule)
-        args = self._aperture_args(np.float32, np.float32, n_density=3, n_shear=2, npatches=4)
+        args = self._aperture_args(
+            np.float32, np.float32, n_density=3, n_shear=2, npatches=4
+        )
         self.assertTrue(kernel(*args))
         self.assertTrue(kernel(*args))
         self.assertEqual(compile_calls["count"], 1)
@@ -1118,7 +1140,9 @@ class TestBackend(unittest.TestCase):
             (4, 1, 1),  # z=0 M_ap: one block per patch, bins inside it
             (4, 1, 1),  # z=1 M_g:  likewise
         ]
-        for section, (launch, expected_grid) in enumerate(zip(launches[:2], expected_grids)):
+        for section, (launch, expected_grid) in enumerate(
+            zip(launches[:2], expected_grids)
+        ):
             grid, block, launch_args = launch
             self.assertEqual(grid, expected_grid)
             self.assertEqual(block, (256,))
@@ -1182,7 +1206,7 @@ class TestBackend(unittest.TestCase):
             names, [f"gpu_3x2pt_tomo_aperture<float, float, 1, {n_shear}, float>"]
         )
         self.assertEqual(launches[0][0], (4, n_shear, 1))  # z=0 M_ap
-        self.assertEqual(launches[1][0], (4, 1, 1))        # z=1 M_g
+        self.assertEqual(launches[1][0], (4, 1, 1))  # z=1 M_g
         # The fallback kernel still takes the section selector last.
         self.assertEqual(int(launches[0][2][-1]), 0)
 
@@ -1207,43 +1231,92 @@ class TestBackend(unittest.TestCase):
 
         kernel = _build_cupy_3x2pt_tomo_pairs_kernel(FakeModule)
         tri = (np.array([0, 0, 1], dtype=np.int32), np.array([0, 1, 1], dtype=np.int32))
-        cart = (np.array([0, 0, 1, 1], dtype=np.int32), np.array([0, 1, 0, 1], dtype=np.int32))
-        fields = (np.zeros((1, 2), np.float32), np.zeros((1, 2, 2), np.float32),
-                  np.zeros((1, 2), np.float32), np.zeros((1, 2), np.float32))
-        unpacked = (np.zeros(1, np.int32), np.zeros(1, np.int32),
-                    np.zeros(1, np.complex64), np.zeros(1, np.complex64))
+        cart = (
+            np.array([0, 0, 1, 1], dtype=np.int32),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        )
+        fields = (
+            np.zeros((1, 2), np.float32),
+            np.zeros((1, 2, 2), np.float32),
+            np.zeros((1, 2), np.float32),
+            np.zeros((1, 2), np.float32),
+        )
+        unpacked = (
+            np.zeros(1, np.int32),
+            np.zeros(1, np.int32),
+            np.zeros(1, np.complex64),
+            np.zeros(1, np.complex64),
+        )
         packed = (np.zeros((1, 4), np.uint16), np.zeros(1, np.int64))
         offsets = np.array([0, 1], dtype=np.int64)
 
         def outs(n_dd=3, n_ds=4):
-            return (np.zeros((2, 3, 1)), np.zeros((3, 1)), np.zeros((n_dd, 1)),
-                    np.zeros((n_dd, 1)), np.zeros((n_ds, 1)), np.zeros((n_ds, 1)))
+            return (
+                np.zeros((2, 3, 1)),
+                np.zeros((3, 1)),
+                np.zeros((n_dd, 1)),
+                np.zeros((n_dd, 1)),
+                np.zeros((n_ds, 1)),
+                np.zeros((n_ds, 1)),
+            )
 
-        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (True, True, True))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()),
+            (True, True, True),
+        )
         self.assertEqual(
             names[-1],
-            "gpu_tiled_tomo_reduce_3x2pt<float, cuFloatComplex, 2, 2, 0, 1, 1, 1, int, double>")
+            "gpu_tiled_tomo_reduce_3x2pt<float, cuFloatComplex, 2, 2, 0, 1, 1, 1, "
+            "int, double>",
+        )
         self.assertEqual(launches[-1][0], (1, 1, 1))
-        self.assertEqual(kernel(*fields, packed, offsets, tri, tri, cart, *outs()), (True, True, True))
-        self.assertEqual(names[-1], "gpu_tiled_packed_reduce_3x2pt<float, 2, 2, 0, 1, 1, 1, double>")
+        self.assertEqual(
+            kernel(*fields, packed, offsets, tri, tri, cart, *outs()),
+            (True, True, True),
+        )
+        self.assertEqual(
+            names[-1], "gpu_tiled_packed_reduce_3x2pt<float, 2, 2, 0, 1, 1, 1, double>"
+        )
         # a subset of the lens x source product is gathered from the canonical tile
         sub = (np.array([1], dtype=np.int32), np.array([0], dtype=np.int32))
-        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, sub, *outs(n_ds=1)), (True, True, True))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, tri, tri, sub, *outs(n_ds=1)),
+            (True, True, True),
+        )
         # register budget: 9 + 6 + 8 accumulators
         kernel.max_accumulators = 22
-        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()),
+            (False, False, False),
+        )
         kernel.mode = "single"
-        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (True, True, True))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()),
+            (True, True, True),
+        )
         kernel.max_accumulators = 120
         kernel.mode = "off"
-        self.assertEqual(kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, tri, tri, cart, *outs()),
+            (False, False, False),
+        )
         kernel.mode = "auto"
         # xi+- combinations other than the upper triangle: leave it to the fallbacks
-        self.assertEqual(kernel(*fields, unpacked, offsets, sub, tri, cart, *outs()), (False, False, False))
-        no_compiler = _build_cupy_3x2pt_tomo_pairs_kernel(type("M", (), {"float32": np.float32}))
-        self.assertEqual(no_compiler(*fields, unpacked, offsets, tri, tri, cart, *outs()), (False, False, False))
+        self.assertEqual(
+            kernel(*fields, unpacked, offsets, sub, tri, cart, *outs()),
+            (False, False, False),
+        )
+        no_compiler = _build_cupy_3x2pt_tomo_pairs_kernel(
+            type("M", (), {"float32": np.float32})
+        )
+        self.assertEqual(
+            no_compiler(*fields, unpacked, offsets, tri, tri, cart, *outs()),
+            (False, False, False),
+        )
 
-    def test_cupy_density_density_tomo_vectorized_kernel_failure_modes_return_false(self):
+    def test_cupy_density_density_tomo_vectorized_kernel_failure_modes_return_false(
+        self,
+    ):
         cases = [
             {
                 "name": "missing-rawkernel",
@@ -1259,7 +1332,9 @@ class TestBackend(unittest.TestCase):
                         "float32": np.float32,
                         "int32": np.int32,
                         "RawKernel": staticmethod(
-                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                                RuntimeError("compile failed")
+                            )
                         ),
                     },
                 ),
@@ -1272,7 +1347,9 @@ class TestBackend(unittest.TestCase):
                     (),
                     {
                         "float32": np.float32,
-                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: MagicMock()
+                        ),
                     },
                 ),
                 "density_bins": _MAX_VECTOR_TOMO_BINS + 1,
@@ -1281,7 +1358,9 @@ class TestBackend(unittest.TestCase):
 
         for case in cases:
             with self.subTest(case=case["name"]):
-                kernel = _build_cupy_density_density_tomo_vectorized_kernel(case["module"])
+                kernel = _build_cupy_density_density_tomo_vectorized_kernel(
+                    case["module"]
+                )
                 ok = kernel(
                     np.zeros((1, case["density_bins"]), dtype=np.float32),
                     np.zeros((1, case["density_bins"]), dtype=np.float32),
@@ -1363,7 +1442,9 @@ class TestBackend(unittest.TestCase):
                     {
                         "float32": np.float32,
                         "complex64": np.complex64,
-                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: MagicMock()
+                        ),
                     },
                 ),
                 "density_bins": _MAX_VECTOR_TOMO_BINS + 1,
@@ -1378,7 +1459,9 @@ class TestBackend(unittest.TestCase):
                         "int32": np.int32,
                         "complex64": np.complex64,
                         "RawKernel": staticmethod(
-                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                                RuntimeError("compile failed")
+                            )
                         ),
                     },
                 ),
@@ -1388,7 +1471,9 @@ class TestBackend(unittest.TestCase):
 
         for case in cases:
             with self.subTest(case=case["name"]):
-                kernel = _build_cupy_density_shear_tomo_vectorized_kernel(case["module"])
+                kernel = _build_cupy_density_shear_tomo_vectorized_kernel(
+                    case["module"]
+                )
                 ok = kernel(
                     np.zeros((1, case["density_bins"]), dtype=np.float32),
                     np.zeros((1, case["density_bins"], 2), dtype=np.float32),
@@ -1539,7 +1624,9 @@ class TestBackend(unittest.TestCase):
                     {
                         "float32": np.float32,
                         "complex64": np.complex64,
-                        "RawKernel": staticmethod(lambda *_args, **_kwargs: MagicMock()),
+                        "RawKernel": staticmethod(
+                            lambda *_args, **_kwargs: MagicMock()
+                        ),
                     },
                 ),
                 "shear_bins": _MAX_VECTOR_TOMO_BINS + 1,
@@ -1554,7 +1641,9 @@ class TestBackend(unittest.TestCase):
                         "int32": np.int32,
                         "complex64": np.complex64,
                         "RawKernel": staticmethod(
-                            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile failed"))
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                                RuntimeError("compile failed")
+                            )
                         ),
                     },
                 ),
@@ -1666,12 +1755,12 @@ class TestBackend(unittest.TestCase):
                 return FakeKernel()
 
         kernel = _build_cupy_tomo_vectorized_kernel(FakeModule)
-        
+
         # Inputs with complex128 (default python complex is complex128)
         rot_i = np.zeros(1, dtype=np.complex128)
         rot_j = np.zeros(1, dtype=np.complex128)
-        
-        # Other inputs (types matter for map_c_type logic but here focused on suffix logic)
+
+        # Other inputs (types feed map_c_type; this test is about the suffix)
         shear = np.zeros((1, 1, 2), dtype=np.float64)
         weights = np.zeros((1, 1), dtype=np.float64)
         ind_i = np.zeros(1, dtype=np.int64)
@@ -1789,8 +1878,19 @@ class TestBackend(unittest.TestCase):
         # ... the per-row kernel is selected explicitly ...
         kernel.tiled = False
         self.assertTrue(
-            kernel(shear_2, weights_2, ind_i, ind_j, rot_i, rot_j, bin_offsets,
-                   comb_i_2, comb_j_2, out_num_2, out_den_2)
+            kernel(
+                shear_2,
+                weights_2,
+                ind_i,
+                ind_j,
+                rot_i,
+                rot_j,
+                bin_offsets,
+                comb_i_2,
+                comb_j_2,
+                out_num_2,
+                out_den_2,
+            )
         )
         self.assertEqual(
             compiled_sources[-1][1],
@@ -1803,9 +1903,19 @@ class TestBackend(unittest.TestCase):
         odd_i = np.array([0, 1], dtype=np.int32)
         odd_j = np.array([1, 1], dtype=np.int32)
         self.assertTrue(
-            kernel(shear_2, weights_2, ind_i, ind_j, rot_i, rot_j, bin_offsets,
-                   odd_i, odd_j, np.zeros((2, 2, 1), dtype=np.float32),
-                   np.zeros((2, 1), dtype=np.float32))
+            kernel(
+                shear_2,
+                weights_2,
+                ind_i,
+                ind_j,
+                rot_i,
+                rot_j,
+                bin_offsets,
+                odd_i,
+                odd_j,
+                np.zeros((2, 2, 1), dtype=np.float32),
+                np.zeros((2, 1), dtype=np.float32),
+            )
         )
         self.assertEqual(len(compiled_sources), n_before)  # per-row kernel reused
         kernel.tiled = True
@@ -1819,6 +1929,7 @@ class TestBackend(unittest.TestCase):
         )
         for _source, _kernel_name, options in compiled_sources:
             self.assertEqual(options, ("--use_fast_math", "--std=c++14"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,9 @@ def _setup():
 
 
 def _kw(**extra):
-    kw = dict(device="cpu", map_precision="float64", rotation_precision="float64", **BINS)
+    kw = dict(
+        device="cpu", map_precision="float64", rotation_precision="float64", **BINS
+    )
     kw.update(extra)
     return kw
 
@@ -64,8 +66,13 @@ def _one_patch(mask, **extra):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         p = Integrated3PCF(
-            NSIDE, np.array([CENTRE[1]]), np.array([CENTRE[0]]),
-            patch_size=(RADIUS + 0.5) * 60, theta_Q=10, mask=mask, **_kw(**extra),
+            NSIDE,
+            np.array([CENTRE[1]]),
+            np.array([CENTRE[0]]),
+            patch_size=(RADIUS + 0.5) * 60,
+            theta_Q=10,
+            mask=mask,
+            **_kw(**extra),
         )
         p.find_pairs()
         p.prepare()
@@ -95,9 +102,13 @@ class TestOnePatchReference(unittest.TestCase):
     def _compare(self, g, p, tol=1e-12):
         self.assertEqual(g.ntotpairs, p.ntotpairs)
         gg, kk, kg = _measure_all(g, self.shear, self.w, self.dens)
-        ref_gg = p.gg(self.shear, self.w, apertures=False, flip_g1=True, return_device=False)
+        ref_gg = p.gg(
+            self.shear, self.w, apertures=False, flip_g1=True, return_device=False
+        )
         ref_kk = p.kk(self.dens, self.w, apertures=False, return_device=False)
-        ref_kg = p.kg(self.dens, self.shear, self.w, self.w, flip_g1=True, return_device=False)
+        ref_kg = p.kg(
+            self.dens, self.shear, self.w, self.w, flip_g1=True, return_device=False
+        )
         self.assertEqual(gg.xi_p.shape, (3, BINS["nbins"]))
         self.assertEqual(gg.combinations, ref_gg.gg_combinations)
         self.assertEqual(kk.combinations, ref_kk.kk_combinations)
@@ -121,12 +132,16 @@ class TestOnePatchReference(unittest.TestCase):
         self._compare(g, p)
 
     def test_packed_pairs(self):
-        self._compare(_global(self.mask, pack_pairs=True), _one_patch(self.mask, pack_pairs=True))
+        self._compare(
+            _global(self.mask, pack_pairs=True), _one_patch(self.mask, pack_pairs=True)
+        )
 
     def test_tile_nside_finer_than_coarsest_level_raises(self):
         with self.assertRaises(ValueError), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Global2PCF(NSIDE, mask=self.mask, tile_nside=64, **_kw(resolution_factor=2.0))
+            Global2PCF(
+                NSIDE, mask=self.mask, tile_nside=64, **_kw(resolution_factor=2.0)
+            )
 
 
 class TestResultsAndInputs(unittest.TestCase):
@@ -147,7 +162,9 @@ class TestResultsAndInputs(unittest.TestCase):
         np.testing.assert_allclose(res.theta, self.g.bincenters, rtol=1e-12)
         ok = res.weight > 0
         np.testing.assert_allclose(
-            (res.tile_num["xi_p"].sum(1) / np.where(ok, res.weight, 1))[ok], res.xi_p[ok], rtol=1e-12
+            (res.tile_num["xi_p"].sum(1) / np.where(ok, res.weight, 1))[ok],
+            res.xi_p[ok],
+            rtol=1e-12,
         )
         with self.assertRaises(AttributeError):
             res.xi
@@ -160,7 +177,9 @@ class TestResultsAndInputs(unittest.TestCase):
         num = res.tile_num["xi"].sum(1) - res.tile_num["xi"][:, t]
         den = res.tile_weight.sum(1) - res.tile_weight[:, t]
         ok = den > 0
-        np.testing.assert_allclose(jk[t][ok], (num / np.where(ok, den, 1))[ok], rtol=1e-12)
+        np.testing.assert_allclose(
+            jk[t][ok], (num / np.where(ok, den, 1))[ok], rtol=1e-12
+        )
 
     def test_add_joins_tiles(self):
         res = self.g.gg(self.shear, self.w, return_device=False)
@@ -169,18 +188,25 @@ class TestResultsAndInputs(unittest.TestCase):
         np.testing.assert_allclose(both.xi_p, res.xi_p, rtol=1e-13)
 
     def test_three_by_two_pt(self):
-        out = self.g.three_by_two_pt(self.shear, self.dens, self.w, self.w, flip_g1=True,
-                                     return_device=False)
-        ref = dict(zip(("gg", "kk", "kg"), _measure_all(self.g, self.shear, self.w, self.dens)))
+        out = self.g.three_by_two_pt(
+            self.shear, self.dens, self.w, self.w, flip_g1=True, return_device=False
+        )
+        ref = dict(
+            zip(("gg", "kk", "kg"), _measure_all(self.g, self.shear, self.w, self.dens))
+        )
         self.assertEqual(set(out), {"gg", "kk", "kg"})
         for key, res in out.items():
             for name in res.names:
-                np.testing.assert_array_equal(res.tile_num[name], ref[key].tile_num[name])
+                np.testing.assert_array_equal(
+                    res.tile_num[name], ref[key].tile_num[name]
+                )
 
     def test_row_space_input(self):
         g = self.g
         full = g.gg(self.shear, self.w, return_device=False)
-        rows = g.gg(g.to_row_space(self.shear), g.to_row_space(self.w), return_device=False)
+        rows = g.gg(
+            g.to_row_space(self.shear), g.to_row_space(self.w), return_device=False
+        )
         for name in full.names:
             np.testing.assert_array_equal(full.tile_num[name], rows.tile_num[name])
         np.testing.assert_array_equal(full.tile_weight, rows.tile_weight)
@@ -207,7 +233,9 @@ class TestPairFiles(unittest.TestCase):
                     np.testing.assert_array_equal(res.xi_m, ref.xi_m)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        wrong = Global2PCF(NSIDE, mask=mask, **_kw(resolution_factor=3.0 if k else 2.0))
+                        wrong = Global2PCF(
+                            NSIDE, mask=mask, **_kw(resolution_factor=3.0 if k else 2.0)
+                        )
                     with self.assertRaises(ValueError):
                         wrong.load_pairs(path)
 
@@ -226,8 +254,13 @@ class TestEmulatedGPU(unittest.TestCase):
         mask, shear, w, dens = _setup()
         for extra in ({}, {"pack_pairs": True}, {"resolution_factor": 2.0}):
             with self.subTest(**extra):
-                g = _global(mask, map_precision="float32", rotation_precision="float32",
-                            accumulation_precision="float64", **extra)
+                g = _global(
+                    mask,
+                    map_precision="float32",
+                    rotation_precision="float32",
+                    accumulation_precision="float64",
+                    **extra,
+                )
                 cpu = _estimates(_measure_all(g, shear, w, dens))
                 with emulated_gpu(g._engine) as calls:
                     gpu = _estimates(_measure_all(g, shear, w, dens))
@@ -247,6 +280,8 @@ class TestRealGPU(unittest.TestCase):
                     warnings.simplefilter("ignore")
                     gpu = Global2PCF(NSIDE, mask=mask, **_kw(device="gpu", **extra))
                 gpu.preprocess()
-                for a, b in zip(_estimates(_measure_all(gpu, shear, w, dens)),
-                                _estimates(_measure_all(cpu, shear, w, dens))):
+                for a, b in zip(
+                    _estimates(_measure_all(gpu, shear, w, dens)),
+                    _estimates(_measure_all(cpu, shear, w, dens)),
+                ):
                     self.assertLess(_rel(a, b), 1e-12)

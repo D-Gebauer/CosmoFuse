@@ -22,6 +22,7 @@ import healpy as hp
 import numpy as np
 
 from CosmoFuse import Integrated3PCF
+
 from ._results import fields_of
 
 NSIDE = 32
@@ -108,12 +109,12 @@ class TestHostPacking(unittest.TestCase):
         # the default float32 rotations, 40 B here at float64)
         exact = self.exact
         exact_bytes = sum(
-            a.nbytes + b.nbytes
-            for a, b in zip(exact.pair_inds, exact.pair_exp2phi)
+            a.nbytes + b.nbytes for a, b in zip(exact.pair_inds, exact.pair_exp2phi)
         )
-        per_pair = 2 * exact.index_dtype.itemsize + 2 * np.dtype(
-            exact.rotation_complex_dtype
-        ).itemsize
+        per_pair = (
+            2 * exact.index_dtype.itemsize
+            + 2 * np.dtype(exact.rotation_complex_dtype).itemsize
+        )
         self.assertEqual(exact_bytes, per_pair * exact.ntotpairs)
         self.assertLessEqual(payload * 3, exact_bytes)
         # the row blocks are a rounding error on top
@@ -142,9 +143,13 @@ class TestHostPacking(unittest.TestCase):
         n = self.exact.n_active
         shear = rng.normal(size=(2, 2, n)) * 0.3
         w = rng.uniform(0.2, 2.0, size=(2, n))
-        ref = fields_of(self.device_packed.gg(shear, w, return_device=False), "M_a", "xi_p", "xi_m")
+        ref = fields_of(
+            self.device_packed.gg(shear, w, return_device=False), "M_a", "xi_p", "xi_m"
+        )
         for corr in (self.host_packed, self.host_only):
-            got = fields_of(corr.gg(shear, w, return_device=False), "M_a", "xi_p", "xi_m")
+            got = fields_of(
+                corr.gg(shear, w, return_device=False), "M_a", "xi_p", "xi_m"
+            )
             for x, y in zip(ref, got):
                 self.assertTrue(np.array_equal(np.asarray(x), np.asarray(y)))
 
@@ -192,9 +197,7 @@ class TestPackedPairFile(unittest.TestCase):
             # smaller than the exact file it replaces
             exact_path = os.path.join(self.tmp.name, "exact.h5")
         make_setup().save_pairs(exact_path)
-        self.assertLess(
-            os.path.getsize(self.path), 0.6 * os.path.getsize(exact_path)
-        )
+        self.assertLess(os.path.getsize(self.path), 0.6 * os.path.getsize(exact_path))
 
     def test_round_trip(self):
         corr = self._fresh(pack_pairs=True)

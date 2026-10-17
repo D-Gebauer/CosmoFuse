@@ -1,5 +1,5 @@
 """
-CosmoFuse: GPU/CPU measurement of integrated, two- and three-point correlation functions.
+CosmoFuse: GPU/CPU measurement of integrated, two- and three-point correlations.
 
 Three estimators on HEALPix maps, named after the statistic they deliver:
 :class:`Integrated3PCF` (per-patch aperture masses and 2PCFs, the i3PCF
@@ -35,7 +35,7 @@ from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 from .zeta_writer import ZetaWriter
 
-__version__ = "7.0.0"
+__version__ = "7.0.1"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 

@@ -19,7 +19,8 @@ access.  Array fields may live on the host (numpy) or the device (cupy),
 following the measurement's ``return_device``.
 """
 
-from dataclasses import dataclass, fields as dc_fields
+from dataclasses import dataclass
+from dataclasses import fields as dc_fields
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
@@ -74,7 +75,11 @@ class IntegratedResult:
 
     def fields(self) -> Dict[str, Any]:
         """The measured arrays, by name, in the order of ``INTEGRATED_FIELDS``."""
-        return {k: getattr(self, k) for k in INTEGRATED_FIELDS if getattr(self, k) is not None}
+        return {
+            k: getattr(self, k)
+            for k in INTEGRATED_FIELDS
+            if getattr(self, k) is not None
+        }
 
     def zetas(self, **kwargs: Any) -> Dict[str, Any]:
         """Every i3PCF ζ the measured fields form (see
@@ -91,7 +96,11 @@ class IntegratedResult:
         for f in dc_fields(self):
             v = getattr(self, f.name)
             if f.name in INTEGRATED_FIELDS and v is not None:
-                v = v.get() if hasattr(v, "get") and not isinstance(v, np.ndarray) else np.asarray(v)
+                v = (
+                    v.get()
+                    if hasattr(v, "get") and not isinstance(v, np.ndarray)
+                    else np.asarray(v)
+                )
             out[f.name] = v
         return IntegratedResult(**out)
 
@@ -179,11 +188,18 @@ class TwoPointResult:
 
     def to_numpy(self) -> "TwoPointResult":
         def host(a: Any) -> np.ndarray:
-            return a.get() if hasattr(a, "get") and not isinstance(a, np.ndarray) else np.asarray(a)
+            return (
+                a.get()
+                if hasattr(a, "get") and not isinstance(a, np.ndarray)
+                else np.asarray(a)
+            )
 
         return TwoPointResult(
-            self.statistic, self.binedges, self.combinations,
-            {k: host(v) for k, v in self.tile_num.items()}, host(self.tile_weight),
+            self.statistic,
+            self.binedges,
+            self.combinations,
+            {k: host(v) for k, v in self.tile_num.items()},
+            host(self.tile_weight),
         )
 
     def __add__(self, other: "TwoPointResult") -> "TwoPointResult":
@@ -195,8 +211,13 @@ class TwoPointResult:
             raise ValueError("can only add results of the same statistic and binning")
         xp = _xp(self.tile_weight)
         return TwoPointResult(
-            self.statistic, self.binedges, self.combinations,
-            {k: xp.concatenate((v, other.tile_num[k]), axis=1) for k, v in self.tile_num.items()},
+            self.statistic,
+            self.binedges,
+            self.combinations,
+            {
+                k: xp.concatenate((v, other.tile_num[k]), axis=1)
+                for k, v in self.tile_num.items()
+            },
             xp.concatenate((self.tile_weight, other.tile_weight), axis=1),
         )
 
@@ -296,7 +317,9 @@ class ThreePointResult:
         return out
 
     def to_centroid(
-        self, binned: Mapping[str, np.ndarray], phi_edges: Optional[np.ndarray] = None,
+        self,
+        binned: Mapping[str, np.ndarray],
+        phi_edges: Optional[np.ndarray] = None,
         nphi: int = 16,
     ) -> Dict[str, np.ndarray]:
         """Convert :meth:`binned` values from the x- to the centroid
@@ -313,7 +336,11 @@ class ThreePointResult:
         v3 = t3 * np.exp(1j * phi)[None, None, :] + 0 * t2
         cen = (v1 + v2 + v3) / 3.0
         alpha = [np.angle(v - cen) for v in (v1, v2, v3)]
-        beta = [np.zeros_like(alpha[0]), np.zeros_like(alpha[0]), np.broadcast_to(phi, alpha[0].shape)]
+        beta = [
+            np.zeros_like(alpha[0]),
+            np.zeros_like(alpha[0]),
+            np.broadcast_to(phi, alpha[0].shape),
+        ]
         out = {}
         for comp in self.components:
             phase = np.zeros(alpha[0].shape)

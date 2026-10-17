@@ -293,8 +293,12 @@ class Global2PCF:
                 core_ids, core_xyz = level.core(t)
                 cand_ids, cand_xyz = level.of_tiles(reach_cache[key])
                 ids_a, ids_b, c1, s1, c2, s2, counts = unique_pairs(
-                    core_ids, core_xyz, cand_ids, cand_xyz,
-                    e.binedges[b0 : b1 + 1], fastmath=e.fastmath,
+                    core_ids,
+                    core_xyz,
+                    cand_ids,
+                    cand_xyz,
+                    e.binedges[b0 : b1 + 1],
+                    fastmath=e.fastmath,
                 )
                 inds_t.append(np.stack((ids_a, ids_b)))
                 exp = np.empty((2, ids_a.size), dtype=e.rotation_complex_dtype)
@@ -304,7 +308,9 @@ class Global2PCF:
                 exp[1].imag = s2
                 exp_t.append(exp)
                 bins_t[b0:b1] = counts
-            pair_inds.append(np.concatenate(inds_t, axis=1).astype(e.index_dtype, copy=False))
+            pair_inds.append(
+                np.concatenate(inds_t, axis=1).astype(e.index_dtype, copy=False)
+            )
             pair_exp2phi.append(np.concatenate(exp_t, axis=1))
             bins.append(bins_t.astype(e.index_dtype))
         self._install(pair_inds, pair_exp2phi, bins, treecode)
@@ -320,7 +326,9 @@ class Global2PCF:
         if treecode is not None:
             npix = hp.nside2npix(e.nside)
             if npix + treecode.n_cells > np.iinfo(e.index_dtype).max:
-                raise OverflowError("pixel + coarse-cell ids exceed the index dtype range")
+                raise OverflowError(
+                    "pixel + coarse-cell ids exceed the index dtype range"
+                )
         e.pair_inds = pair_inds
         e.pair_exp2phi = pair_exp2phi
         e.bins = bins
@@ -362,22 +370,36 @@ class Global2PCF:
                 fp.attrs["resolution_factor"] = float(e.resolution_factor)
             fp.create_dataset("map_inds", data=np.asarray(e.map_inds, dtype=np.int64))
             fp.create_dataset("tile_ids", data=self.tiles.tile_ids)
-            fp.create_dataset("level_nside", data=np.asarray(e.level_nside, dtype=np.int64))
+            fp.create_dataset(
+                "level_nside", data=np.asarray(e.level_nside, dtype=np.int64)
+            )
             fp.create_dataset("pair_offsets", data=offsets)
-            fp.create_dataset("bins", data=np.stack([np.asarray(b, dtype=np.int64) for b in e.bins]))
+            fp.create_dataset(
+                "bins", data=np.stack([np.asarray(b, dtype=np.int64) for b in e.bins])
+            )
             fp.create_dataset(
                 "pair_inds",
-                data=np.concatenate(e.pair_inds, axis=1) if e.pair_inds else np.zeros((2, 0)),
+                data=(
+                    np.concatenate(e.pair_inds, axis=1)
+                    if e.pair_inds
+                    else np.zeros((2, 0))
+                ),
             )
             fp.create_dataset(
                 "pair_exp2phi",
-                data=np.concatenate(e.pair_exp2phi, axis=1) if e.pair_exp2phi else np.zeros((2, 0)),
+                data=(
+                    np.concatenate(e.pair_exp2phi, axis=1)
+                    if e.pair_exp2phi
+                    else np.zeros((2, 0))
+                ),
             )
             tc = e._treecode
             if tc is not None:
                 gp = fp.create_group("treecode")
                 gp.attrs["base_nside"] = int(tc.base_nside)
-                gp.create_dataset("coarse_nsides", data=np.asarray(tc.coarse_nsides, dtype=np.int64))
+                gp.create_dataset(
+                    "coarse_nsides", data=np.asarray(tc.coarse_nsides, dtype=np.int64)
+                )
                 gp.create_dataset("cell_offsets", data=tc.cell_offsets)
                 for lv in range(tc.n_levels):
                     gp.create_dataset(f"child_indptr_{lv}", data=tc.child_indptr[lv])
@@ -409,26 +431,39 @@ class Global2PCF:
             ]
             for name, got, want in checks:
                 if got != want:
-                    raise ValueError(f"{filepath}: {name}={got}, this estimator has {want}")
+                    raise ValueError(
+                        f"{filepath}: {name}={got}, this estimator has {want}"
+                    )
             if not np.allclose(
                 [fp.attrs["theta_min"], fp.attrs["theta_max"]],
                 [e.theta_min, e.theta_max],
                 rtol=1e-12,
                 atol=0.0,
             ):
-                raise ValueError(f"{filepath}: angular range differs from this estimator")
-            if not np.array_equal(fp["map_inds"][:], np.asarray(e.map_inds, dtype=np.int64)):
-                raise ValueError(f"{filepath}: the mask (row space) differs from this estimator")
-            if not np.array_equal(fp["level_nside"][:], np.asarray(e.level_nside, dtype=np.int64)):
                 raise ValueError(
-                    f"{filepath}: resolution levels {fp['level_nside'][:].tolist()} differ "
+                    f"{filepath}: angular range differs from this estimator"
+                )
+            if not np.array_equal(
+                fp["map_inds"][:], np.asarray(e.map_inds, dtype=np.int64)
+            ):
+                raise ValueError(
+                    f"{filepath}: the mask (row space) differs from this estimator"
+                )
+            if not np.array_equal(
+                fp["level_nside"][:], np.asarray(e.level_nside, dtype=np.int64)
+            ):
+                raise ValueError(
+                    f"{filepath}: resolution levels "
+                    f"{fp['level_nside'][:].tolist()} differ "
                     f"from this estimator's {np.asarray(e.level_nside).tolist()} "
                     "(resolution_factor)"
                 )
             offsets = fp["pair_offsets"][:]
             bins_arr = fp["bins"][:]
             inds_flat = fp["pair_inds"][:].astype(e.index_dtype, copy=False)
-            exp_flat = fp["pair_exp2phi"][:].astype(e.rotation_complex_dtype, copy=False)
+            exp_flat = fp["pair_exp2phi"][:].astype(
+                e.rotation_complex_dtype, copy=False
+            )
             treecode = None
             if "treecode" in fp:
                 gp = fp["treecode"]
@@ -437,8 +472,12 @@ class Global2PCF:
                     base_nside=int(gp.attrs["base_nside"]),
                     coarse_nsides=tuple(int(n) for n in gp["coarse_nsides"][:]),
                     cell_offsets=gp["cell_offsets"][:].astype(np.int64),
-                    child_indptr=[gp[f"child_indptr_{lv}"][:] for lv in range(n_levels)],
-                    child_indices=[gp[f"child_indices_{lv}"][:] for lv in range(n_levels)],
+                    child_indptr=[
+                        gp[f"child_indptr_{lv}"][:] for lv in range(n_levels)
+                    ],
+                    child_indices=[
+                        gp[f"child_indices_{lv}"][:] for lv in range(n_levels)
+                    ],
                     cell_ra=[gp[f"cell_ra_{lv}"][:] for lv in range(n_levels)],
                     cell_dec=[gp[f"cell_dec_{lv}"][:] for lv in range(n_levels)],
                 )
@@ -465,16 +504,24 @@ class Global2PCF:
         xp = e.backend.module
         shape = (ncomb, self.n_tiles, self.nbins)
         acc = getattr(xp, e.acc_dtype.name)
-        tile_num = {n: xp.real(a).reshape(shape).astype(acc, copy=False) for n, a in zip(names, nums)}
+        tile_num = {
+            n: xp.real(a).reshape(shape).astype(acc, copy=False)
+            for n, a in zip(names, nums)
+        }
         tile_weight = xp.real(den).reshape(shape).astype(acc, copy=False)
         res = TwoPointResult(
-            statistic, np.asarray(self.binedges).copy(),
-            tuple((int(a), int(b)) for a, b in combinations), tile_num, tile_weight,
+            statistic,
+            np.asarray(self.binedges).copy(),
+            tuple((int(a), int(b)) for a, b in combinations),
+            tile_num,
+            tile_weight,
         )
         if return_device and e.backend.name == "cupy":
             return res
         return TwoPointResult(
-            res.statistic, res.binedges, res.combinations,
+            res.statistic,
+            res.binedges,
+            res.combinations,
             {k: np.asarray(e.backend.to_numpy(v)) for k, v in tile_num.items()},
             np.asarray(e.backend.to_numpy(tile_weight)),
         )
@@ -506,12 +553,21 @@ class Global2PCF:
         shear_dev = e._to_backend_array(shear_arr, dtype=e.map_dtype)
         w_dev = e._to_backend_array(w_arr, dtype=e.map_dtype)
         res = e._xipm_tomo_vectorized(
-            shear_dev, w_dev, None, nz, ncomb,
-            -1 if flip_g1 else 1, -1 if flip_g2 else 1,
+            shear_dev,
+            w_dev,
+            None,
+            nz,
+            ncomb,
+            -1 if flip_g1 else 1,
+            -1 if flip_g2 else 1,
         )
         if res is None:
-            raise RuntimeError("the tomographic ξ± kernel is unavailable on this backend")
-        return self._result("gg", ("xi_p", "xi_m"), Integrated3PCF.tomo_combinations(nz), return_device)
+            raise RuntimeError(
+                "the tomographic ξ± kernel is unavailable on this backend"
+            )
+        return self._result(
+            "gg", ("xi_p", "xi_m"), Integrated3PCF.tomo_combinations(nz), return_device
+        )
 
     def kk(
         self,
@@ -534,9 +590,14 @@ class Global2PCF:
         if arr.ndim != 2:
             raise ValueError(f"k_maps must be (nz, npix); got {arr.shape}")
         nz = int(arr.shape[0])
-        e._density_density_tomo_vectorized(arr, w, None, nz, gc_auto_correlations_only=auto_only)
+        e._density_density_tomo_vectorized(
+            arr, w, None, nz, gc_auto_correlations_only=auto_only
+        )
         return self._result(
-            "kk", ("xi",), Integrated3PCF.tomo_combinations(nz, auto_only), return_device
+            "kk",
+            ("xi",),
+            Integrated3PCF.tomo_combinations(nz, auto_only),
+            return_device,
         )
 
     def kg(
@@ -565,16 +626,31 @@ class Global2PCF:
         ws = e._coerce_map_input_array(shear_weights)
         if d_arr.ndim != 2 or wd.shape != d_arr.shape:
             raise ValueError("k_maps and k_weights must both be (n_lens, npix)")
-        if s_arr.ndim != 3 or s_arr.shape[1] != 2 or tuple(ws.shape) != (s_arr.shape[0], s_arr.shape[2]):
-            raise ValueError("shear_maps must be (n_source, 2, npix), shear_weights (n_source, npix)")
+        if (
+            s_arr.ndim != 3
+            or s_arr.shape[1] != 2
+            or tuple(ws.shape) != (s_arr.shape[0], s_arr.shape[2])
+        ):
+            raise ValueError(
+                "shear_maps must be (n_source, 2, npix), shear_weights (n_source, npix)"
+            )
         nl, ns = int(d_arr.shape[0]), int(s_arr.shape[0])
         e._density_shear_tomo_vectorized(
-            d_arr, s_arr, wd, ws, None, nl, ns,
+            d_arr,
+            s_arr,
+            wd,
+            ws,
+            None,
+            nl,
+            ns,
             ggl_bin_combinations=combinations,
             shear_signs=(-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0),
         )
         return self._result(
-            "kg", ("xi",), Integrated3PCF.kg_combinations(nl, ns, combinations), return_device
+            "kg",
+            ("xi",),
+            Integrated3PCF.kg_combinations(nl, ns, combinations),
+            return_device,
         )
 
     def three_by_two_pt(
@@ -594,10 +670,24 @@ class Global2PCF:
         e = self._engine
         with e._expansion_scope():
             return {
-                "gg": self.gg(shear_maps, shear_weights, flip_g1=flip_g1, flip_g2=flip_g2,
-                              return_device=return_device),
-                "kk": self.kk(k_maps, k_weights, auto_only=auto_only, return_device=return_device),
-                "kg": self.kg(k_maps, shear_maps, k_weights, shear_weights,
-                              combinations=combinations, flip_g1=flip_g1, flip_g2=flip_g2,
-                              return_device=return_device),
+                "gg": self.gg(
+                    shear_maps,
+                    shear_weights,
+                    flip_g1=flip_g1,
+                    flip_g2=flip_g2,
+                    return_device=return_device,
+                ),
+                "kk": self.kk(
+                    k_maps, k_weights, auto_only=auto_only, return_device=return_device
+                ),
+                "kg": self.kg(
+                    k_maps,
+                    shear_maps,
+                    k_weights,
+                    shear_weights,
+                    combinations=combinations,
+                    flip_g1=flip_g1,
+                    flip_g2=flip_g2,
+                    return_device=return_device,
+                ),
             }

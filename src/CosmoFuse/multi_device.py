@@ -29,7 +29,12 @@ import numpy as np
 _ARRAY_METHODS: Dict[str, int] = {"m_a": -1, "m_g": -1}
 _RESULT_METHODS = frozenset({"gg", "kk", "kg", "three_by_two_pt"})
 _FIELD_PATCH_AXIS: Dict[str, int] = {
-    "M_a": -1, "M_g": -1, "xi_p": -2, "xi_m": -2, "xi_g": -2, "xi_t": -2,
+    "M_a": -1,
+    "M_g": -1,
+    "xi_p": -2,
+    "xi_m": -2,
+    "xi_g": -2,
+    "xi_t": -2,
 }
 # kept for callers that ask which methods a group dispatches
 _PATCH_AXIS = tuple(_ARRAY_METHODS) + tuple(sorted(_RESULT_METHODS))
@@ -172,7 +177,9 @@ class MultiDeviceIntegrated3PCF:
             except BaseException as exc:  # surface the first failure
                 errors.append(exc)
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(self.parts))]
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(len(self.parts))
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -188,8 +195,11 @@ class MultiDeviceIntegrated3PCF:
             # every device needs the maps on its own card, so device-resident
             # inputs are not forwarded: host arrays only
             for a in tuple(args) + tuple(kwargs.values()):
-                if a is not None and not isinstance(a, (np.ndarray, int, float, bool, str)) \
-                        and hasattr(a, "__cuda_array_interface__"):
+                if (
+                    a is not None
+                    and not isinstance(a, (np.ndarray, int, float, bool, str))
+                    and hasattr(a, "__cuda_array_interface__")
+                ):
                     raise TypeError(
                         f"{name} on several devices takes host arrays; a device "
                         "array belongs to one GPU only."
@@ -233,7 +243,11 @@ class MultiDeviceIntegrated3PCF:
         self._run(lambda part, _i: part.warmup())
 
     def load_pairs(
-        self, filepath: str, start_ind: int = 0, stop_ind: Optional[int] = None, **kwargs: Any
+        self,
+        filepath: str,
+        start_ind: int = 0,
+        stop_ind: Optional[int] = None,
+        **kwargs: Any,
     ) -> None:
         """Load one pair file, giving each device its own patch range."""
         stop = self.n_patches if stop_ind is None else int(stop_ind)
@@ -263,5 +277,7 @@ class MultiDeviceIntegrated3PCF:
         return len(self.parts)
 
     def __repr__(self) -> str:
-        ranges = ", ".join(f"{d}:{a}-{b}" for d, (a, b) in zip(self.devices, self.patch_ranges))
+        ranges = ", ".join(
+            f"{d}:{a}-{b}" for d, (a, b) in zip(self.devices, self.patch_ranges)
+        )
         return f"<MultiDeviceIntegrated3PCF {self.n_patches} patches over {ranges}>"

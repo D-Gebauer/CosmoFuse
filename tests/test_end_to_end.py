@@ -1,4 +1,3 @@
-import sys
 import unittest
 from pathlib import Path
 
@@ -6,11 +5,9 @@ import healpy as hp
 import numpy as np
 import treecorr
 
-# Add src to path for testing
-sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
-
 from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
+
 from ._results import fields_of
 
 
@@ -28,15 +25,18 @@ class TestEndToEnd(unittest.TestCase):
         shear_path = data_dir / "shear_maps.npy"
         density_path = data_dir / "density_maps.npy"
 
-
         if not (mask_path.exists() and shear_path.exists() and density_path.exists()):
             raise unittest.SkipTest(f"Test data files not found in {data_dir}")
 
         self.map_inds = np.load(mask_path)
         self.des_map = np.zeros(hp.nside2npix(self.nside))
         self.des_map[self.map_inds] = 1
-        self.phi_center = np.array([0.44178647, 0.73631078, 0.85902924, 0.71176709, 0.17180585, 1.07992247])
-        self.theta_center = np.array([1.54996149, 1.80201781, 1.9551931 , 2.04691539, 2.1432149 , 2.21951601])
+        self.phi_center = np.array(
+            [0.44178647, 0.73631078, 0.85902924, 0.71176709, 0.17180585, 1.07992247]
+        )
+        self.theta_center = np.array(
+            [1.54996149, 1.80201781, 1.9551931, 2.04691539, 2.1432149, 2.21951601]
+        )
 
         self.corr = Integrated3PCF(
             self.nside,
@@ -196,10 +196,9 @@ class TestEndToEnd(unittest.TestCase):
         self._ensure_mock_maperture_pairs()
         shear_maps = self.shear_maps[1:2]
         w = np.stack((self.w1,), axis=0)
-        xip_full, xim_full = fields_of(self.corr.gg(
-            shear_maps,
-            w,
-            flip_g1=True, apertures=False), "xi_p", "xi_m")
+        xip_full, xim_full = fields_of(
+            self.corr.gg(shear_maps, w, flip_g1=True, apertures=False), "xi_p", "xi_m"
+        )
         xip = self.corr.backend.to_numpy(xip_full[0])
         xim = self.corr.backend.to_numpy(xim_full[0])
 
@@ -219,10 +218,11 @@ class TestEndToEnd(unittest.TestCase):
     def get_cross_correlation(self):
         self._ensure_mock_maperture_pairs()
         w = np.stack((self.w1, self.w2), axis=0)
-        xip_full, xim_full = fields_of(self.corr.gg(
-            self.shear_maps,
-            w,
-            flip_g1=True, apertures=False), "xi_p", "xi_m")
+        xip_full, xim_full = fields_of(
+            self.corr.gg(self.shear_maps, w, flip_g1=True, apertures=False),
+            "xi_p",
+            "xi_m",
+        )
         xip = self.corr.backend.to_numpy(xip_full[1])
         xim = self.corr.backend.to_numpy(xim_full[1])
 
@@ -241,8 +241,8 @@ class TestEndToEnd(unittest.TestCase):
 
     def get_gc_correlation(self):
         wtheta_full = self.corr.kk(
-            self.density_maps,
-            np.stack((self.w1, self.w2), axis=0), apertures=False).xi_g
+            self.density_maps, np.stack((self.w1, self.w2), axis=0), apertures=False
+        ).xi_g
         wtheta = self.corr.backend.to_numpy(wtheta_full[1])
 
         self.assertAlmostEqual(
@@ -258,7 +258,8 @@ class TestEndToEnd(unittest.TestCase):
             self.shear_maps,
             np.stack((self.w1, self.w2), axis=0),
             np.stack((self.w1, self.w2), axis=0),
-            flip_g1=True).xi_t
+            flip_g1=True,
+        ).xi_t
         gamma_t = self.corr.backend.to_numpy(gamma_t_full[1])
 
         self.assertAlmostEqual(
@@ -271,7 +272,9 @@ class TestEndToEnd(unittest.TestCase):
     @staticmethod
     def _q_t_numpy(theta: np.ndarray, theta_q_arcmin: float) -> np.ndarray:
         theta_q = np.radians(theta_q_arcmin / 60)
-        return theta**2 / (4 * np.pi * theta_q**4) * np.exp(-(theta**2) / (2 * theta_q**2))
+        return (
+            theta**2 / (4 * np.pi * theta_q**4) * np.exp(-(theta**2) / (2 * theta_q**2))
+        )
 
     def _get_aperture_patch_data(self, patch_idx: int):
         vec = hp.ang2vec(self.theta_center[patch_idx], self.phi_center[patch_idx])
@@ -301,7 +304,9 @@ class TestEndToEnd(unittest.TestCase):
             q_patch_area,
         )
 
-    def _reference_maperture_shear_numpy(self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray) -> np.ndarray:
+    def _reference_maperture_shear_numpy(
+        self, g1: np.ndarray, g2: np.ndarray, w: np.ndarray
+    ) -> np.ndarray:
         m_a = np.zeros(self.corr.n_patches, dtype=np.float64)
 
         for patch_idx in range(self.corr.n_patches):
@@ -309,10 +314,9 @@ class TestEndToEnd(unittest.TestCase):
                 self._get_aperture_patch_data(patch_idx)
             )
 
-            cos_vartheta = (
-                np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(q_dec)
-                + np.sin(center_dec) * np.sin(q_dec)
-            )
+            cos_vartheta = np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(
+                q_dec
+            ) + np.sin(center_dec) * np.sin(q_dec)
             cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
             vartheta = np.arccos(cos_vartheta)
 
@@ -327,7 +331,9 @@ class TestEndToEnd(unittest.TestCase):
             )
             sin_phi[valid] = (
                 np.cos(q_dec[valid]) * np.sin(center_dec)
-                - np.sin(q_dec[valid]) * np.cos(center_dec) * np.cos(q_ra[valid] - center_ra)
+                - np.sin(q_dec[valid])
+                * np.cos(center_dec)
+                * np.cos(q_ra[valid] - center_ra)
             ) / sin_vartheta[valid]
 
             cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
@@ -335,11 +341,15 @@ class TestEndToEnd(unittest.TestCase):
             gt = -g1[qpix_inds] * cos_2phi - g2[qpix_inds] * sin_2phi
             q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
 
-            m_a[patch_idx] = q_patch_area * np.sum(w[qpix_inds] * gt * q_vals) / np.sum(w[qpix_inds])
+            m_a[patch_idx] = (
+                q_patch_area * np.sum(w[qpix_inds] * gt * q_vals) / np.sum(w[qpix_inds])
+            )
 
         return m_a
 
-    def _reference_maperture_density_numpy(self, density: np.ndarray, w: np.ndarray) -> np.ndarray:
+    def _reference_maperture_density_numpy(
+        self, density: np.ndarray, w: np.ndarray
+    ) -> np.ndarray:
         m_g = np.zeros(self.corr.n_patches, dtype=np.float64)
 
         for patch_idx in range(self.corr.n_patches):
@@ -347,10 +357,9 @@ class TestEndToEnd(unittest.TestCase):
                 self._get_aperture_patch_data(patch_idx)
             )
 
-            cos_vartheta = (
-                np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(q_dec)
-                + np.sin(center_dec) * np.sin(q_dec)
-            )
+            cos_vartheta = np.cos(q_ra - center_ra) * np.cos(center_dec) * np.cos(
+                q_dec
+            ) + np.sin(center_dec) * np.sin(q_dec)
             cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
             vartheta = np.arccos(cos_vartheta)
             q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)

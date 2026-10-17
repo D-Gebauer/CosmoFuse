@@ -1,14 +1,9 @@
 """Tests for utility functions."""
 
-import sys
 import unittest
-from pathlib import Path
 
 import healpy as hp
 import numpy as np
-
-# Add src to path for testing
-sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
 
 from CosmoFuse.correlation_helpers import Q_schneider
 from CosmoFuse.correlations import Integrated3PCF
@@ -23,7 +18,7 @@ class TestUtils(unittest.TestCase):
         nside = 64
         pixel = 0
         ra, dec = pixel2RaDec(pixel, nside)
-        
+
         # For single pixel, healpy returns scalar values, not arrays
         self.assertIsInstance(ra, (np.ndarray, np.floating, float))
         self.assertIsInstance(dec, (np.ndarray, np.floating, float))
@@ -86,7 +81,10 @@ class TestSelectPatchCenters(unittest.TestCase):
         unmasked = self.mask != 0
         vecs = hp.ang2vec(theta_c, phi_c)
         for i in range(phi_c.size):
-            for radius in (np.radians(patch_size / 60), 5 * np.radians(patch_size / 60)):
+            for radius in (
+                np.radians(patch_size / 60),
+                5 * np.radians(patch_size / 60),
+            ):
                 disc = hp.query_disc(self.NSIDE_MASK, vecs[i], radius)
                 frac = 1.0 - np.count_nonzero(unmasked[disc]) / disc.size
                 self.assertLessEqual(frac, f_mask)
@@ -203,8 +201,11 @@ class TestFilterWeightedSelection(unittest.TestCase):
         mask[hole] = 0.0
         cls.mask = mask
         cls.kwargs = dict(
-            nside_centers=32, patch_size=90.0, theta_Q=90.0,
-            f_mask=0.01, f_mask_filter=0.01,
+            nside_centers=32,
+            patch_size=90.0,
+            theta_Q=90.0,
+            f_mask=0.01,
+            f_mask_filter=0.01,
         )
 
     # A constant filter weights every pixel of the disc equally, so the
@@ -291,9 +292,7 @@ class TestFilterWeightedSelection(unittest.TestCase):
             seen["theta_Q"] = theta_Q
             return np.ones_like(theta)
 
-        select_patch_centers(
-            self.mask, aperture_filter=spy_filter, **self.kwargs
-        )
+        select_patch_centers(self.mask, aperture_filter=spy_filter, **self.kwargs)
         self.assertEqual(seen["theta_Q"], self.kwargs["theta_Q"])
 
     def test_default_is_absolute_filter_weight(self):
@@ -312,10 +311,11 @@ class TestFilterWeightedSelection(unittest.TestCase):
     def test_signed_mode_equals_abs_for_non_negative_filters(self):
         for flt in (None, Q_schneider):
             a = select_patch_centers(
-                self.mask, filter_weighting="abs", aperture_filter=flt, **self.kwargs)
+                self.mask, filter_weighting="abs", aperture_filter=flt, **self.kwargs
+            )
             s = select_patch_centers(
-                self.mask, filter_weighting="signed", aperture_filter=flt,
-                **self.kwargs)
+                self.mask, filter_weighting="signed", aperture_filter=flt, **self.kwargs
+            )
             np.testing.assert_array_equal(a[1], s[1])
 
     def test_signed_mode_measures_deviation_from_compensation(self):
@@ -332,11 +332,15 @@ class TestFilterWeightedSelection(unittest.TestCase):
 
         kwargs = dict(self.kwargs, f_mask_filter=0.02)
         abs_sel = select_patch_centers(
-            self.mask, filter_weighting="abs", aperture_filter=U_crittenden, **kwargs)
+            self.mask, filter_weighting="abs", aperture_filter=U_crittenden, **kwargs
+        )
         sgn_sel = select_patch_centers(
-            self.mask, filter_weighting="signed", aperture_filter=U_crittenden, **kwargs)
+            self.mask, filter_weighting="signed", aperture_filter=U_crittenden, **kwargs
+        )
         # |sum| <= sum|.|: everything accepted by "abs" is accepted by "signed"
-        self.assertTrue(set(map(tuple, np.c_[abs_sel])) <= set(map(tuple, np.c_[sgn_sel])))
+        self.assertTrue(
+            set(map(tuple, np.c_[abs_sel])) <= set(map(tuple, np.c_[sgn_sel]))
+        )
 
         # explicit check of both criteria for one candidate that sees the hole
         nside = self.NSIDE_MASK

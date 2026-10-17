@@ -77,7 +77,7 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
 
 ## Installation
-Install using:
+Requires Python >= 3.12. Install using:
 
     pip install git+https://github.com/D-Gebauer/CosmoFuse.git
 

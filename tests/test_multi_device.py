@@ -13,6 +13,7 @@ import numpy as np
 
 from CosmoFuse import Integrated3PCF
 from CosmoFuse.multi_device import MultiDeviceIntegrated3PCF
+
 from ._results import fields_of
 
 NSIDE = 16
@@ -112,7 +113,9 @@ class TestMultiDevice(unittest.TestCase):
 
     def test_errors(self):
         with self.assertRaisesRegex(ValueError, "at least one device"):
-            MultiDeviceIntegrated3PCF(NSIDE, np.array([0.5]), np.array([0.9]), devices=[])
+            MultiDeviceIntegrated3PCF(
+                NSIDE, np.array([0.5]), np.array([0.9]), devices=[]
+            )
         with self.assertRaisesRegex(ValueError, "duplicate device ids"):
             MultiDeviceIntegrated3PCF(
                 NSIDE, np.array([0.5, 0.6]), np.array([0.9, 0.9]), devices=[0, 0]
@@ -125,8 +128,8 @@ class TestMultiDevice(unittest.TestCase):
             self.multi.save_pairs("/tmp/should-not-be-written.h5")
 
     def test_load_pairs_slices_per_device(self):
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "pairs.h5")
@@ -148,7 +151,12 @@ class TestMultiDevice(unittest.TestCase):
             multi.load_pairs(path)
             self.assertEqual(multi.ntotpairs, self.single.ntotpairs)
             self._same(
-                fields_of(self.single.gg(self.shear, self.w, return_device=False), "M_a", "xi_p", "xi_m"),
+                fields_of(
+                    self.single.gg(self.shear, self.w, return_device=False),
+                    "M_a",
+                    "xi_p",
+                    "xi_m",
+                ),
                 fields_of(multi.gg(self.shear, self.w), "M_a", "xi_p", "xi_m"),
             )
             with self.assertRaisesRegex(ValueError, "holds"):

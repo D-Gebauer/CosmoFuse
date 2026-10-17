@@ -44,9 +44,17 @@ def make_corr(devices=None, n_patches=4):
     phi = rng.uniform(0.2, 1.1, size=n_patches)
     theta = rng.uniform(0.7, 1.05, size=n_patches)
     corr = Integrated3PCF(
-        NSIDE, phi, theta,
-        nbins=3, theta_min=100, theta_max=400, patch_size=250, theta_Q=250,
-        mask=mask, map_precision="float64", rotation_precision="float64",
+        NSIDE,
+        phi,
+        theta,
+        nbins=3,
+        theta_min=100,
+        theta_max=400,
+        patch_size=250,
+        theta_Q=250,
+        mask=mask,
+        map_precision="float64",
+        rotation_precision="float64",
         device="cpu" if devices is None else devices,
     )
     corr.preprocess()
@@ -93,8 +101,10 @@ def fake_cupy():
 
 def read_zetas(path, **kw):
     with h5py.File(path, "r", **kw) as f:
-        return {k: f["zeta"][k][:] for k in f["zeta"]}, dict(f.attrs), int(
-            f["n_flushed"][()]
+        return (
+            {k: f["zeta"][k][:] for k in f["zeta"]},
+            dict(f.attrs),
+            int(f["n_flushed"][()]),
         )
 
 
@@ -103,7 +113,8 @@ def _on_device(result, DeviceArray):
     import dataclasses
 
     return dataclasses.replace(
-        result, **{k: np.asarray(v).view(DeviceArray) for k, v in result.fields().items()}
+        result,
+        **{k: np.asarray(v).view(DeviceArray) for k, v in result.fields().items()},
     )
 
 
@@ -143,9 +154,7 @@ class TestStreamedReduction(ZetaWriterBase):
         got, attrs, n_flushed = read_zetas(self.path)
         self.assert_matches_reference(got)
         self.assertEqual(n_flushed, len(self.results))
-        self.assertEqual(
-            next(iter(got.values())).shape[0], len(self.results)
-        )
+        self.assertEqual(next(iter(got.values())).shape[0], len(self.results))
 
     def test_device_route_matches_host_route(self):
         """Reducing on the device (before the copy) and reducing in the
@@ -172,7 +181,8 @@ class TestStreamedReduction(ZetaWriterBase):
         mod, DeviceArray = fake_cupy()
         copied = []
         mod.asnumpy = lambda a, _c=copied: (
-            _c.append(np.asarray(a).size), np.asarray(a).view(np.ndarray).copy()
+            _c.append(np.asarray(a).size),
+            np.asarray(a).view(np.ndarray).copy(),
         )[1]
         with patch.dict(sys.modules, {"cupy": mod}):
             with ZetaWriter(self.path, self.corr) as out:
@@ -204,8 +214,16 @@ class TestStreamedReduction(ZetaWriterBase):
         with ZetaWriter(self.path, self.corr) as out:
             out.submit(self.results[0])
         _, attrs, _ = read_zetas(self.path)
-        for key in ("nside", "nbins", "n_patches", "theta_min", "theta_max",
-                    "level_table", "row_pix_hash", "cosmofuse_version"):
+        for key in (
+            "nside",
+            "nbins",
+            "n_patches",
+            "theta_min",
+            "theta_max",
+            "level_table",
+            "row_pix_hash",
+            "cosmofuse_version",
+        ):
             self.assertIn(key, attrs)
         self.assertEqual(int(attrs["nside"]), NSIDE)
         self.assertEqual(int(attrs["n_patches"]), self.corr.n_patches)
@@ -231,7 +249,7 @@ class TestMultiDevice(ZetaWriterBase):
         multi = make_corr(devices=["cpu", "cpu"])
         with ZetaWriter(self.path, multi) as out:
             item = out._prepare({"M_a": np.zeros((2, self.corr.n_patches))})
-            self.assertIn("raw", item)      # not reduced on the calling thread
+            self.assertIn("raw", item)  # not reduced on the calling thread
             out.submit(multi.gg(*self.maps[0]))
 
 
@@ -243,7 +261,7 @@ class TestDurability(ZetaWriterBase):
             out._queue.join()
             self.assertEqual(out.n_written, 3)
         _, _, n_flushed = read_zetas(self.path)
-        self.assertEqual(n_flushed, 3)     # close() flushes the remainder
+        self.assertEqual(n_flushed, 3)  # close() flushes the remainder
 
     def test_survives_a_hard_kill_and_resumes(self):
         prog = textwrap.dedent(f"""
@@ -293,20 +311,20 @@ class TestErrorsAndBackpressure(ZetaWriterBase):
         npatch, nbins = self.corr.n_patches, self.corr.nbins
         other = IntegratedResult(
             self.corr.binedges,
-            M_a=np.zeros((3, npatch)),             # 3 tomographic bins
+            M_a=np.zeros((3, npatch)),  # 3 tomographic bins
             xi_p=np.zeros((6, npatch, nbins)),
             xi_m=np.zeros((6, npatch, nbins)),
         )
         writer = ZetaWriter(self.path, self.corr)
         writer.submit(self.results[0])
         writer._queue.join()
-        writer.submit(other)                 # fails in the thread
+        writer.submit(other)  # fails in the thread
         writer._queue.join()
         with self.assertRaisesRegex(RuntimeError, "thread failed"):
             writer.submit(self.results[1])
         with self.assertRaisesRegex(RuntimeError, "thread failed"):
             writer.close()
-        self.assertIsNone(writer._file)            # handle released anyway
+        self.assertIsNone(writer._file)  # handle released anyway
 
     def test_rejects_incomplete_results(self):
         edges = self.corr.binedges

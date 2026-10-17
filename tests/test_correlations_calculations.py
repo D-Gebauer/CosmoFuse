@@ -1,4 +1,5 @@
 """Tests for the Integrated3PCF class."""
+
 import sys
 import tempfile
 import unittest
@@ -9,10 +10,8 @@ from unittest.mock import patch
 import numpy as np
 from scipy.special import binom
 
-# Add src to path for testing
-sys.path.insert(1, str(Path(__file__).parent.parent / "src"))
-
 from CosmoFuse.correlations import Integrated3PCF
+
 from ._results import fields_of
 
 
@@ -53,7 +52,6 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.corr.Q_patch_area = [3.0]
         self.corr.n_patches = 1
 
-
     def test_aperture_shear_single(self):
         """Test the _m_a_single method."""
         g1 = np.random.rand(self.npix)
@@ -63,20 +61,18 @@ class TestCorrelationCalculations(unittest.TestCase):
         M_a = self.corr._m_a_single(g1, g2, w)
 
         self.assertEqual(M_a.shape, (1,))
-        
+
         Q_inds = self.corr.Q_inds[0]
         Q_cos = self.corr.Q_cos[0]
         Q_sin = self.corr.Q_sin[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]
-        
+
         gt = -g1[Q_inds] * Q_cos - g2[Q_inds] * Q_sin
         expected_M_a = Q_patch_area * np.sum(w[Q_inds] * gt * Q_val) / np.sum(w[Q_inds])
 
         # to_numpy: on a GPU backend the public getter returns a device array
-        self.assertAlmostEqual(
-            float(self.corr.backend.to_numpy(M_a)[0]), expected_M_a
-        )
+        self.assertAlmostEqual(float(self.corr.backend.to_numpy(M_a)[0]), expected_M_a)
 
     def test_aperture_shear_single_non_numpy_backend_path(self):
         g1 = np.random.rand(self.npix)
@@ -152,8 +148,8 @@ class TestCorrelationCalculations(unittest.TestCase):
         Q_inds = self.corr.Q_inds[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]
-        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
-            w[Q_inds]
+        expected = (
+            Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(w[Q_inds])
         )
 
         # to_numpy: on a GPU backend the public getter returns a device array
@@ -184,7 +180,9 @@ class TestCorrelationCalculations(unittest.TestCase):
                 return np.zeros(shape, dtype=dtype)
 
             @staticmethod
-            def aperture_density_kernel(Q_inds, Q_val, map_values, weights, out_num, out_den):
+            def aperture_density_kernel(
+                Q_inds, Q_val, map_values, weights, out_num, out_den
+            ):
                 out_num[:] = weights[Q_inds] * map_values[Q_inds] * Q_val
                 out_den[:] = weights[Q_inds]
 
@@ -194,8 +192,8 @@ class TestCorrelationCalculations(unittest.TestCase):
         Q_inds = self.corr.Q_inds[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]
-        expected = Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(
-            w[Q_inds]
+        expected = (
+            Q_patch_area * np.sum(w[Q_inds] * delta[Q_inds] * Q_val) / np.sum(w[Q_inds])
         )
         self.assertAlmostEqual(aperture_density[0], expected)
 
@@ -276,20 +274,12 @@ class TestCorrelationCalculations(unittest.TestCase):
         )
         np.testing.assert_allclose(Q, 2.5)
 
-    @patch('healpy.ang2pix')
-    @patch('healpy.query_disc')
-    @patch('CosmoFuse.correlations.pixel2RaDec')
-    def test_find_aperture_pairs(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
+    @patch("healpy.ang2pix")
+    @patch("healpy.query_disc")
+    def test_find_aperture_pairs(self, mock_query_disc, mock_ang2pix):
         """Test the find_aperture_pairs method."""
         mock_ang2pix.return_value = 99
         mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
-        
-        # Mocking the return values for pixel2RaDec
-        # First call for center, second for the rest
-        ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
-        Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        
-        mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
 
         self.corr.find_aperture_pairs()
 
@@ -301,22 +291,17 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.assertIsInstance(self.corr.Q_cos[0], np.ndarray)
         self.assertEqual(self.corr.Q_inds[0].size, 5)  # 6 - 1 (center)
 
-    @patch('healpy.ang2pix')
-    @patch('healpy.query_disc')
-    @patch('CosmoFuse.correlations.pixel2RaDec')
-    def test_save_and_load_pairs(self, mock_pixel2RaDec, mock_query_disc, mock_ang2pix):
+    @patch("healpy.ang2pix")
+    @patch("healpy.query_disc")
+    def test_save_and_load_pairs(self, mock_query_disc, mock_ang2pix):
         """Test the save_pairs and load_pairs methods."""
         # Mocking for find_pairs
         mock_query_disc.return_value = np.arange(100)
-        mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
         self.corr.find_pairs()
 
         # Mocking for find_aperture_pairs
         mock_ang2pix.return_value = 99
         mock_query_disc.return_value = np.array([10, 20, 30, 40, 50, 99])
-        ra_center, dec_center = np.array([np.pi/4]), np.array([0.0])
-        Q_ra, Q_dec = np.array([0.1, 0.2, 0.3, 0.4, 0.5]), np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-        mock_pixel2RaDec.side_effect = [(ra_center, dec_center), (Q_ra, Q_dec)]
         self.corr.find_aperture_pairs()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
@@ -337,26 +322,30 @@ class TestCorrelationCalculations(unittest.TestCase):
             np.testing.assert_allclose(self.corr.theta_center, new_corr.theta_center)
 
             for i in range(self.corr.n_patches):
-                np.testing.assert_array_equal(self.corr.pair_inds[i], new_corr.pair_inds[i])
-                np.testing.assert_allclose(self.corr.pair_exp2phi[i], new_corr.pair_exp2phi[i])
+                np.testing.assert_array_equal(
+                    self.corr.pair_inds[i], new_corr.pair_inds[i]
+                )
+                np.testing.assert_allclose(
+                    self.corr.pair_exp2phi[i], new_corr.pair_exp2phi[i]
+                )
                 np.testing.assert_array_equal(self.corr.bins[i], new_corr.bins[i])
                 np.testing.assert_array_equal(self.corr.Q_inds[i], new_corr.Q_inds[i])
                 np.testing.assert_allclose(self.corr.Q_cos[i], new_corr.Q_cos[i])
                 np.testing.assert_allclose(self.corr.Q_sin[i], new_corr.Q_sin[i])
                 np.testing.assert_allclose(self.corr.Q_val[i], new_corr.Q_val[i])
-                np.testing.assert_allclose(self.corr.Q_patch_area[i], new_corr.Q_patch_area[i])
-                
+                np.testing.assert_allclose(
+                    self.corr.Q_patch_area[i], new_corr.Q_patch_area[i]
+                )
+
     def test_prepare_and_shear(self):
         """Test prepare and shear methods."""
         # Calculate pairs first
-        with patch('healpy.query_disc') as mock_query_disc, \
-             patch('CosmoFuse.correlations.pixel2RaDec') as mock_pixel2RaDec:
-            
+        with patch("healpy.query_disc") as mock_query_disc:
+
             mock_query_disc.return_value = np.arange(100)
-            mock_pixel2RaDec.return_value = (np.random.rand(100), np.random.rand(100))
 
             self.corr.find_pairs()
-        
+
         self.corr.prepare()
 
         self.assertIsNotNone(self.corr.inds_dev)
@@ -365,7 +354,7 @@ class TestCorrelationCalculations(unittest.TestCase):
         self.assertIsNotNone(self.corr.tot_bins_dev)
         self.assertIsNotNone(self.corr.tot_bins_reduceat_dev)
         self.assertGreater(self.corr.ntotpairs, 0)
-        
+
         self.corr.Q_inds = [np.array([0, 1, 2], dtype=np.uint32)]
         self.corr.Q_cos = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
         self.corr.Q_sin = [np.array([0.0, 0.0, 0.0], dtype=np.float64)]
@@ -416,6 +405,7 @@ class TestCorrelationCalculations(unittest.TestCase):
                     return False
 
         fake_cupy.ElementwiseKernel = elementwise_kernel
+
         def elementwise_kernel(*_args, **_kwargs):
             def _kernel(*_kargs, **_kkwargs):
                 return None

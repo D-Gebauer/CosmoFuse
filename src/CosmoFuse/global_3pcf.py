@@ -147,7 +147,9 @@ class Global3PCF:
         self.theta_min = np.radians(theta_min / 60.0)
         self.theta_max = np.radians(theta_max / 60.0)
         self.binedges = np.geomspace(self.theta_min, self.theta_max, self.nbins + 1)
-        self.bincenters = np.sqrt(self.binedges[1:] * self.binedges[:-1]) * 60 * 180 / np.pi
+        self.bincenters = (
+            np.sqrt(self.binedges[1:] * self.binedges[:-1]) * 60 * 180 / np.pi
+        )
         self.n_max = int(n_max)
         self.E = self.n_max + 2
         self.map_dtype = np.dtype(_FLOATS[np.dtype(map_precision).name])
@@ -155,9 +157,13 @@ class Global3PCF:
         if accumulation_precision not in ("same", "float64"):
             raise ValueError("accumulation_precision must be 'same' or 'float64'")
         self.acc_dtype = (
-            np.dtype(np.float64) if accumulation_precision == "float64" else self.map_dtype
+            np.dtype(np.float64)
+            if accumulation_precision == "float64"
+            else self.map_dtype
         )
-        self.acc_complex = np.dtype(np.complex128 if self.acc_dtype == np.float64 else np.complex64)
+        self.acc_complex = np.dtype(
+            np.complex128 if self.acc_dtype == np.float64 else np.complex64
+        )
         if pair_search_precision not in ("float32", "float64"):
             raise ValueError("pair_search_precision must be 'float32' or 'float64'")
         self.pair_search_precision = pair_search_precision
@@ -218,7 +224,9 @@ class Global3PCF:
         return digest.hexdigest()
 
     def to_row_space(self, maps: np.ndarray, dtype: Optional[Any] = None) -> np.ndarray:
-        return np.ascontiguousarray(self._host_rows(np.asarray(maps)), dtype=dtype or self.map_dtype)
+        return np.ascontiguousarray(
+            self._host_rows(np.asarray(maps)), dtype=dtype or self.map_dtype
+        )
 
     def _host_rows(self, arr: np.ndarray) -> np.ndarray:
         n = int(arr.shape[-1])
@@ -232,7 +240,9 @@ class Global3PCF:
         return np.take(arr, self.map_inds, axis=-1)
 
     def _is_device_array(self, a: Any) -> bool:
-        return self.backend.name == "cupy" and type(a).__module__.split(".")[0] == "cupy"
+        return (
+            self.backend.name == "cupy" and type(a).__module__.split(".")[0] == "cupy"
+        )
 
     def _rows(self, arr: Any) -> Any:
         """Row-space backend array at map precision."""
@@ -242,9 +252,13 @@ class Global3PCF:
             if n == self.npix:
                 arr = xp.take(arr, self._device()["row_pix"], axis=-1)
             elif n != self.n_active:
-                raise ValueError(f"map arrays must have npix or n_active pixels; got {n}")
+                raise ValueError(
+                    f"map arrays must have npix or n_active pixels; got {n}"
+                )
             return arr.astype(self.map_dtype, copy=False)
-        rows = np.ascontiguousarray(self._host_rows(np.asarray(arr)), dtype=self.map_dtype)
+        rows = np.ascontiguousarray(
+            self._host_rows(np.asarray(arr)), dtype=self.map_dtype
+        )
         return self.backend.to_device(rows)
 
     # ------------------------------------------------------------------ #
@@ -270,9 +284,12 @@ class Global3PCF:
                 [np.arange(ts.row_indptr[u], ts.row_indptr[u + 1]) for u in reach]
             )
             nbr_pos, pc, pn, counts = ordered_pairs(
-                pix[a:b], np.ascontiguousarray(xyz[:, a:b]),
-                pix[sel], np.ascontiguousarray(xyz[:, sel]),
-                self.binedges, fastmath=self.fastmath,
+                pix[a:b],
+                np.ascontiguousarray(xyz[:, a:b]),
+                pix[sel],
+                np.ascontiguousarray(xyz[:, sel]),
+                self.binedges,
+                fastmath=self.fastmath,
             )
             nbr_parts.append(rows_sorted[sel][nbr_pos])
             pc_parts.append(pc.astype(self.rotation_dtype))
@@ -280,12 +297,20 @@ class Global3PCF:
             cnt_parts.append(counts.reshape(-1))
         counts_all = np.concatenate(cnt_parts) if cnt_parts else np.zeros(0, np.int64)
         self.centre_rows = rows_sorted.astype(np.int64)
-        self.pair_offsets = np.concatenate(([0], np.cumsum(counts_all))).astype(np.int64)
-        self.nbr_rows = (
-            np.concatenate(nbr_parts).astype(np.int32) if nbr_parts else np.zeros(0, np.int32)
+        self.pair_offsets = np.concatenate(([0], np.cumsum(counts_all))).astype(
+            np.int64
         )
-        self.phi_c = np.concatenate(pc_parts) if pc_parts else np.zeros(0, self.rotation_dtype)
-        self.phi_n = np.concatenate(pn_parts) if pn_parts else np.zeros(0, self.rotation_dtype)
+        self.nbr_rows = (
+            np.concatenate(nbr_parts).astype(np.int32)
+            if nbr_parts
+            else np.zeros(0, np.int32)
+        )
+        self.phi_c = (
+            np.concatenate(pc_parts) if pc_parts else np.zeros(0, self.rotation_dtype)
+        )
+        self.phi_n = (
+            np.concatenate(pn_parts) if pn_parts else np.zeros(0, self.rotation_dtype)
+        )
         self._dev = None
         self._norm_cache.clear()
 
@@ -294,7 +319,9 @@ class Global3PCF:
         if self._dev is not None:
             return
         if self.pair_offsets is None:
-            raise RuntimeError("no pair geometry: call preprocess() or load_pairs() first")
+            raise RuntimeError(
+                "no pair geometry: call preprocess() or load_pairs() first"
+            )
         be = self.backend
         self._dev = {
             "offsets": be.to_device(self.pair_offsets),
@@ -341,21 +368,31 @@ class Global3PCF:
             if fp.attrs.get("kind", None) != FORMAT_KIND:
                 raise ValueError(f"{filepath} is not a Global3PCF pair file")
             if int(fp.attrs["format_version"]) > FORMAT_VERSION:
-                raise ValueError(f"{filepath}: newer Global3PCF format; update CosmoFuse")
+                raise ValueError(
+                    f"{filepath}: newer Global3PCF format; update CosmoFuse"
+                )
             for name, got, want in (
                 ("nside", int(fp.attrs["nside"]), self.nside),
                 ("nbins", int(fp.attrs["nbins"]), self.nbins),
                 ("tile_nside", int(fp.attrs["tile_nside"]), self.tile_nside),
             ):
                 if got != want:
-                    raise ValueError(f"{filepath}: {name}={got}, this estimator has {want}")
+                    raise ValueError(
+                        f"{filepath}: {name}={got}, this estimator has {want}"
+                    )
             if not np.allclose(
                 [fp.attrs["theta_min"], fp.attrs["theta_max"]],
-                [self.theta_min, self.theta_max], rtol=1e-12, atol=0.0,
+                [self.theta_min, self.theta_max],
+                rtol=1e-12,
+                atol=0.0,
             ):
-                raise ValueError(f"{filepath}: angular range differs from this estimator")
+                raise ValueError(
+                    f"{filepath}: angular range differs from this estimator"
+                )
             if not np.array_equal(fp["map_inds"][:], self.map_inds):
-                raise ValueError(f"{filepath}: the mask (row space) differs from this estimator")
+                raise ValueError(
+                    f"{filepath}: the mask (row space) differs from this estimator"
+                )
             self.centre_rows = fp["centre_rows"][:].astype(np.int64)
             self.pair_offsets = fp["pair_offsets"][:].astype(np.int64)
             self.nbr_rows = fp["nbr_rows"][:].astype(np.int32)
@@ -369,14 +406,22 @@ class Global3PCF:
     # fields and descriptors
     # ------------------------------------------------------------------ #
 
-    def _field(self, name: str, values: Any, weights: Any, spin: int,
-               signs: Tuple[float, float] = (1.0, 1.0)) -> _Field:
+    def _field(
+        self,
+        name: str,
+        values: Any,
+        weights: Any,
+        spin: int,
+        signs: Tuple[float, float] = (1.0, 1.0),
+    ) -> _Field:
         xp = self.backend.module
         v = self._rows(values)
         w = self._rows(weights)
         if spin == 2:
             if v.ndim != 3 or v.shape[1] != 2:
-                raise ValueError(f"spin-2 field {name!r} must be (nz, 2, npix); got {v.shape}")
+                raise ValueError(
+                    f"spin-2 field {name!r} must be (nz, 2, npix); got {v.shape}"
+                )
             vre, vim = v[:, 0], v[:, 1]
             if signs[0] != 1.0:
                 vre = vre * self.map_dtype.type(signs[0])
@@ -384,29 +429,46 @@ class Global3PCF:
                 vim = vim * self.map_dtype.type(signs[1])
         elif spin == 0:
             if v.ndim != 2:
-                raise ValueError(f"spin-0 field {name!r} must be (nz, npix); got {v.shape}")
+                raise ValueError(
+                    f"spin-0 field {name!r} must be (nz, npix); got {v.shape}"
+                )
             vre, vim = v, xp.zeros_like(v)
         else:
             raise ValueError(f"spin must be 0 or 2; got {spin}")
         if tuple(w.shape) != tuple(vre.shape):
             raise ValueError(f"weights of {name!r} must be (nz, npix); got {w.shape}")
-        return _Field(name, int(spin), xp.ascontiguousarray(vre), xp.ascontiguousarray(vim),
-                      xp.ascontiguousarray(w))
+        return _Field(
+            name,
+            int(spin),
+            xp.ascontiguousarray(vre),
+            xp.ascontiguousarray(vim),
+            xp.ascontiguousarray(w),
+        )
 
-    def _descriptor(self, n_fields: int, sigmas: Sequence[int]) -> Tuple[Tuple[np.ndarray, ...], int]:
+    def _descriptor(
+        self, n_fields: int, sigmas: Sequence[int]
+    ) -> Tuple[Tuple[np.ndarray, ...], int]:
         """Output table: G_m of every field (m = -E..E), then the pair
         products ``[a_x a_y, conj(a_x) a_y] * exp(-i sigma phi)``."""
         E = self.E
         fa, fb, ca, cb, e = [], [], [], [], []
         for f in range(n_fields):
             for m in range(-E, E + 1):
-                fa.append(f); fb.append(-1); ca.append(0); cb.append(0); e.append(m)
+                fa.append(f)
+                fb.append(-1)
+                ca.append(0)
+                cb.append(0)
+                e.append(m)
         n_g = len(fa)
         for s in sigmas:
             for typ in (0, 1):
                 for x in range(n_fields):
                     for y in range(n_fields):
-                        fa.append(x); fb.append(y); ca.append(typ); cb.append(0); e.append(s)
+                        fa.append(x)
+                        fb.append(y)
+                        ca.append(typ)
+                        cb.append(0)
+                        e.append(s)
         desc = tuple(np.asarray(a, dtype=np.int32) for a in (fa, fb, ca, cb, e))
         return desc, n_g
 
@@ -442,7 +504,9 @@ class Global3PCF:
         vre = xp.ascontiguousarray(xp.concatenate([f.vre for f in fields]))
         vim = xp.ascontiguousarray(xp.concatenate([f.vim for f in fields]))
         wts = xp.ascontiguousarray(xp.concatenate([f.w for f in fields]))
-        spin = be.to_device(np.concatenate([np.full(f.nz, f.spin, np.int32) for f in fields]))
+        spin = be.to_device(
+            np.concatenate([np.full(f.nz, f.spin, np.int32) for f in fields])
+        )
         desc_h, n_g = self._descriptor(n_f, sigmas)
         desc = tuple(be.to_device(d) for d in desc_h)
         n_out = int(desc_h[0].size)
@@ -471,8 +535,22 @@ class Global3PCF:
         for c0 in range(0, n_centres, self.centre_chunk):
             C = min(self.centre_chunk, n_centres - c0)
             out = xp.zeros((C, nb, n_out), dtype=cdt)
-            kernel(dev["offsets"], c0, C, nb, dev["nbr"], dev["phi_c"], dev["phi_n"],
-                   vre, vim, wts, spin, desc, E, out)
+            kernel(
+                dev["offsets"],
+                c0,
+                C,
+                nb,
+                dev["nbr"],
+                dev["phi_c"],
+                dev["phi_n"],
+                vre,
+                vim,
+                wts,
+                spin,
+                desc,
+                E,
+                out,
+            )
             G = xp.ascontiguousarray(
                 out[:, :, :n_g].reshape(C, nb, n_f, P).transpose(3, 0, 1, 2)
             )  # (P, C, nb, F)
@@ -486,14 +564,20 @@ class Global3PCF:
                     L = G[_idx(m + E)][:, :, :, lo:hi]
                     if conj:
                         L = xp.conj(L)
-                    legs[key] = xp.ascontiguousarray(L).reshape(ns.size, C, nb * (hi - lo))
+                    legs[key] = xp.ascontiguousarray(L).reshape(
+                        ns.size, C, nb * (hi - lo)
+                    )
                 return legs[key]
 
             for label, ckey, leg2, leg3, c2, c3, sigma1 in jobs:
                 vals = centre_values[ckey][0][:, rows].T.astype(cdt)  # (C, nA)
                 b0, b1 = offsets_f[leg2]
                 d0, d1 = offsets_f[leg3]
-                L2 = _leg(ns - sigma1, True, b0, b1) if c2 else _leg(sigma1 - ns, False, b0, b1)
+                L2 = (
+                    _leg(ns - sigma1, True, b0, b1)
+                    if c2
+                    else _leg(sigma1 - ns, False, b0, b1)
+                )
                 L3 = _leg(-ns, True, d0, d1) if c3 else _leg(ns, False, d0, d1)
                 nA = int(vals.shape[1])
                 A = (L2[:, :, None, :] * vals[None, :, :, None]).reshape(ns.size, C, -1)
@@ -523,7 +607,9 @@ class Global3PCF:
             corr = deg[label]  # (nA, nb, nB, nC): a, b, z2, z3
             for b in range(nb):
                 R6[:, b, :, :, b, :] -= corr[:, b].transpose(2, 0, 1)[None]
-            out6 = xp.ascontiguousarray(R6.transpose(0, 3, 5, 2, 4, 1))  # n, a, z2, z3, b2, b3
+            out6 = xp.ascontiguousarray(
+                R6.transpose(0, 3, 5, 2, 4, 1)
+            )  # n, a, z2, z3, b2, b3
             results[label] = np.asarray(be.to_numpy(out6)).astype(np.complex128)
         return results
 
@@ -534,7 +620,13 @@ class Global3PCF:
                 key.append((f.name, "dev", live_object_serial(f.w), tuple(f.w.shape)))
             else:
                 w = np.ascontiguousarray(f.w)
-                key.append((f.name, hashlib.blake2b(memoryview(w).cast("B")).hexdigest(), w.shape))
+                key.append(
+                    (
+                        f.name,
+                        hashlib.blake2b(memoryview(w).cast("B")).hexdigest(),
+                        w.shape,
+                    )
+                )
         return tuple(key)
 
     def _norms(
@@ -552,7 +644,8 @@ class Global3PCF:
         if missing:
             xp = self.backend.module
             wfields = [
-                _Field(f.name, 0, xp.ones_like(f.w), xp.zeros_like(f.w), f.w) for f in fields
+                _Field(f.name, 0, xp.ones_like(f.w), xp.zeros_like(f.w), f.w)
+                for f in fields
             ]
             cvals = {f.name: (f.w, 0) for f in fields}
             jobs = [("|".join(g), g[0], g[1], g[2], False, False, 0) for g in missing]
@@ -586,7 +679,9 @@ class Global3PCF:
         for comp in components:
             for name in comp.fields:
                 if name not in by_name:
-                    raise ValueError(f"component {comp.label!r} uses unknown field {name!r}")
+                    raise ValueError(
+                        f"component {comp.label!r} uses unknown field {name!r}"
+                    )
         centre_values: Dict[str, Tuple[Any, int]] = {}
         jobs = []
         sigmas = {0}
@@ -604,7 +699,17 @@ class Global3PCF:
                 sigma1 = 0
             ckey = f"{fc.name}|{int(c1)}"
             centre_values[ckey] = (val, 0)
-            jobs.append((comp.label, ckey, comp.fields[1], comp.fields[2], bool(c2), bool(c3), sigma1))
+            jobs.append(
+                (
+                    comp.label,
+                    ckey,
+                    comp.fields[1],
+                    comp.fields[2],
+                    bool(c2),
+                    bool(c3),
+                    sigma1,
+                )
+            )
         num = self._accumulate(flist, centre_values, jobs, sorted(sigmas))
         norm = self._norms(flist, components)
         return ThreePointResult(
@@ -623,16 +728,25 @@ class Global3PCF:
             Component("gamma2", ("g", "g", "g"), (False, True, False)),
             Component("gamma3", ("g", "g", "g"), (False, False, True)),
         )
-        return self.measure({"g": (shear_maps, w, 2)}, comps, flip_g1=flip_g1, flip_g2=flip_g2)
+        return self.measure(
+            {"g": (shear_maps, w, 2)}, comps, flip_g1=flip_g1, flip_g2=flip_g2
+        )
 
     def kkk(self, k_maps: Any, w: Any) -> ThreePointResult:
         """Scalar three-point function ``zeta`` of density (as a field, δ) or
         convergence maps, for all ordered tomographic triplets."""
-        return self.measure({"k": (k_maps, w, 0)}, (Component("zeta", ("k", "k", "k")),))
+        return self.measure(
+            {"k": (k_maps, w, 0)}, (Component("zeta", ("k", "k", "k")),)
+        )
 
     def kgg(
-        self, k_maps: Any, shear_maps: Any, k_weights: Any, shear_weights: Any,
-        flip_g1: bool = False, flip_g2: bool = False,
+        self,
+        k_maps: Any,
+        shear_maps: Any,
+        k_weights: Any,
+        shear_weights: Any,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
     ) -> ThreePointResult:
         """Scalar at the centre, shear at both legs: ``kgg`` = <k g g> and
         ``kg*g`` = <k g* g> (the two independent shear-pair products), for all
@@ -643,16 +757,25 @@ class Global3PCF:
         )
         return self.measure(
             {"k": (k_maps, k_weights, 0), "g": (shear_maps, shear_weights, 2)},
-            comps, flip_g1=flip_g1, flip_g2=flip_g2,
+            comps,
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
         )
 
     def kkg(
-        self, k_maps: Any, shear_maps: Any, k_weights: Any, shear_weights: Any,
-        flip_g1: bool = False, flip_g2: bool = False,
+        self,
+        k_maps: Any,
+        shear_maps: Any,
+        k_weights: Any,
+        shear_weights: Any,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
     ) -> ThreePointResult:
         """Scalars at the centre and leg 2, shear at leg 3: ``kkg`` = <k k g>,
         for all ordered (k bin, k bin, g bin) triplets."""
         return self.measure(
             {"k": (k_maps, k_weights, 0), "g": (shear_maps, shear_weights, 2)},
-            (Component("kkg", ("k", "k", "g")),), flip_g1=flip_g1, flip_g2=flip_g2,
+            (Component("kkg", ("k", "k", "g")),),
+            flip_g1=flip_g1,
+            flip_g2=flip_g2,
         )

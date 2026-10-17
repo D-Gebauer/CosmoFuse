@@ -161,7 +161,9 @@ class MapFileLoader:
         self._gpu = self.backend.name == "cupy" and hasattr(
             getattr(self.backend.module, "cuda", None), "Stream"
         )
-        self.stream = self.backend.create_stream(non_blocking=True) if self._gpu else None
+        self.stream = (
+            self.backend.create_stream(non_blocking=True) if self._gpu else None
+        )
         self.host = [
             {k: self.backend.alloc_pinned(s, dtype) for k, s in shapes.items()}
             for _ in range(n_slots)
@@ -220,7 +222,9 @@ class MapFileLoader:
                     event = None
                     if self._gpu:
                         with upload_lock:
-                            with self.backend.module.cuda.Device(self.backend.device_id):
+                            with self.backend.module.cuda.Device(
+                                self.backend.device_id
+                            ):
                                 with self.stream:
                                     if self._released[slot] is not None:
                                         self.stream.wait_event(self._released[slot])

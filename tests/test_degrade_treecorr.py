@@ -28,8 +28,8 @@ import treecorr
 from CosmoFuse import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
 
-from .test_gpu_kernel_emulation import emulated_gpu
 from ._results import fields_of
+from .test_gpu_kernel_emulation import emulated_gpu
 
 # nside 128 with k = 2 over 100'-400' assigns the three bins to nside
 # 128 / 64 / 32: a base-resolution bin plus the full two-level chain.
@@ -48,11 +48,18 @@ def build():
     phi_c = np.array([0.30, 0.52])
     theta_c = np.array([1.48, 1.62])
     corr = Integrated3PCF(
-        NSIDE, phi_c, theta_c,
-        nbins=NBINS, theta_min=THETA_MIN, theta_max=THETA_MAX,
-        patch_size=PATCH_SIZE, theta_Q=PATCH_SIZE / 2,
-        mask=mask.astype(float), device="cpu",
-        map_precision="float64", rotation_precision="float64",
+        NSIDE,
+        phi_c,
+        theta_c,
+        nbins=NBINS,
+        theta_min=THETA_MIN,
+        theta_max=THETA_MAX,
+        patch_size=PATCH_SIZE,
+        theta_Q=PATCH_SIZE / 2,
+        mask=mask.astype(float),
+        device="cpu",
+        map_precision="float64",
+        rotation_precision="float64",
         pair_search_precision="float64",
         resolution_factor=RESOLUTION_FACTOR,
     )
@@ -83,12 +90,15 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
         """Cell positions, weights and weighted-mean shear, as the degrade
         writes them into the virtual rows."""
         corr = self.corr
-        call = lambda c: c._expand_rows(
-            (self.shear[:, 0], self.shear[:, 1]), self.w, "pairs")
+
+        def call(c):
+            return c._expand_rows((self.shear[:, 0], self.shear[:, 1]), self.w, "pairs")
+
         if fused:
             with emulated_gpu(corr):
-                with patch.object(Integrated3PCF, "_use_fused_degrade",
-                                  lambda self, w: True):
+                with patch.object(
+                    Integrated3PCF, "_use_fused_degrade", lambda self, w: True
+                ):
                     (g1, g2), w_rows = call(corr)
             corr.compute_context.Q_inds_dev = None
             corr.compute_context.degrade_csr = None
@@ -108,15 +118,21 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
 
         for nside_b, b0, b1 in self.groups:
             gg = treecorr.GGCorrelation(
-                nbins=NBINS, min_sep=THETA_MIN, max_sep=THETA_MAX,
-                sep_units="arcmin", brute=True, metric="Arc",
-                bin_slop=0.0, angle_slop=0.0,
+                nbins=NBINS,
+                min_sep=THETA_MIN,
+                max_sep=THETA_MAX,
+                sep_units="arcmin",
+                brute=True,
+                metric="Arc",
+                bin_slop=0.0,
+                angle_slop=0.0,
             )
             for p in range(corr.n_patches):
                 if nside_b == NSIDE:
                     vec = hp.ang2vec(corr.theta_center[p], corr.phi_center[p])
                     disc = hp.query_disc(
-                        NSIDE, vec=vec, radius=np.radians(PATCH_SIZE / 60))
+                        NSIDE, vec=vec, radius=np.radians(PATCH_SIZE / 60)
+                    )
                     pix = np.intersect1d(disc, corr.map_inds)
                     rows = np.searchsorted(corr.map_inds, pix)
                     ra, dec = pixel2RaDec(pix, NSIDE)
@@ -124,17 +140,20 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
                     level = tree.level_index(nside_b)
                     lo = int(tree.cell_offsets[level, p])
                     hi = int(tree.cell_offsets[level, p + 1])
-                    self.assertGreater(
-                        hi - lo, 15, f"too few cells at nside {nside_b}")
+                    self.assertGreater(hi - lo, 15, f"too few cells at nside {nside_b}")
                     rows = corr.n_active + int(starts[level]) + np.arange(lo, hi)
                     ra = np.asarray(tree.cell_ra[level][lo:hi])
                     dec = np.asarray(tree.cell_dec[level][lo:hi])
                 keep = w_rows[0, rows] > 0
                 cat = treecorr.Catalog(
-                    ra=ra[keep], dec=dec[keep],
-                    g1=g1[0, rows][keep], g2=g2[0, rows][keep],
+                    ra=ra[keep],
+                    dec=dec[keep],
+                    g1=g1[0, rows][keep],
+                    g2=g2[0, rows][keep],
                     w=w_rows[0, rows][keep],
-                    ra_units="rad", dec_units="rad", flip_g1=True,
+                    ra_units="rad",
+                    dec_units="rad",
+                    flip_g1=True,
                 )
                 gg.process(cat)
                 # only the bins this level is responsible for
@@ -149,10 +168,20 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
 
         with emulated_gpu(self.corr):
             self.corr.compute_context.Q_inds_dev = None
-            with patch.object(Integrated3PCF, "_use_fused_degrade",
-                              lambda self, w: True):
-                xip, xim = fields_of(self.corr.gg(
-                    self.shear, self.w, flip_g1=True, return_device=False, apertures=False), "xi_p", "xi_m")
+            with patch.object(
+                Integrated3PCF, "_use_fused_degrade", lambda self, w: True
+            ):
+                xip, xim = fields_of(
+                    self.corr.gg(
+                        self.shear,
+                        self.w,
+                        flip_g1=True,
+                        return_device=False,
+                        apertures=False,
+                    ),
+                    "xi_p",
+                    "xi_m",
+                )
         self.corr.compute_context.Q_inds_dev = None
         self.corr.compute_context.degrade_csr = None
 
@@ -173,8 +202,8 @@ class TestDegradedEstimatorAgainstTreeCorr(unittest.TestCase):
         b = self._cells(fused=False)
         for x, y, name in zip(a, b, ("g1", "g2", "w")):
             scale = np.max(np.abs(y))
-            np.testing.assert_allclose(
-                x, y, rtol=0, atol=1e-13 * scale, err_msg=name)
+            np.testing.assert_allclose(x, y, rtol=0, atol=1e-13 * scale, err_msg=name)
+
 
 if __name__ == "__main__":
     unittest.main()
