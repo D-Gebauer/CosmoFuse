@@ -390,7 +390,8 @@ map, on CPU or GPU, with the same `preprocess` / `save_pairs` / `load_pairs` wor
 from CosmoFuse import Global2PCF
 
 g2 = Global2PCF(nside, mask=mask, nbins=20, theta_min=5, theta_max=250,
-                resolution_factor=None, pack_pairs=False, device="auto")   # or device=[0, 1]
+                resolution_factor=None, pack_pairs=False, device="auto",   # or device=[0, 1]
+                pack_host_pairs=False)              # True: 8-byte pairs in RAM and in the file
 g2.preprocess()                      # or g2.load_pairs("g2.h5") after g2.save_pairs(...)
 
 gg = g2.gg(shear_maps, w, flip_g1=True)              # TwoPointResult
@@ -408,6 +409,18 @@ A `TwoPointResult` holds the per-tile sums; the estimate is their ratio over the
 add with `+`. The estimator is the ratio of sums over every pixel pair of the footprint and agrees
 with TreeCorr's `GGCorrelation`, `KKCorrelation` (`k = δ`) and `KGCorrelation` on the pixel
 centres (`brute=True`, `metric="Arc"`) to TreeCorr's rounding.
+
+`pack_host_pairs=True` works as for `Integrated3PCF`: every tile is packed right after its pair
+search, so host RAM and the pair file hold 8 instead of 24 bytes per pair, and `prepare()` /
+`load_pairs()` have almost nothing left to do. The device state is bitwise the one
+`pack_pairs=True` builds from an exact file. For DES Y3 on seitz1 (A100, 160 cores):
+
+| nside | pairs | `find_pairs` | `prepare` (exact / packed) | `load_pairs` (exact / packed) | file (exact / packed) |
+|---|---|---|---|---|---|
+| 512, full resolution | 6.7 × 10⁸ | 27 s | 8.7 s / 1.2 s | 9.5 s / 3.3 s | 16.1 / 5.4 GB |
+| 2048, `resolution_factor=2.9` | 7.0 × 10⁷ | 31 s | 1.2 s / 0.4 s | 1.4 s / 0.7 s | 1.8 / 0.7 GB |
+
+Packing uses as many threads as Numba (`NUMBA_NUM_THREADS`).
 
 ### Three-point: `Global3PCF`
 

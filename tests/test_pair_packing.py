@@ -82,6 +82,62 @@ class TestCodec(unittest.TestCase):
         for blk in blocks:
             self.assertTrue(np.all(np.diff(blk) > 0))
 
+    def test_block_local_indices_equal_np_unique(self):
+        """The sort-free row blocks are bitwise np.unique(return_inverse=True),
+        for the Numba kernel and its numpy twin alike."""
+        rng = np.random.default_rng(4)
+        cases = [(0, 5, 0), (1, 5, 3), (300, 40, 7), (2000, 70000, 10**6)]
+        cases += [(40, 10**7, 2**30)]
+        for dtype in (np.int32, np.int64):
+            for n, span, offset in cases:
+                ids = rng.integers(offset, offset + span, (2, n + 6)).astype(dtype)
+                lo, hi = 3, 3 + n
+                ref, inv = np.unique(ids[:, lo:hi], return_inverse=True)
+                inv = np.reshape(inv, (2, n)).T
+                for impl in (packing._block_local_kernel, packing._block_local_numpy):
+                    with self.subTest(impl=impl.__name__, dtype=dtype, n=n):
+                        local = np.full((n + 6, 4), 7, dtype=np.uint16)
+                        uniq = impl(ids, lo, hi, local)
+                        self.assertEqual(uniq.dtype, ids.dtype)
+                        np.testing.assert_array_equal(uniq, ref)
+                        if ref.size <= 65536:
+                            np.testing.assert_array_equal(local[lo:hi, :2], inv)
+                        # nothing outside the block, no angle column touched
+                        self.assertTrue(np.all(local[:lo] == 7))
+                        self.assertTrue(np.all(local[hi:] == 7))
+                        self.assertTrue(np.all(local[:, 2:] == 7))
+
+    def test_pack_patch_writes_into_out(self):
+        rng = np.random.default_rng(5)
+        rows = rng.integers(0, 50, (2, 9))
+        exp = np.exp(1j * rng.uniform(-3, 3, (2, 9)))
+        counts, groups = np.array([4, 5]), [(64, 0, 1), (32, 1, 2)]
+        ref, ref_blocks, _ = packing.pack_patch(rows, exp, counts, groups)
+        whole = np.zeros((12, 4), dtype=np.uint16)
+        packed, blocks, _ = packing.pack_patch(
+            rows, exp, counts, groups, out=whole[2:11]
+        )
+        self.assertTrue(np.shares_memory(packed, whole))
+        np.testing.assert_array_equal(whole[2:11], ref)
+        for a, b in zip(blocks, ref_blocks):
+            np.testing.assert_array_equal(a, b)
+        with self.assertRaisesRegex(ValueError, "out must be"):
+            packing.pack_patch(rows, exp, counts, groups, out=whole[:5])
+
+    def test_map_patches_keeps_order_and_raises(self):
+        self.assertEqual(
+            packing.map_patches(lambda i: i * i, 7), [i * i for i in range(7)]
+        )
+        self.assertEqual(packing.map_patches(lambda i: i, 0), [])
+
+        def fail(i):
+            if i == 3:
+                raise KeyError("patch 3")
+            return i
+
+        with self.assertRaisesRegex(KeyError, "patch 3"):
+            packing.map_patches(fail, 6)
+
     def test_too_many_local_rows_raise(self):
         old = packing.MAX_LOCAL_ROWS
         packing.MAX_LOCAL_ROWS = 4

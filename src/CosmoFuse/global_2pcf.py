@@ -29,6 +29,7 @@ Measurements run in one thread per device and the per-tile sums are
 concatenated in tile order, so the result is bitwise that of one device.
 """
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
@@ -49,12 +50,18 @@ from .multi_device import (
     require_host_arrays,
     run_on_devices,
 )
+from .packing import pack_host_patch
 from .results import TwoPointResult
 from .treecode import TreecodeGeometry, build_patch_cells, level_groups
 from .utils import pixel2RaDec
 
 FORMAT_KIND = "CosmoFuse.Global2PCF"
-FORMAT_VERSION = 1
+# Version 1: exact pairs (``pair_inds``/``pair_exp2phi``).  Version 2 is
+# written only for ``pack_host_pairs=True``: the packed payload instead.
+FORMAT_VERSION = 2
+_EXACT_FORMAT_VERSION = 1
+# packing jobs in flight behind the pair search of find_pairs()
+_PACK_WORKERS = 4
 
 
 class _TileEngine(Integrated3PCF):
@@ -107,6 +114,12 @@ class Global2PCF:
             as for :class:`~CosmoFuse.correlations.Integrated3PCF`.  The
             static treecode builds its cells over the whole footprint (there
             is no patch window to preserve), from the binary mask.
+        pack_host_pairs: pack every tile right after its pair search, so the
+            host arrays and the pair file hold the 8-byte payload instead of
+            the exact 24-byte pairs (as for ``Integrated3PCF``): a third of
+            the host memory, and ``prepare()`` / ``load_pairs()`` skip the
+            packing.  The device state is bitwise the one ``pack_pairs=True``
+            builds in ``prepare()``; the file is then no longer exact.
     """
 
     def __init__(
@@ -125,6 +138,7 @@ class Global2PCF:
         pair_search_precision: str = "float64",
         pack_pairs: bool = False,
         fastmath: bool = True,
+        pack_host_pairs: bool = False,
     ) -> None:
         devices: List[Any] = (
             device_list(device) if isinstance(device, (list, tuple, set)) else [device]
@@ -163,6 +177,7 @@ class Global2PCF:
             for dev in devices
         ]
         self.devices = devices
+        self.pack_host_pairs = bool(pack_host_pairs)
         # the engine every device-independent property is read from
         self._engine = e = self._engines[0]
         coarse = self._coarse_nsides()
@@ -302,56 +317,123 @@ class Global2PCF:
     # ------------------------------------------------------------------ #
 
     def find_pairs(self) -> None:
-        """Find every footprint pair once, grouped by tile (host arrays)."""
-        e, ts = self._engine, self.tiles
+        """Find every footprint pair once, grouped by tile (host arrays).
+
+        With ``pack_host_pairs=True`` every tile is packed in a worker thread
+        while the next tile is searched, and its exact arrays are dropped as
+        soon as it is packed.
+        """
+        e = self._engine
         treecode = self._build_treecode()
         elements = self._level_elements(treecode)
         groups = level_groups(e.level_nside)
-        pair_inds: List[np.ndarray] = []
-        pair_exp2phi: List[np.ndarray] = []
-        bins: List[np.ndarray] = []
         reach_cache: Dict[Tuple[int, float], np.ndarray] = {}
-        for t in range(ts.n_tiles):
-            inds_t, exp_t = [], []
-            bins_t = np.zeros(e.nbins, dtype=np.int64)
-            for nside_b, b0, b1 in groups:
-                level = elements[int(nside_b)]
-                radius = float(e.binedges[b1])
-                key = (t, radius)
-                if key not in reach_cache:
-                    reach_cache[key] = ts.reach(t, radius)
-                core_ids, core_xyz = level.core(t)
-                cand_ids, cand_xyz = level.of_tiles(reach_cache[key])
-                ids_a, ids_b, c1, s1, c2, s2, counts = unique_pairs(
-                    core_ids,
-                    core_xyz,
-                    cand_ids,
-                    cand_xyz,
-                    e.binedges[b0 : b1 + 1],
-                    fastmath=e.fastmath,
+        bins: List[np.ndarray] = []
+        if not self.pack_host_pairs:
+            pair_inds: List[np.ndarray] = []
+            pair_exp2phi: List[np.ndarray] = []
+            for t in range(self.n_tiles):
+                inds_t, exp_t, bins_t = self._search_tile(
+                    t, elements, groups, reach_cache
                 )
-                inds_t.append(np.stack((ids_a, ids_b)))
-                exp = np.empty((2, ids_a.size), dtype=e.rotation_complex_dtype)
-                exp[0].real = c1
-                exp[0].imag = s1
-                exp[1].real = c2
-                exp[1].imag = s2
-                exp_t.append(exp)
-                bins_t[b0:b1] = counts
-            pair_inds.append(
-                np.concatenate(inds_t, axis=1).astype(e.index_dtype, copy=False)
+                pair_inds.append(inds_t)
+                pair_exp2phi.append(exp_t)
+                bins.append(bins_t)
+            self._install(
+                bins, treecode, pair_inds=pair_inds, pair_exp2phi=pair_exp2phi
             )
-            pair_exp2phi.append(np.concatenate(exp_t, axis=1))
-            bins.append(bins_t.astype(e.index_dtype))
-        self._install(pair_inds, pair_exp2phi, bins, treecode)
+            return
+        jobs: List["Future[Tuple[np.ndarray, np.ndarray, np.ndarray]]"] = []
+        with ThreadPoolExecutor(max_workers=_PACK_WORKERS) as pool:
+            try:
+                for t in range(self.n_tiles):
+                    inds_t, exp_t, bins_t = self._search_tile(
+                        t, elements, groups, reach_cache
+                    )
+                    bins.append(bins_t)
+                    jobs.append(
+                        pool.submit(
+                            pack_host_patch,
+                            inds_t,
+                            exp_t,
+                            bins_t,
+                            groups,
+                            e.index_dtype,
+                        )
+                    )
+                    del inds_t, exp_t
+                    # bound the exact tiles waiting to be packed
+                    while sum(not f.done() for f in jobs) > 2 * _PACK_WORKERS:
+                        next(f for f in jobs if not f.done()).result()
+                packed = [f.result() for f in jobs]
+            except BaseException:
+                for f in jobs:
+                    f.cancel()
+                raise
+        self._install(
+            bins,
+            treecode,
+            packed=(
+                [p[0] for p in packed],
+                [p[1] for p in packed],
+                [p[2] for p in packed],
+            ),
+        )
+
+    def _search_tile(
+        self,
+        t: int,
+        elements: Dict[int, LevelElements],
+        groups: Sequence[Tuple[int, int, int]],
+        reach_cache: Dict[Tuple[int, float], np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The unique pairs owned by tile ``t``, every resolution level."""
+        e, ts = self._engine, self.tiles
+        inds_t, exp_t = [], []
+        bins_t = np.zeros(e.nbins, dtype=np.int64)
+        for nside_b, b0, b1 in groups:
+            level = elements[int(nside_b)]
+            radius = float(e.binedges[b1])
+            key = (t, radius)
+            if key not in reach_cache:
+                reach_cache[key] = ts.reach(t, radius)
+            core_ids, core_xyz = level.core(t)
+            cand_ids, cand_xyz = level.of_tiles(reach_cache[key])
+            ids_a, ids_b, c1, s1, c2, s2, counts = unique_pairs(
+                core_ids,
+                core_xyz,
+                cand_ids,
+                cand_xyz,
+                e.binedges[b0 : b1 + 1],
+                fastmath=e.fastmath,
+            )
+            inds_t.append(np.stack((ids_a, ids_b)))
+            exp = np.empty((2, ids_a.size), dtype=e.rotation_complex_dtype)
+            exp[0].real = c1
+            exp[0].imag = s1
+            exp[1].real = c2
+            exp[1].imag = s2
+            exp_t.append(exp)
+            bins_t[b0:b1] = counts
+        return (
+            np.concatenate(inds_t, axis=1).astype(e.index_dtype, copy=False),
+            np.concatenate(exp_t, axis=1),
+            bins_t.astype(e.index_dtype),
+        )
 
     def _install(
         self,
-        pair_inds: List[np.ndarray],
-        pair_exp2phi: List[np.ndarray],
         bins: List[np.ndarray],
         treecode: Optional[TreecodeGeometry],
+        pair_inds: Optional[List[np.ndarray]] = None,
+        pair_exp2phi: Optional[List[np.ndarray]] = None,
+        packed: Optional[
+            Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]
+        ] = None,
     ) -> None:
+        """Hand the tiles' pairs to the engines: exact (``pair_inds``,
+        ``pair_exp2phi``) or the ``pack_host_pairs`` payload (``packed`` =
+        per-tile payloads, block ids, block sizes)."""
         e = self._engine
         if treecode is not None:
             npix = hp.nside2npix(e.nside)
@@ -362,19 +444,28 @@ class Global2PCF:
         if len(self._engines) == 1:
             ranges = [(0, self.tiles.n_tiles)]
         else:
-            ranges = balanced_ranges(
-                [p.shape[1] for p in pair_inds], len(self._engines)
-            )
+            counts = [int(np.sum(b, dtype=np.int64)) for b in bins]
+            ranges = balanced_ranges(counts, len(self._engines))
         self._assign_tiles(ranges)
         for eng, (a, b) in zip(self._engines, ranges):
-            eng.pair_inds = pair_inds[a:b]
-            eng.pair_exp2phi = pair_exp2phi[a:b]
+            # (the engine's host pair lists are None when packed or released)
+            host: Any = eng
+            if packed is None:
+                assert pair_inds is not None and pair_exp2phi is not None
+                eng.pair_inds = pair_inds[a:b]
+                eng.pair_exp2phi = pair_exp2phi[a:b]
+                eng.packed_pairs = None
+                eng.packed_block_ids = None
+                eng.packed_block_sizes = None
+            else:
+                host.pair_inds = None
+                host.pair_exp2phi = None
+                eng.packed_pairs = packed[0][a:b]
+                eng.packed_block_ids = packed[1][a:b]
+                eng.packed_block_sizes = packed[2][a:b]
             eng.bins = bins[a:b]
             # every engine holds every cell: its pairs reach into other tiles
             eng._treecode = treecode
-            eng.packed_pairs = None
-            eng.packed_block_ids = None
-            eng.packed_block_sizes = None
             eng._invalidate_prepared_state()
 
     def _assign_tiles(self, ranges: List[Tuple[int, int]]) -> None:
@@ -402,22 +493,28 @@ class Global2PCF:
         self.prepare(release_host_pairs=release_host_pairs)
 
     def save_pairs(self, filepath: str) -> None:
-        """Write the pair geometry (exact, host arrays) to HDF5."""
+        """Write the pair geometry (host arrays) to HDF5: exact, or the packed
+        payload when the pairs were found with ``pack_host_pairs=True``."""
         e = self._engine
-        if any(eng.bins is None or eng.pair_inds is None for eng in self._engines):
+        engines: List[Any] = self._engines  # host lists may be None
+        packed = all(eng.packed_pairs is not None for eng in engines)
+        if any(
+            eng.bins is None or (eng.pair_inds is None and eng.packed_pairs is None)
+            for eng in engines
+        ):
             raise RuntimeError(
                 "host pairs were released (release_host_pairs=True); recompute "
                 "them before save_pairs()."
             )
         # the tiles of all devices, in tile order
-        pair_inds = [p for eng in self._engines for p in eng.pair_inds]
-        pair_exp2phi = [p for eng in self._engines for p in eng.pair_exp2phi]
         bins = [b for eng in self._engines for b in eng.bins]
-        counts = np.array([p.shape[1] for p in pair_inds], dtype=np.int64)
+        counts = np.array([int(np.sum(b, dtype=np.int64)) for b in bins], np.int64)
         offsets = np.concatenate(([0], np.cumsum(counts)))
         with h5py.File(filepath, "w") as fp:
             fp.attrs["kind"] = FORMAT_KIND
-            fp.attrs["format_version"] = FORMAT_VERSION
+            fp.attrs["format_version"] = (
+                FORMAT_VERSION if packed else _EXACT_FORMAT_VERSION
+            )
             fp.attrs["nside"] = int(e.nside)
             fp.attrs["nbins"] = int(e.nbins)
             fp.attrs["theta_min"] = float(e.theta_min)
@@ -435,20 +532,10 @@ class Global2PCF:
             fp.create_dataset(
                 "bins", data=np.stack([np.asarray(b, dtype=np.int64) for b in bins])
             )
-            fp.create_dataset(
-                "pair_inds",
-                data=(
-                    np.concatenate(pair_inds, axis=1) if pair_inds else np.zeros((2, 0))
-                ),
-            )
-            fp.create_dataset(
-                "pair_exp2phi",
-                data=(
-                    np.concatenate(pair_exp2phi, axis=1)
-                    if pair_exp2phi
-                    else np.zeros((2, 0))
-                ),
-            )
+            if packed:
+                self._write_packed(fp, offsets)
+            else:
+                self._write_exact(fp, offsets)
             tc = e._treecode
             if tc is not None:
                 gp = fp.create_group("treecode")
@@ -462,6 +549,53 @@ class Global2PCF:
                     gp.create_dataset(f"child_indices_{lv}", data=tc.child_indices[lv])
                     gp.create_dataset(f"cell_ra_{lv}", data=tc.cell_ra[lv])
                     gp.create_dataset(f"cell_dec_{lv}", data=tc.cell_dec[lv])
+
+    def _write_exact(self, fp: h5py.File, offsets: np.ndarray) -> None:
+        """Per tile into preallocated datasets (no catalogue-sized copy)."""
+        e = self._engine
+        pair_inds = [p for eng in self._engines for p in eng.pair_inds]
+        pair_exp2phi = [p for eng in self._engines for p in eng.pair_exp2phi]
+        n = int(offsets[-1])
+        d_inds = fp.create_dataset("pair_inds", shape=(2, n), dtype=e.index_dtype)
+        d_exp = fp.create_dataset(
+            "pair_exp2phi", shape=(2, n), dtype=e.rotation_complex_dtype
+        )
+        for t, (inds, exp) in enumerate(zip(pair_inds, pair_exp2phi)):
+            a, b = int(offsets[t]), int(offsets[t + 1])
+            if b > a:
+                d_inds[:, a:b] = inds
+                d_exp[:, a:b] = exp
+
+    def _write_packed(self, fp: h5py.File, offsets: np.ndarray) -> None:
+        e = self._engine
+        engines: List[Any] = self._engines  # checked by save_pairs()
+        packed = [p for eng in engines for p in eng.packed_pairs]
+        block_ids = [p for eng in engines for p in eng.packed_block_ids]
+        block_sizes = [p for eng in engines for p in eng.packed_block_sizes]
+        block_offsets = np.concatenate(
+            ([0], np.cumsum([b.size for b in block_ids], dtype=np.int64))
+        )
+        fp.attrs["pack_host_pairs"] = True
+        d_packed = fp.create_dataset(
+            "packed_pairs", shape=(int(offsets[-1]), 4), dtype=np.uint16
+        )
+        for t, payload in enumerate(packed):
+            a, b = int(offsets[t]), int(offsets[t + 1])
+            if b > a:
+                d_packed[a:b] = payload
+        fp.create_dataset(
+            "packed_block_ids",
+            data=(
+                np.concatenate(block_ids).astype(e.index_dtype, copy=False)
+                if block_ids
+                else np.zeros(0, dtype=e.index_dtype)
+            ),
+        )
+        fp.create_dataset("packed_block_offsets", data=block_offsets)
+        fp.create_dataset(
+            "packed_block_sizes",
+            data=np.stack([np.asarray(b, dtype=np.int64) for b in block_sizes]),
+        )
 
     def load_pairs(self, filepath: str, release_host_pairs: bool = False) -> None:
         """Read a pair file written by :meth:`save_pairs` and prepare it.
@@ -516,10 +650,30 @@ class Global2PCF:
                 )
             offsets = fp["pair_offsets"][:]
             bins_arr = fp["bins"][:]
-            inds_flat = fp["pair_inds"][:].astype(e.index_dtype, copy=False)
-            exp_flat = fp["pair_exp2phi"][:].astype(
-                e.rotation_complex_dtype, copy=False
-            )
+            n = self.n_tiles
+            packed = None
+            pair_inds = pair_exp2phi = None
+            if "packed_pairs" in fp:
+                flat = fp["packed_pairs"][:]
+                ids_flat = fp["packed_block_ids"][:].astype(e.index_dtype, copy=False)
+                b_off = fp["packed_block_offsets"][:]
+                b_sizes = fp["packed_block_sizes"][:].astype(np.int64)
+                packed = (
+                    [flat[offsets[t] : offsets[t + 1]] for t in range(n)],
+                    [ids_flat[b_off[t] : b_off[t + 1]] for t in range(n)],
+                    [b_sizes[t] for t in range(n)],
+                )
+            else:
+                inds_flat = fp["pair_inds"][:].astype(e.index_dtype, copy=False)
+                exp_flat = fp["pair_exp2phi"][:].astype(
+                    e.rotation_complex_dtype, copy=False
+                )
+                pair_inds = [
+                    inds_flat[:, offsets[t] : offsets[t + 1]] for t in range(n)
+                ]
+                pair_exp2phi = [
+                    exp_flat[:, offsets[t] : offsets[t + 1]] for t in range(n)
+                ]
             treecode = None
             if "treecode" in fp:
                 gp = fp["treecode"]
@@ -537,11 +691,16 @@ class Global2PCF:
                     cell_ra=[gp[f"cell_ra_{lv}"][:] for lv in range(n_levels)],
                     cell_dec=[gp[f"cell_dec_{lv}"][:] for lv in range(n_levels)],
                 )
-        n = self.n_tiles
-        pair_inds = [inds_flat[:, offsets[t] : offsets[t + 1]] for t in range(n)]
-        pair_exp2phi = [exp_flat[:, offsets[t] : offsets[t + 1]] for t in range(n)]
         bins = [bins_arr[t].astype(e.index_dtype) for t in range(n)]
-        self._install(pair_inds, pair_exp2phi, bins, treecode)
+        # The file decides what the engines hold; pack_host_pairs only says how
+        # *future* pair searches behave (as for Integrated3PCF.load_pairs).
+        self._install(
+            bins,
+            treecode,
+            pair_inds=pair_inds,
+            pair_exp2phi=pair_exp2phi,
+            packed=packed,
+        )
         self.prepare(release_host_pairs=release_host_pairs)
 
     # ------------------------------------------------------------------ #

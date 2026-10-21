@@ -13,6 +13,8 @@ G2  the result's per-tile sums, jackknife, row labels and ``+``;
 G3  row-space input == full-sky input (bitwise).
 G4  pair files round-trip bitwise and refuse a different estimator.
 G5  GPU orchestration (tiled and packed kernels) via the numpy twins == CPU.
+G6  pack_host_pairs: the device state is bitwise that of packing in prepare();
+    packed pair files (format 2) round-trip, on one device or several.
 """
 
 import os
@@ -245,6 +247,141 @@ def _estimates(results):
     for res in results:
         out.extend(np.asarray(res.estimate(n)) for n in res.names)
     return out
+
+
+def _device_state(g):
+    e = g._engine
+    ctx = e.compute_context
+    return dict(
+        packed_pairs=ctx.packed_pairs_dev,
+        packed_row_base=ctx.packed_row_base_dev,
+        packed_perm=ctx.packed_perm_dev,
+        inds=e.inds_dev,
+        exp2phi=e.exp2phi_dev,
+        bins=e.bins_dev,
+        tot_bins=e.tot_bins_reduceat_dev,
+    )
+
+
+class TestHostPacking(unittest.TestCase):
+    """G6: pack_host_pairs -- the 8-byte payload from the pair search on."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mask, cls.shear, cls.w, cls.dens = _setup()
+        tc = dict(tile_nside=8, resolution_factor=2.0)
+        cls.device_packed = _global(cls.mask, pack_pairs=True, **tc)
+        cls.host_packed = _global(cls.mask, pack_pairs=True, pack_host_pairs=True, **tc)
+        cls.host_only = _global(cls.mask, pack_host_pairs=True, **tc)
+
+    def assertSameState(self, a, b, keys=None):
+        for key in keys or a:
+            x, y = a[key], b[key]
+            if x is None or y is None:
+                self.assertIs(x, y, key)
+                continue
+            self.assertEqual(np.asarray(x).dtype, np.asarray(y).dtype, key)
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y), key)
+
+    def test_host_arrays_hold_the_payload(self):
+        e = self.host_packed._engine
+        self.assertIsNone(e.pair_inds)
+        self.assertIsNone(e.pair_exp2phi)
+        self.assertEqual(len(e.packed_pairs), self.host_packed.n_tiles)
+        self.assertEqual(sum(p.nbytes for p in e.packed_pairs), 8 * e.ntotpairs)
+        self.assertIsNotNone(self.device_packed._engine.pair_inds)
+
+    def test_device_state_matches_packing_inside_prepare(self):
+        self.assertGreater(self.device_packed.ntotpairs, 1000)
+        self.assertSameState(
+            _device_state(self.device_packed), _device_state(self.host_packed)
+        )
+
+    def test_unpacked_arrays_match(self):
+        """Without pack_pairs the device arrays are the decoded payload, i.e.
+        the unpacked arrays pack_pairs=True keeps on the CPU backend."""
+        self.assertIsNone(self.host_only._engine.compute_context.packed_pairs_dev)
+        self.assertSameState(
+            _device_state(self.device_packed),
+            _device_state(self.host_only),
+            keys=("inds", "exp2phi", "bins", "tot_bins"),
+        )
+
+    def test_measurements_match(self):
+        a = self.device_packed.gg(self.shear, self.w, return_device=False)
+        b = self.host_packed.gg(self.shear, self.w, return_device=False)
+        for name in a.names:
+            np.testing.assert_array_equal(a.tile_num[name], b.tile_num[name])
+        np.testing.assert_array_equal(a.tile_weight, b.tile_weight)
+
+    def test_pair_files(self):
+        import h5py
+
+        ref = _device_state(self.host_packed)
+        with tempfile.TemporaryDirectory() as tmp:
+            packed_path = os.path.join(tmp, "packed.h5")
+            exact_path = os.path.join(tmp, "exact.h5")
+            self.host_packed.save_pairs(packed_path)
+            self.device_packed.save_pairs(exact_path)
+            with h5py.File(packed_path, "r") as fp:
+                self.assertEqual(int(fp.attrs["format_version"]), 2)
+                self.assertTrue(bool(fp.attrs["pack_host_pairs"]))
+                self.assertNotIn("pair_inds", fp)
+            with h5py.File(exact_path, "r") as fp:
+                self.assertEqual(int(fp.attrs["format_version"]), 1)
+                self.assertNotIn("packed_pairs", fp)
+            for devices in ("cpu", ["cpu", "cpu"]):
+                with self.subTest(devices=devices):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        g = Global2PCF(
+                            NSIDE,
+                            mask=self.mask,
+                            **_kw(
+                                device=devices,
+                                tile_nside=8,
+                                resolution_factor=2.0,
+                                pack_pairs=True,
+                            ),
+                        )
+                    g.load_pairs(packed_path)
+                    # the file decides what is held, not the flag
+                    self.assertFalse(g.pack_host_pairs)
+                    self.assertIsNone(g._engine.pair_inds)
+                    if devices == "cpu":
+                        self.assertSameState(ref, _device_state(g))
+                    got = g.gg(self.shear, self.w, return_device=False)
+                    want = self.host_packed.gg(self.shear, self.w, return_device=False)
+                    for name in want.names:
+                        np.testing.assert_array_equal(
+                            got.tile_num[name], want.tile_num[name]
+                        )
+                    g.save_pairs(os.path.join(tmp, "again.h5"))
+                    with (
+                        h5py.File(os.path.join(tmp, "again.h5"), "r") as fp,
+                        h5py.File(packed_path, "r") as ref_fp,
+                    ):
+                        for key in ("packed_pairs", "packed_block_ids", "bins"):
+                            np.testing.assert_array_equal(fp[key][:], ref_fp[key][:])
+
+    def test_multi_device_find(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            g = Global2PCF(
+                NSIDE,
+                mask=self.mask,
+                **_kw(
+                    device=["cpu", "cpu"],
+                    tile_nside=8,
+                    resolution_factor=2.0,
+                    pack_pairs=True,
+                    pack_host_pairs=True,
+                ),
+            )
+        g.preprocess()
+        a = g.kk(self.dens, self.w, return_device=False)
+        b = self.host_packed.kk(self.dens, self.w, return_device=False)
+        np.testing.assert_array_equal(a.tile_num["xi"], b.tile_num["xi"])
 
 
 class TestEmulatedGPU(unittest.TestCase):

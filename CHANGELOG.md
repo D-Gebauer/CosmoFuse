@@ -1,5 +1,66 @@
 # Changelog
 
+## 7.2.0 (2026-10-21)
+
+**The precompute, not the measurement: `prepare()` and `load_pairs()` 11–14×
+faster, and `pack_host_pairs` for `Global2PCF`.** No number changes: on
+seitz1 the whole device state and the `gg` output hash identically to 7.1.0
+at nside 512, 1024 and 2048, on every path (exact pairs, find-time packing,
+exact and packed pair files).
+
+- **Sort-free row blocks.** Packing found the row block of every (patch,
+  level) with `np.unique(..., return_inverse=True)`, an argsort of every
+  pair's ids: about half of `prepare()`. It now marks the ids in a table
+  spanning their range and numbers the marks in order
+  (`packing.block_local_indices`, a Numba `nogil` kernel with a vectorised
+  numpy twin for `NUMBA_DISABLE_JIT`), which is bitwise `np.unique`'s output.
+  3.9 instead of 49 ns per pair.
+- **Patches are packed in parallel.** `Integrated3PCF.prepare()` (and so
+  `Global2PCF`) and the find-time packing run one thread per patch/tile, as
+  many as Numba uses (`NUMBA_NUM_THREADS`), each writing its own slice of the
+  preallocated payload. Packing now runs on the global ids and translates
+  only the small row blocks to device rows (id → row is increasing, so the
+  payload is the same; this is the invariant `pack_host_pairs` already
+  relied on). The angles are encoded in chunks of 2²⁰ pairs so that the
+  temporaries stay bounded while many tiles are packed at once.
+- **`Global2PCF(..., pack_host_pairs=True)`**: every tile is packed in a
+  worker thread right after its pair search (hidden behind the search), and
+  its exact arrays are dropped. Host RAM and the pair file hold 8 instead of
+  24 bytes per pair; the file is format version 2 (exact files stay version
+  1) and loads on one device or several. As for `Integrated3PCF`, the file
+  decides what an instance holds, not the flag.
+- `Global2PCF.save_pairs` writes the exact pairs tile by tile instead of
+  concatenating the whole catalogue first (a 16 GB copy at nside 512).
+
+DES Y3 on seitz1 (A100, Xeon Gold 6138, 160 threads), 20 bins 15–250′,
+`pack_pairs=True` (`benchmarks/global/bench_prepare.py`):
+
+| nside | pairs | `prepare` 7.1.0 → 7.2.0 | `load_pairs` (exact file) | packed: `prepare` / `load_pairs` / file |
+|---|---|---|---|---|
+| 512, full resolution | 6.7 × 10⁸ | 119.8 → 8.7 s | 117.2 → 9.5 s | 1.2 s / 3.3 s / 5.4 GB (exact 16.1 GB) |
+| 1024, k = 2.9 | 7.0 × 10⁷ | 9.9 → 1.1 s | 9.5 → 1.2 s | 0.33 s / 0.55 s / 0.61 GB |
+| 2048, k = 2.9 | 7.0 × 10⁷ | 9.7 → 1.2 s | 9.8 → 1.4 s | 0.36 s / 0.67 s / 0.72 GB |
+
+Peak host memory at nside 512 is 52.9 GB (46.2 GB in 7.1.0) because several
+tiles are packed at once. `find_pairs` (27–31 s) is now the slowest one-off
+step, almost entirely in the pair-search kernel.
+
+Tried and dropped: a fused Numba angle encoder. On seitz1 it changes 51,823
+of 9.5 × 10⁷ float32 codes by one step against numpy (numpy's SIMD
+`arctan2` differs from libm's) and is only 8 % faster, so the numpy encoder
+stays. The same comparison showed that numpy's float32 encoding itself
+differs between machines for ~0.07 % of the pairs; encoding at float64 would
+make it exact and machine-independent, but that changes numbers and is left
+for a separate decision.
+
+Gates: `test_pair_packing.py` (the kernel and its twin == `np.unique` on
+random blocks, `out=`, `map_patches`), `test_global_2pcf.py` G6 (find-time
+packing == packing in `prepare()` bitwise, packed files, several devices).
+The full suite passes locally and on seitz1 with the GPU tests (493 passed;
+the two-GPU tests skip on its single A100). A mixed `device=[0, "cpu"]`
+group on seitz1 reproduces a one-GPU run bitwise per tile (`Global2PCF`) and
+to 3e-15 (`Global3PCF`).
+
 ## 7.1.0 (2026-10-21)
 
 **Several GPUs for the global estimators.** `Global2PCF(..., device=[0, 1])`

@@ -16,6 +16,28 @@ device-resident inputs, synchronised wall time, median.
 the row block of every (tile, level)); a one-off, but the next thing to make
 faster before nside 2048.
 
+### Update 2026-10-21 (7.2.0): `prepare` / `load_pairs`
+
+Profiled before changing anything (laptop, one core, GPU code path with an
+identity upload, 1.8 × 10⁸ pairs at nside 512): 90 ns/pair, of which
+`np.unique` 54 % (its argsort), `encode_angles` 32 % (`np.angle` alone
+20 %), id → row translation 5 %. 7.2.0 replaces the sort by a marker table
+(3.9 ns/pair, bitwise `np.unique`) and packs the tiles in parallel threads.
+`bench_prepare.py` on seitz1 (A100, 160 threads; another user held ~12 cores),
+DES Y3, 20 bins 15–250′, `pack_pairs=True`, both trees in one session:
+
+| nside | k | pairs | find | prepare 7.1.0 → 7.2.0 | load exact 7.1.0 → 7.2.0 | packed prepare / load / file | `gg()` |
+|---|---|---|---|---|---|---|---|
+| 512 | — | 6.72 × 10⁸ | 26–29 s | 119.8 → 8.7 s | 117.2 → 9.5 s | 1.2 s / 3.3 s / 5.4 GB (exact 16.1) | 36 ms |
+| 1024 | 2.9 | 6.98 × 10⁷ | 29 s | 9.9 → 1.1 s | 9.5 → 1.2 s | 0.33 s / 0.55 s / 0.61 GB | 21 ms |
+| 2048 | 2.9 | 6.98 × 10⁷ | 31 s | 9.7 → 1.2 s | 9.8 → 1.4 s | 0.36 s / 0.67 s / 0.72 GB | 69 ms |
+
+Device state and `gg` output hash identically for both trees and all paths.
+The 158 s of September was measured before the sortless pair search; 7.1.0
+measured 120 s in this session.  `find` is now the slowest step: at nside 1024
+(laptop profile) 37 of 39 s are inside `unique_pairs`, i.e. the brute-force
+candidate tests of the fine levels, not the pairs kept.
+
 ## Global3PCF (shear Γ₀…Γ₃, 12 log bins 15–250′, n_max = 20, all 64 ordered z-triplets)
 
 | nside | ordered pairs | find | device memory | first call (+ normalisation) | `ggg()` |

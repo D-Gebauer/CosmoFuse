@@ -20,7 +20,7 @@ import numpy as np
 from tqdm import trange
 
 from .correlation_helpers import Q_crittenden
-from .packing import PACKED_BYTES_PER_PAIR, pack_patch
+from .packing import PACKED_BYTES_PER_PAIR, map_patches, pack_host_patch
 from .treecode import (
     PatchCells,
     TreecodeGeometry,
@@ -345,27 +345,24 @@ class PairGeometry:
         packed geometry never coexist for the whole catalogue.
         """
         groups = level_groups(owner.level_nside)
-        packed_pairs: List[np.ndarray] = []
-        block_ids: List[np.ndarray] = []
-        block_sizes: List[np.ndarray] = []
-        empty = np.zeros(0, dtype=owner.index_dtype)
-        for i in range(owner.n_patches):
-            packed_i, blocks, _ = pack_patch(
-                owner.pair_inds[i], owner.pair_exp2phi[i], owner.bins[i], groups
+
+        def pack_one(i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+            out = pack_host_patch(
+                owner.pair_inds[i],
+                owner.pair_exp2phi[i],
+                owner.bins[i],
+                groups,
+                owner.index_dtype,
             )
-            packed_pairs.append(packed_i)
-            block_ids.append(
-                np.concatenate(blocks).astype(owner.index_dtype, copy=False)
-                if blocks
-                else empty
-            )
-            block_sizes.append(np.array([b.size for b in blocks], dtype=np.int64))
-            # free the exact arrays of this patch before packing the next
+            # free the exact arrays of this patch as soon as it is packed
             owner.pair_inds[i] = None
             owner.pair_exp2phi[i] = None
-        owner.packed_pairs = packed_pairs
-        owner.packed_block_ids = block_ids
-        owner.packed_block_sizes = block_sizes
+            return out
+
+        out = map_patches(pack_one, owner.n_patches)
+        owner.packed_pairs = [o[0] for o in out]
+        owner.packed_block_ids = [o[1] for o in out]
+        owner.packed_block_sizes = [o[2] for o in out]
         owner.pair_inds = None
         owner.pair_exp2phi = None
 

@@ -21,7 +21,13 @@ from .correlation_helpers import zeta_g_minus as _zeta_g_minus_helper
 from .correlation_helpers import zeta_g_plus as _zeta_g_plus_helper
 from .correlation_helpers import zeta_g_t as _zeta_g_t_helper
 from .io_handler import PairIOHandler
-from .packing import block_edges, decode_angles, pack_patch, unpack_rows
+from .packing import (
+    block_edges,
+    decode_angles,
+    map_patches,
+    pack_patch,
+    unpack_rows,
+)
 from .pair_finder import PairFinder
 from .pair_geometry import PairGeometry
 from .results import IntegratedResult
@@ -1632,11 +1638,22 @@ class Integrated3PCF:
 
         # Device pair indices address the compact row space (host pair_inds
         # keep HEALPix ids); remapped per patch so no pair-sized temporary
-        # is needed.
+        # is needed.  Packing runs on the *global ids*: id -> row is
+        # increasing (map_inds ascending, virtual rows appended in id order),
+        # so the payload is the one packing the rows gives, and only the
+        # small row blocks are translated (which also checks that every id
+        # lies in the mask).  Patches are independent and every step releases
+        # the GIL, so they are processed in parallel threads, each writing
+        # its own slice of the preallocated arrays.
         lut = self._global_to_row_lut()
-        for i in range(self.n_patches):
-            lo, hi = first_patch_ind[i], first_patch_ind[i + 1]
+
+        def process(i: int) -> Optional[List[np.ndarray]]:
+            lo, hi = int(first_patch_ind[i]), int(first_patch_ind[i + 1])
+            blocks: Optional[List[np.ndarray]] = None
             if host_packed:
+                assert self.packed_pairs is not None
+                assert self.packed_block_ids is not None
+                assert self.packed_block_sizes is not None
                 # The host payload is already packed; only the small per-group
                 # row blocks have to be translated from global ids to rows.
                 packed_i = self.packed_pairs[i]
@@ -1646,26 +1663,38 @@ class Integrated3PCF:
                     self._pair_ids_to_rows(ids_i[edges[g] : edges[g + 1]], lut)
                     for g in range(len(groups))
                 ]
+                if pack:
+                    packed[lo:hi] = packed_i
                 if keep_unpacked:
-                    rows_i = unpack_rows(
+                    temp_inds[:, lo:hi] = unpack_rows(
                         packed_i, blocks, self.bins[i], groups, self.index_dtype
                     )
-                    exp_i = decode_angles(
+                    temp_exp2phi[:, lo:hi] = decode_angles(
                         packed_i[:, 2:].T, self.rotation_complex_dtype
                     )
-            else:
-                rows_i = self._pair_ids_to_rows(self.pair_inds[i], lut)
-                exp_i = self.pair_exp2phi[i]
-                if pack:
-                    packed_i, blocks, _ = pack_patch(
-                        np.asarray(rows_i), exp_i, self.bins[i], groups
+            elif pack:
+                _, id_blocks, _ = pack_patch(
+                    self.pair_inds[i],
+                    self.pair_exp2phi[i],
+                    self.bins[i],
+                    groups,
+                    out=packed[lo:hi],
+                )
+                blocks = [self._pair_ids_to_rows(b, lut) for b in id_blocks]
+                if keep_unpacked:
+                    temp_inds[:, lo:hi] = self._pair_ids_to_rows(self.pair_inds[i], lut)
+                    temp_exp2phi[:, lo:hi] = decode_angles(
+                        packed[lo:hi, 2:].T, self.rotation_complex_dtype
                     )
-                    if keep_unpacked:
-                        exp_i = decode_angles(
-                            packed_i[:, 2:].T, self.rotation_complex_dtype
-                        )
+            else:
+                temp_inds[:, lo:hi] = self._pair_ids_to_rows(self.pair_inds[i], lut)
+                temp_exp2phi[:, lo:hi] = self.pair_exp2phi[i]
+            return blocks
+
+        patch_blocks = map_patches(process, self.n_patches)
+        for i, blocks in enumerate(patch_blocks):
             if pack:
-                packed[lo:hi] = packed_i
+                assert blocks is not None
                 sizes = np.array([blk.size for blk in blocks], dtype=np.int64)
                 starts = n_packed_rows + np.concatenate(([0], np.cumsum(sizes)))[:-1]
                 packed_row_base[i * self.nbins : (i + 1) * self.nbins] = starts[
@@ -1673,14 +1702,13 @@ class Integrated3PCF:
                 ]
                 packed_blocks.extend(blocks)
                 n_packed_rows += int(sizes.sum())
-            if keep_unpacked:
-                temp_inds[:, lo:hi] = rows_i
-                temp_exp2phi[:, lo:hi] = exp_i
             temp_bins[i * self.nbins : (i + 1) * self.nbins] = self.bins[i]
             temp_bins_tot[1 + i * self.nbins : 1 + (i + 1) * self.nbins] = (
                 first_patch_ind[i] + np.cumsum(self.bins[i], dtype=np.int64)
             )
-        del lut
+        # free the npix-sized lookup table before the uploads
+        lut = None
+        del patch_blocks
 
         module = self.backend.module
         ctx = self.compute_context
