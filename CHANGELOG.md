@@ -1,5 +1,38 @@
 # Changelog
 
+## 7.3.0 (2026-10-21)
+
+**Global3PCF: `ggg()` 1.29x faster** (nside 512, DES Y3, A100: 2.01 -> 1.56 s;
+`kgg()` 2.67 -> 2.43 s). Results change only by rounding (<= 5.7e-15
+relative against 7.2.1, normalisations <= 5.5e-18); every brute-force gate
+holds at 1e-12. Measured with `benchmarks/global/step1_probe.py` and
+`step2_probe.py` before anything was changed:
+
+- **Only the pair products the components read.** Step 1 computed the
+  degenerate-term products for every sigma in {-2, 0, 2} and both types; `ggg`
+  reads four of the six (sigma, type) blocks. 276 -> 244 outputs per pair, so
+  a 128-thread block needs 2 output slots per thread instead of 3. Bitwise
+  equal to before, 1.12x on step 1 (`Global3PCF._pair_products`).
+- **Step-1 kernel**: the accumulation loop is ~90 % of step 1 (ablation:
+  staging alone 0.07 s of 1.02 s) and FP64-instruction bound, so every
+  complex multiply-add is now four FMAs instead of mul + fma + add per
+  component; complex values in shared memory are 2-vectors; a thread map
+  (a sixth descriptor array) puts the G_m of one m for all fields on
+  neighbouring threads. 1.12x more. Measured and *not* faster: register
+  tiling (up to 1.9x slower), splitting the staging over two threads, a half
+  power table, other block and chunk sizes.
+- **Step 2**: components that share their leg-3 factor (gamma0..2) are one
+  batched matmul over their operands side by side (1.04x, bitwise), and a
+  component whose leg-swapped twin is requested is relabelled instead of
+  computed: Gamma'_n(z2, b2; z3, b3) = Gamma_{sigma1 - n}(z3, b3; z2, b2)
+  (`Global3PCF._swap_twins`; gamma3 from gamma2, 1.11x). The source twin is
+  computed for the two extra multipoles the shift needs.
+- Step 1 now takes 0.95 s and step 2 0.70 s per `ggg()` at nside 512 (from
+  1.16 s and 0.88 s).
+- New gate: `test_leg_swap_twins` (spin-0, shear and conjugated-shear centres,
+  mixed and conjugated legs, against the brute-force sums). The CUDA twin
+  checks that the thread map is a permutation.
+
 ## 7.2.1 (2026-10-21)
 
 **Packed rotation angles are encoded at float64: the nearest code, the same

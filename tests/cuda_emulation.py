@@ -1209,9 +1209,13 @@ def _emulate_3pcf_multipoles(params, grid, args):
         d_ca,
         d_cb,
         d_e,
+        d_order,
         out,
     ) = args
     c0, nbins, n_rows = int(c0), int(nbins), int(n_rows)
+    # every output is computed by exactly one thread slot
+    assert d_order.dtype == np.int32
+    assert np.array_equal(np.sort(d_order), np.arange(O))
     # the contract the launch wrapper must honour
     assert vre.dtype == TV and vim.dtype == TV and wts.dtype == TV
     assert phi_c.dtype == TR and phi_n.dtype == TR

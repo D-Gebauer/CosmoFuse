@@ -23,7 +23,9 @@ used to remove the degenerate ``j = k`` "triangles".
 
 Both backends implement exactly this contract: a Numba kernel on the CPU and
 ``cuda/threepoint_multipoles.cu`` on the GPU (numpy twin in
-``tests/cuda_emulation.py``).
+``tests/cuda_emulation.py``).  A sixth descriptor array, ``order``, says which
+output each CUDA thread slot computes (a permutation of ``range(O)``); it
+changes nothing in the contract and the CPU kernel ignores it.
 """
 
 import math
@@ -152,7 +154,7 @@ def _cpu_3pcf_multipoles(
         vim,
         wts,
         spin,
-        *desc,
+        *desc[:5],  # desc[5], the CUDA thread map, does not apply
         int(E),
         out,
     )

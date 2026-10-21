@@ -106,6 +106,43 @@ class TestBruteForce(unittest.TestCase):
             },
         )
 
+    def test_leg_swap_twins(self):
+        """Components that are each other's leg swap are relabelled, not
+        computed (Gamma'_n = Gamma_{sigma1 - n} with legs exchanged): every
+        centre type -- spin 0 (sigma1 = 0), shear (2), conjugated shear (-2)
+        -- and mixed or conjugated legs, against the brute-force sums."""
+        comps = [
+            Component("d|gd", ("d", "g", "d")),
+            Component("d|dg", ("d", "d", "g")),  # twin of d|gd
+            Component("g|g*d", ("g", "g", "d"), (False, True, False)),
+            Component("g|dg*", ("g", "d", "g"), (False, False, True)),  # twin
+            Component("g*|gg*", ("g", "g", "g"), (True, False, True)),
+            Component("g*|g*g", ("g", "g", "g"), (True, True, False)),  # twin
+            Component("g*|dd", ("g", "d", "d"), (True, False, False)),  # self
+        ]
+        jobs = [
+            (
+                c.label,
+                f"{c.fields[0]}|{int(c.conj[0])}",
+                c.fields[1],
+                c.fields[2],
+                c.conj[1],
+                c.conj[2],
+                0,
+            )
+            for c in comps
+        ]
+        self.assertEqual(set(Global3PCF._swap_twins(jobs)), {"d|dg", "g|dg*", "g*|g*g"})
+        w2 = self.w[::-1].copy()
+        res = self.est.measure({"d": (self.d, self.w, 0), "g": (self.g, w2, 2)}, comps)
+        self._check(
+            res,
+            {
+                "d": (self.d[:, self.pix], self.w[:, self.pix], 0),
+                "g": (self.g[:, :, self.pix], w2[:, self.pix], 2),
+            },
+        )
+
     def test_kgg_and_kkg(self):
         w2 = self.w[::-1].copy()
         fields = {

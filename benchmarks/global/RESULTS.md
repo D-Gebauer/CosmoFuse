@@ -44,6 +44,7 @@ candidate tests of the fine levels, not the pairs kept.
 |---|---|---|---|---|---|
 | 256 | 8.46 × 10⁷ | 4.2 s | 2.5 GB | 1.7 s | **0.29 s** |
 | 512 | 1.34 × 10⁹ | 129 s | 19.1 GB | 3.7 s | **1.94 s** |
+| 512 (7.3.0, 2026-10-21) | 1.34 × 10⁹ | 41 s | | | **1.56 s** |
 
 Split at nside 256: step 1 (CUDA kernel) 77 ms, step 2 (contraction) 210 ms.
 Step 1 scales with the pairs (×16 per nside doubling), step 2 with the
@@ -63,3 +64,33 @@ centres (×4), so at nside 512 step 1 dominates (~1.2 s vs ~0.8 s).
 
 Correctness on the same machine: `pytest -m gpu` (9 passed, including the
 Global2PCF and Global3PCF GPU-vs-CPU gates at 1e-12 in float64).
+
+## Update 2026-10-21 (7.3.0): Global3PCF steps 1 and 2
+
+`step1_probe.py` / `step2_probe.py` on seitz1 (A100), nside 512, DES Y3,
+`ggg`, 4 bins, n_max 20, bitwise / rel-diff checks against the shipped code:
+
+| step 1 variant | time | |
+|---|---|---|
+| shipped (276 outputs) | 1.147 s | 2.6 TFLOP/s |
+| only the read pair products (244) | 1.022 s | bitwise |
+| + 4-FMA accumulation, 2-vector shared values, m-major thread map | **0.913 s** | ≤ 5e-15 |
+| register tiling, 3–15 multipoles per thread | 0.94–1.91 s | |
+| split staging / half power table / NB 16–64 / blocks 64–256 | 1.02–1.31 s | bitwise |
+| *ablation: staging only* | *0.073 s* | |
+| *ablation: accumulation only (shipped / FMA)* | *0.889 / 0.699 s* | |
+
+Step 1 is the accumulation loop, bound by FP64 instructions, not by shared
+memory or the staging (the earlier guess).  Even with FMAs it runs at under
+half the FP64 instruction rate; the rest would need tensor cores (DMMA) or
+warp-specialised staging, not tried.
+
+| step 2 variant (per `ggg()`, on top of the reduced table) | time | |
+|---|---|---|
+| shipped | 1.900 s | |
+| M: one matmul for gamma0..2 (shared leg-3 factor) | 1.819 s | bitwise |
+| D: gamma3 from gamma2 by the leg swap | 1.715 s | 3e-15 |
+| M + D | 1.684 s | 3e-15 |
+
+All together: `ggg()` 2.011 → 1.558 s, `kgg()` 2.668 → 2.429 s (no twins
+there), max rel diff 5.7e-15 against 7.2.1.

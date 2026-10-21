@@ -38,7 +38,8 @@ Algorithm
 Step 1 (per centre, per radial bin; :mod:`CosmoFuse.threepoint_kernels`)
     ``G_m(b; X1) = sum_{X2 in b} w2 f2~ exp(-i m phi_2)`` for
     ``m = -(n_max+2) .. n_max+2`` and the pair products that remove the
-    degenerate ``X2 = X3`` terms.
+    degenerate ``X2 = X3`` terms (only the ``(sigma, type)`` products the
+    requested components read, :meth:`Global3PCF._pair_products`).
 Step 2 (contraction over centres, batched matrix products)
     e.g. ``Gamma0_n = sum_{X1} w1 f1~ G_{2-n}(b2) G_n(b3)`` (the centre's
     projection phase ``exp(-2i phi_2)`` is absorbed into the first leg).
@@ -518,11 +519,35 @@ class Global3PCF:
             xp.ascontiguousarray(w),
         )
 
+    @staticmethod
+    def _pair_products(
+        jobs: Sequence[Tuple[str, str, str, str, bool, bool, int]],
+    ) -> List[Tuple[int, int]]:
+        """The ``(sigma, type)`` pair products the jobs' degenerate terms read
+        (type 0: ``a_x a_y``, type 1: ``conj(a_x) a_y``; see
+        :meth:`_accumulate`), sorted.  Only these are computed in step 1."""
+        need = set()
+        for *_x, c2, c3, sigma1 in jobs:
+            if not c2 and not c3:
+                need.add((sigma1, 0))
+            elif c2 and not c3:
+                need.add((sigma1, 1))
+            elif not c2 and c3:
+                need.add((-sigma1, 1))
+            else:
+                need.add((-sigma1, 0))
+        return sorted(need)
+
     def _descriptor(
-        self, n_fields: int, sigmas: Sequence[int]
+        self, n_fields: int, products: Sequence[Tuple[int, int]]
     ) -> Tuple[Tuple[np.ndarray, ...], int]:
         """Output table: G_m of every field (m = -E..E), then the pair
-        products ``[a_x a_y, conj(a_x) a_y] * exp(-i sigma phi)``."""
+        products ``a_x a_y`` (type 0) or ``conj(a_x) a_y`` (type 1) times
+        ``exp(-i sigma phi)`` for every ``(sigma, type)`` in ``products``.
+
+        The sixth array is the CUDA thread map: the G_m of one m for all
+        fields on neighbouring thread slots (a warp then reads few distinct
+        powers), the pair products after them in table order."""
         E = self.E
         fa, fb, ca, cb, e = [], [], [], [], []
         for f in range(n_fields):
@@ -533,16 +558,18 @@ class Global3PCF:
                 cb.append(0)
                 e.append(m)
         n_g = len(fa)
-        for s in sigmas:
-            for typ in (0, 1):
-                for x in range(n_fields):
-                    for y in range(n_fields):
-                        fa.append(x)
-                        fb.append(y)
-                        ca.append(typ)
-                        cb.append(0)
-                        e.append(s)
-        desc = tuple(np.asarray(a, dtype=np.int32) for a in (fa, fb, ca, cb, e))
+        for s, typ in products:
+            for x in range(n_fields):
+                for y in range(n_fields):
+                    fa.append(x)
+                    fb.append(y)
+                    ca.append(typ)
+                    cb.append(0)
+                    e.append(s)
+        order = sorted(range(n_g), key=lambda o: (e[o], fa[o])) + list(
+            range(n_g, len(fa))
+        )
+        desc = tuple(np.asarray(a, dtype=np.int32) for a in (fa, fb, ca, cb, e, order))
         return desc, n_g
 
     # ------------------------------------------------------------------ #
@@ -554,7 +581,6 @@ class Global3PCF:
         fields: Sequence[_Field],
         centre_values: Mapping[str, Tuple[Any, int]],
         jobs: Sequence[Tuple[str, str, str, str, bool, bool, int]],
-        sigmas: Sequence[int],
     ) -> Dict[str, Any]:
         """Run step 1 + step 2 over all centre chunks.
 
@@ -580,18 +606,33 @@ class Global3PCF:
         spin = be.to_device(
             np.concatenate([np.full(f.nz, f.spin, np.int32) for f in fields])
         )
-        desc_h, n_g = self._descriptor(n_f, sigmas)
+        products = self._pair_products(jobs)
+        desc_h, n_g = self._descriptor(n_f, products)
         desc = tuple(be.to_device(d) for d in desc_h)
         n_out = int(desc_h[0].size)
         E, P, nb = self.E, 2 * self.E + 1, self.nbins
-        ns = np.arange(-self.n_max, self.n_max + 1)
-        sig_index = {s: i for i, s in enumerate(sigmas)}
+        prod_index = {p: i for i, p in enumerate(products)}
         cdt = getattr(xp, self.acc_complex.name)
+        derived = self._swap_twins(jobs)
+        compute = [j for j in jobs if j[0] not in derived]
+        # multipoles each computed job needs: its own, and those its twin
+        # reads through n -> sigma1 - n (at most two beyond n_max, inside the
+        # G_m table, which runs to n_max + 2)
+        n_max = self.n_max
+        sources = {src for src, _sigma1 in derived.values()}
+        n_range: Dict[str, np.ndarray] = {}
+        for label, *_r, sigma1 in compute:
+            lo, hi = -n_max, n_max
+            if label in sources:
+                lo, hi = min(lo, sigma1 - n_max), max(hi, sigma1 + n_max)
+            n_range[label] = np.arange(lo, hi + 1)
 
         # Per component: R[n] = L3[n]^T @ A[n] with A[n] = L2[n] (x) centre,
         # i.e. one batched GEMM with every (centre bin, leg-2 bin) in its M
         # dimension (4 GEMMs of a quarter the size were 1.8x slower on an
-        # A100), accumulated over chunks as (N, b3*nC, nA*b2*nB).  The
+        # A100), accumulated over chunks as (N, b3*nC, nA*b2*nB).  Components
+        # that share their leg-3 factor (gamma0..2 all use G_n of leg 3) are
+        # one GEMM over their A operands side by side (1.04x, bitwise).  The
         # degenerate X2 = X3 terms do not depend on n; their sums over all
         # centres are subtracted once at the end.
         acc: Dict[str, Any] = {}
@@ -604,6 +645,11 @@ class Global3PCF:
             if key not in idx_cache:
                 idx_cache[key] = be.to_device(np.asarray(a, dtype=np.int64))
             return idx_cache[key]
+
+        groups: Dict[Tuple[Any, ...], List[Tuple[Any, ...]]] = {}
+        for job in compute:
+            _label, _ck, _l2, leg3, _c2, c3, _s = job
+            groups.setdefault((leg3, c3, tuple(n_range[job[0]])), []).append(job)
 
         for c0 in range(0, n_centres, self.centre_chunk):
             C = min(self.centre_chunk, n_centres - c0)
@@ -627,7 +673,7 @@ class Global3PCF:
             G = xp.ascontiguousarray(
                 out[:, :, :n_g].reshape(C, nb, n_f, P).transpose(3, 0, 1, 2)
             )  # (P, C, nb, F)
-            S = out[:, :, n_g:].reshape(C, nb, len(sigmas), 2, n_f, n_f)
+            S = out[:, :, n_g:].reshape(C, nb, len(products), n_f, n_f)
             rows = dev["centre_rows"][c0 : c0 + C]
             legs: Dict[Tuple[Any, ...], Any] = {}
 
@@ -638,41 +684,61 @@ class Global3PCF:
                     if conj:
                         L = xp.conj(L)
                     legs[key] = xp.ascontiguousarray(L).reshape(
-                        ns.size, C, nb * (hi - lo)
+                        m.size, C, nb * (hi - lo)
                     )
                 return legs[key]
 
-            for label, ckey, leg2, leg3, c2, c3, sigma1 in jobs:
-                vals = centre_values[ckey][0][:, rows].T.astype(cdt)  # (C, nA)
-                b0, b1 = offsets_f[leg2]
-                d0, d1 = offsets_f[leg3]
-                L2 = (
-                    _leg(ns - sigma1, True, b0, b1)
-                    if c2
-                    else _leg(sigma1 - ns, False, b0, b1)
-                )
-                L3 = _leg(-ns, True, d0, d1) if c3 else _leg(ns, False, d0, d1)
-                nA = int(vals.shape[1])
-                A = (L2[:, :, None, :] * vals[None, :, :, None]).reshape(ns.size, C, -1)
-                R = xp.matmul(L3.transpose(0, 2, 1), A)  # (N, nb*nC, nA*nb*nB)
-                if not c2 and not c3:
-                    Sv = S[:, :, sig_index[sigma1], 0]
-                elif c2 and not c3:
-                    Sv = S[:, :, sig_index[sigma1], 1]
-                elif not c2 and c3:
-                    Sv = xp.conj(S[:, :, sig_index[-sigma1], 1])
-                else:
-                    Sv = xp.conj(S[:, :, sig_index[-sigma1], 0])
-                corr = xp.tensordot(vals, Sv[:, :, b0:b1, d0:d1], axes=([0], [0]))
-                if label in acc:
-                    acc[label] += R
-                    deg[label] += corr
-                else:
-                    acc[label] = R
-                    deg[label] = corr
+            for gjobs in groups.values():
+                ops = []
+                for label, ckey, leg2, leg3, c2, c3, sigma1 in gjobs:
+                    ns = n_range[label]
+                    vals = centre_values[ckey][0][:, rows].T.astype(cdt)  # (C, nA)
+                    b0, b1 = offsets_f[leg2]
+                    d0, d1 = offsets_f[leg3]
+                    L2 = (
+                        _leg(ns - sigma1, True, b0, b1)
+                        if c2
+                        else _leg(sigma1 - ns, False, b0, b1)
+                    )
+                    L3 = _leg(-ns, True, d0, d1) if c3 else _leg(ns, False, d0, d1)
+                    if not c2 and not c3:
+                        Sv = S[:, :, prod_index[(sigma1, 0)]]
+                    elif c2 and not c3:
+                        Sv = S[:, :, prod_index[(sigma1, 1)]]
+                    elif not c2 and c3:
+                        Sv = xp.conj(S[:, :, prod_index[(-sigma1, 1)]])
+                    else:
+                        Sv = xp.conj(S[:, :, prod_index[(-sigma1, 0)]])
+                    corr = xp.tensordot(vals, Sv[:, :, b0:b1, d0:d1], axes=([0], [0]))
+                    ops.append((label, vals, L2, corr))
+                nN = int(L3.shape[0])
+                widths = [int(v.shape[1]) * int(l2.shape[2]) for _l, v, l2, _c in ops]
+                A = xp.empty((nN, C, sum(widths)), dtype=cdt)
+                o0 = 0
+                for (_l, vals, L2, _c), w in zip(ops, widths):
+                    xp.multiply(
+                        L2[:, :, None, :],
+                        vals[None, :, :, None],
+                        out=A[:, :, o0 : o0 + w].reshape(
+                            nN, C, int(vals.shape[1]), int(L2.shape[2])
+                        ),
+                    )
+                    o0 += w
+                R = xp.matmul(L3.transpose(0, 2, 1), A)  # (N, nb*nC, sum widths)
+                o0 = 0
+                for (label, _v, _l2, corr), w in zip(ops, widths):
+                    part = R[:, :, o0 : o0 + w]
+                    o0 += w
+                    if label in acc:
+                        acc[label] += part
+                        deg[label] += corr
+                    else:
+                        acc[label] = xp.ascontiguousarray(part)
+                        deg[label] = corr
 
-        results = {}
-        for label, ckey, leg2, leg3, _c2, _c3, _s in jobs:
+        finished: Dict[str, Any] = {}
+        for label, ckey, leg2, leg3, _c2, _c3, _s in compute:
+            ns = n_range[label]
             nA = int(centre_values[ckey][0].shape[0])
             nB = offsets_f[leg2][1] - offsets_f[leg2][0]
             nC = offsets_f[leg3][1] - offsets_f[leg3][0]
@@ -680,11 +746,44 @@ class Global3PCF:
             corr = deg[label]  # (nA, nb, nB, nC): a, b, z2, z3
             for b in range(nb):
                 R6[:, b, :, :, b, :] -= corr[:, b].transpose(2, 0, 1)[None]
-            out6 = xp.ascontiguousarray(
-                R6.transpose(0, 3, 5, 2, 4, 1)
-            )  # n, a, z2, z3, b2, b3
+            finished[label] = R6.transpose(0, 3, 5, 2, 4, 1)  # n, a, z2, z3, b2, b3
+        ns_out = np.arange(-n_max, n_max + 1)
+        results = {}
+        for label, *_r in compute:
+            sel = _idx(np.searchsorted(n_range[label], ns_out))
+            out6 = xp.ascontiguousarray(finished[label][sel])
             results[label] = np.asarray(be.to_numpy(out6)).astype(np.complex128)
-        return results
+        for label, (src, sigma1) in derived.items():
+            # Gamma'_n(z2, b2; z3, b3) = Gamma_{sigma1 - n}(z3, b3; z2, b2)
+            sel = _idx(np.searchsorted(n_range[src], sigma1 - ns_out))
+            out6 = xp.ascontiguousarray(finished[src][sel].transpose(0, 1, 3, 2, 5, 4))
+            results[label] = np.asarray(be.to_numpy(out6)).astype(np.complex128)
+        return {job[0]: results[job[0]] for job in jobs}
+
+    @staticmethod
+    def _swap_twins(
+        jobs: Sequence[Tuple[str, str, str, str, bool, bool, int]],
+    ) -> Dict[str, Tuple[str, int]]:
+        """Jobs that are the leg swap of an earlier job: ``label -> (source
+        label, sigma1)``.
+
+        Swapping legs 2 and 3 (fields and conjugations) of a component with
+        the same centre gives ``Gamma'_n(z2, b2; z3, b3) = Gamma_{sigma1 -
+        n}(z3, b3; z2, b2)``: the centre is projected along leg 2, so its
+        phase ``exp(-i sigma1 phi_2)`` moves to the other leg and shifts the
+        multipole by ``sigma1``.  An exact identity of the estimator, X2 = X3
+        exclusion included, so the twin is relabelled instead of computed
+        (gamma3 from gamma2 for ggg: 1.11x).
+        """
+        seen: Dict[Tuple[Any, ...], str] = {}
+        derived: Dict[str, Tuple[str, int]] = {}
+        for label, ckey, leg2, leg3, c2, c3, sigma1 in jobs:
+            twin = seen.get((ckey, leg3, leg2, c3, c2, sigma1))
+            if twin is not None and (leg2, c2) != (leg3, c3):
+                derived[label] = (twin, sigma1)
+            else:
+                seen.setdefault((ckey, leg2, leg3, c2, c3, sigma1), label)
+        return derived
 
     def _weights_key(self, fields: Sequence[_Field]) -> Tuple[Any, ...]:
         key = []
@@ -722,7 +821,7 @@ class Global3PCF:
             ]
             cvals = {f.name: (f.w, 0) for f in fields}
             jobs = [("|".join(g), g[0], g[1], g[2], False, False, 0) for g in missing]
-            res = self._accumulate(wfields, cvals, jobs, [0])
+            res = self._accumulate(wfields, cvals, jobs)
             for g in missing:
                 cache[g] = res["|".join(g)]
         return {c.label: cache[c.fields] for c in components}
@@ -771,7 +870,6 @@ class Global3PCF:
                     )
         centre_values: Dict[str, Tuple[Any, int]] = {}
         jobs = []
-        sigmas = {0}
         for comp in components:
             fc = by_name[comp.fields[0]]
             c1, c2, c3 = comp.conj
@@ -780,7 +878,6 @@ class Global3PCF:
                 if c1:
                     val = self.backend.module.conj(val)
                 sigma1 = -2 if c1 else 2
-                sigmas |= {-2, 2}
             else:
                 val = fc.vre * fc.w
                 sigma1 = 0
@@ -797,7 +894,7 @@ class Global3PCF:
                     sigma1,
                 )
             )
-        num = self._accumulate(flist, centre_values, jobs, sorted(sigmas))
+        num = self._accumulate(flist, centre_values, jobs)
         norm = self._norms(flist, components)
         return ThreePointResult(
             self.n_max, self.binedges.copy(), tuple(components), spins, num, norm
