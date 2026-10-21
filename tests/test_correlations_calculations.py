@@ -3,7 +3,6 @@
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
@@ -376,8 +375,6 @@ class TestCorrelationCalculations(unittest.TestCase):
         """Ensure the CuPy-backed kernel setup path is exercised."""
         import importlib.util
 
-        module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
-        module_name = "CosmoFuse.backend_fake_cupy"
         fake_cupy = ModuleType("cupy")
 
         def elementwise_kernel(*_args, **_kwargs):
@@ -431,17 +428,14 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         sys.modules["cupy"] = fake_cupy
         try:
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            if spec is None or spec.loader is None:
-                self.fail("Could not load backend module for fake CuPy import")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # get_backend imports cupy when called, so the fake is picked up
+            # without reloading the package.
+            module = importlib.import_module("CosmoFuse.backend")
             backend = module.get_backend("gpu")
             self.assertIsNotNone(backend.xipm_cross_corr_kernel)
             self.assertIsNotNone(backend.aperture_density_kernel)
         finally:
             sys.modules.pop("cupy", None)
-            sys.modules.pop(module_name, None)
 
     def test_find_pairs(self):
         """Test find_pairs sequential aggregation."""

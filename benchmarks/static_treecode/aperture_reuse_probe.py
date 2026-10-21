@@ -223,7 +223,7 @@ def main():
           f"({n_visits / npatches:.0f}/patch) rows={n_rows} "
           f"aperture_nside={corr.aperture_nside}", flush=True)
 
-    from CosmoFuse.backend import _COMMON_CUDA_SOURCE
+    from CosmoFuse.backend.raw import _COMMON_CUDA_SOURCE
     source = PROBE_SOURCE.replace("__COMMON_CUDA_SOURCE__", _COMMON_CUDA_SOURCE)
     mod = cupy.RawModule(code=source, options=("-std=c++14",),
                          name_expressions=[f"probe_current<{map_c}, {q_c}>"]

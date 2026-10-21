@@ -3356,11 +3356,8 @@ class TestCorrelationCoverage(unittest.TestCase):
     def test_xipm_gpu_fallback_path_with_fake_cupy(self):
         """Cover the non-CPU xipm path with a fake CuPy backend."""
         import importlib.util
-        from pathlib import Path
         from types import ModuleType
 
-        module_path = Path(__file__).parent.parent / "src" / "CosmoFuse" / "backend.py"
-        module_name = "CosmoFuse.backend_fake_cupy_xipm"
         fake_cupy = ModuleType("cupy")
 
         class _FakeRuntime:
@@ -3444,11 +3441,9 @@ class TestCorrelationCoverage(unittest.TestCase):
 
         sys.modules["cupy"] = fake_cupy
         try:
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            if spec is None or spec.loader is None:
-                self.fail("Could not load backend module for fake CuPy import")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            # get_backend imports cupy when called, so the fake is picked up
+            # without reloading the package.
+            module = importlib.import_module("CosmoFuse.backend")
 
             corr = Integrated3PCF(
                 nside=self.nside,
@@ -3481,7 +3476,6 @@ class TestCorrelationCoverage(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(np.asarray(xim))))
         finally:
             sys.modules.pop("cupy", None)
-            sys.modules.pop(module_name, None)
 
     def test_gg_cpu_skips_sumofweights(self):
         """On the CPU backend the kernel accumulates the weight sums, so

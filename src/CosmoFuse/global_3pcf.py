@@ -35,7 +35,7 @@ centroid projection (flat-sky triangle geometry at the bin centres).
 
 Algorithm
 ---------
-Step 1 (per centre, per radial bin; :mod:`CosmoFuse.threepoint_kernels`)
+Step 1 (per centre, per radial bin; :mod:`CosmoFuse.backend.threepoint`)
     ``G_m(b; X1) = sum_{X2 in b} w2 f2~ exp(-i m phi_2)`` for
     ``m = -(n_max+2) .. n_max+2`` and the pair products that remove the
     degenerate ``X2 = X3`` terms (only the ``(sigma, type)`` products the

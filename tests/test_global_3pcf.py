@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from CosmoFuse import Component, Global3PCF, ThreePointResult
-from CosmoFuse.threepoint_kernels import build_cupy_3pcf_multipoles_kernel
+from CosmoFuse.backend.threepoint import build_cupy_3pcf_multipoles_kernel
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 from .threepoint_reference import _frame, brute_force, position_angle

@@ -25,13 +25,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from CosmoFuse.backend import (
+from CosmoFuse.backend.aperture import (
     _MAX_FUSED_APERTURE_BINS,
-    _build_cupy_3x2pt_tomo_aperture_kernel,
     _build_cupy_aperture_tomo_density_kernel,
     _build_cupy_aperture_tomo_shear_kernel,
     _use_fused_aperture,
 )
+from CosmoFuse.backend.three_by_two import _build_cupy_3x2pt_tomo_aperture_kernel
 
 from .cuda_emulation import LAUNCH_LOG, EmulatedCupyModule
 
@@ -135,7 +135,7 @@ class FusedApertureAgreementBase:
             xp.zeros((nz, NPATCHES), dtype=dtype),
         )
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
-        with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
+        with patch("CosmoFuse.backend.aperture._MAX_FUSED_APERTURE_BINS", limit):
             ok = kernel(shear[:, 0], shear[:, 1], weights, *geom, *out)
         self.assertTrue(ok)
         return tuple(self.to_host(o) for o in out)
@@ -169,7 +169,7 @@ class FusedApertureAgreementBase:
         )
         q_inds, _q_cos, _q_sin, q_val, q_offsets, q_area = geom
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
-        with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
+        with patch("CosmoFuse.backend.aperture._MAX_FUSED_APERTURE_BINS", limit):
             ok = kernel(values, weights, q_inds, q_val, q_offsets, q_area, *out)
         self.assertTrue(ok)
         return tuple(self.to_host(o) for o in out)
@@ -204,7 +204,7 @@ class FusedApertureAgreementBase:
             xp.zeros((n_density, NPATCHES), dtype=acc),
         )
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
-        with patch("CosmoFuse.backend._MAX_FUSED_APERTURE_BINS", limit):
+        with patch("CosmoFuse.backend.aperture._MAX_FUSED_APERTURE_BINS", limit):
             ok = kernel(*maps, *geom, *out)
         self.assertTrue(ok)
         self.sync()

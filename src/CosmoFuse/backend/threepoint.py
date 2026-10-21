@@ -34,6 +34,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import numpy as np
 from numba import njit, prange
 
+from .raw import KernelFile, _has_raw_cuda_compiler, c_real
+
 # Threads per block of the CUDA kernel (one block per centre).
 _BLOCK = 128
 # Static shared memory budget of one block (bytes); decides the neighbour
@@ -170,14 +172,9 @@ def shared_chunk(n_fields: int, E: int, acc_itemsize: int) -> int:
 def build_cupy_3pcf_multipoles_kernel(module: Any) -> Optional[Callable[..., bool]]:
     """Launch wrapper of ``gpu_3pcf_multipoles`` (same contract as the CPU
     kernel).  ``None`` when the module cannot compile raw CUDA."""
-    from .backend import _has_raw_cuda_compiler, _make_raw_kernel_builder
-
     if not _has_raw_cuda_compiler(module):
         return None
-    build = _make_raw_kernel_builder(
-        module, "threepoint_multipoles.cu", "3PCF multipoles"
-    )
-    ctype = {np.dtype(np.float32): "float", np.dtype(np.float64): "double"}
+    build = KernelFile(module, "threepoint_multipoles.cu", "3PCF multipoles")
 
     def _kernel(
         offsets: Any,
@@ -203,9 +200,9 @@ def build_cupy_3pcf_multipoles_kernel(module: Any) -> Optional[Callable[..., boo
         kernel = build(
             "gpu_3pcf_multipoles",
             (
-                ctype[np.dtype(vre.dtype)],
-                ctype[np.dtype(phi_c.dtype)],
-                ctype[acc_real],
+                c_real(vre.dtype),
+                c_real(phi_c.dtype),
+                c_real(acc_real),
                 n_fields,
                 int(E),
                 n_out,
@@ -220,15 +217,15 @@ def build_cupy_3pcf_multipoles_kernel(module: Any) -> Optional[Callable[..., boo
             (_BLOCK,),
             (
                 offsets,
-                np.int64(c0),
-                np.int32(nbins),
+                c0,
+                nbins,
                 nbr,
                 phi_c,
                 phi_n,
                 vre,
                 vim,
                 wts,
-                np.int64(vre.shape[1]),
+                vre.shape[1],
                 spin,
                 *desc,
                 out,

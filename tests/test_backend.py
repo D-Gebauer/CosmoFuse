@@ -6,26 +6,31 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import CosmoFuse.backend
-from CosmoFuse.backend import (
+from CosmoFuse.backend import Backend, get_backend
+from CosmoFuse.backend.aperture import (
     _MAX_FUSED_APERTURE_BINS,
-    _MAX_VECTOR_TOMO_BINS,
-    Backend,
-    _build_cupy_3x2pt_tomo_aperture_kernel,
-    _build_cupy_3x2pt_tomo_pairs_kernel,
-    _build_cupy_density_density_tomo_vectorized_kernel,
-    _build_cupy_density_shear_tomo_vectorized_kernel,
-    _build_cupy_tomo_vectorized_kernel,
-    _compile_raw_cuda_kernel,
-    _cpu_3x2pt_tomo_fused_kernel,
     _cpu_aperture_density_kernel,
     _cpu_aperture_shear_kernel,
+)
+from CosmoFuse.backend.combinations import _MAX_VECTOR_TOMO_BINS
+from CosmoFuse.backend.density import (
+    _build_cupy_density_density_tomo_vectorized_kernel,
+    _build_cupy_density_shear_tomo_vectorized_kernel,
     _cpu_density_density_corr_kernel,
     _cpu_density_density_tomo_vectorized_kernel,
     _cpu_density_shear_corr_kernel,
     _cpu_density_shear_tomo_vectorized_kernel,
+)
+from CosmoFuse.backend.raw import _compile_raw_cuda_kernel
+from CosmoFuse.backend.shear import (
+    _build_cupy_tomo_vectorized_kernel,
     _cpu_xipm_auto_corr_kernel,
     _cpu_xipm_cross_corr_kernel,
-    get_backend,
+)
+from CosmoFuse.backend.three_by_two import (
+    _build_cupy_3x2pt_tomo_aperture_kernel,
+    _build_cupy_3x2pt_tomo_pairs_kernel,
+    _cpu_3x2pt_tomo_fused_kernel,
 )
 
 
@@ -227,7 +232,7 @@ class TestBackend(unittest.TestCase):
 
     def test_get_backend_auto_no_cupy(self):
         with patch.dict(sys.modules, {"cupy": None}):
-            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+            with patch("CosmoFuse.backend.core.warnings.warn") as mock_warn:
                 importlib.reload(CosmoFuse.backend)
                 backend = CosmoFuse.backend.get_backend("auto")
                 self.assertEqual(backend.name, "numpy")
@@ -244,7 +249,7 @@ class TestBackend(unittest.TestCase):
             return real_import(name, globals, locals, fromlist, level)
 
         with patch("builtins.__import__", side_effect=fake_import):
-            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+            with patch("CosmoFuse.backend.core.warnings.warn") as mock_warn:
                 backend = get_backend("auto")
                 self.assertEqual(backend.name, "numpy")
                 mock_warn.assert_called_once_with(
@@ -264,7 +269,7 @@ class TestBackend(unittest.TestCase):
             "cudaErrorNoDevice"
         )
         with patch.dict(sys.modules, {"cupy": fake_cupy}):
-            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+            with patch("CosmoFuse.backend.core.warnings.warn") as mock_warn:
                 backend = get_backend("auto")
         self.assertEqual(backend.name, "numpy")
         self.assertIn("no usable CUDA device", mock_warn.call_args[0][0])
@@ -273,7 +278,7 @@ class TestBackend(unittest.TestCase):
         fake_cupy = MagicMock()
         fake_cupy.cuda.runtime.getDeviceCount.return_value = 0
         with patch.dict(sys.modules, {"cupy": fake_cupy}):
-            with patch("CosmoFuse.backend.warnings.warn") as mock_warn:
+            with patch("CosmoFuse.backend.core.warnings.warn") as mock_warn:
                 backend = get_backend("auto")
         self.assertEqual(backend.name, "numpy")
         self.assertIn("no usable CUDA device", mock_warn.call_args[0][0])
@@ -1664,8 +1669,8 @@ class TestBackend(unittest.TestCase):
                     np.array([0, 1], dtype=np.int64),
                     np.array([0], dtype=np.int32),
                     np.array([0], dtype=np.int32),
-                    np.zeros((2, 2, 1), dtype=np.complex64),
-                    np.zeros((2, 1), dtype=np.float32),
+                    np.zeros((2, 1, 1), dtype=np.float32),
+                    np.zeros((1, 1), dtype=np.float32),
                 )
                 self.assertFalse(ok)
 

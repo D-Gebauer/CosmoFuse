@@ -23,18 +23,24 @@ from pathlib import Path
 import healpy as hp
 import numpy as np
 
-from CosmoFuse.backend import (
-    _build_cupy_3x2pt_tomo_aperture_kernel,
-    _build_cupy_3x2pt_tomo_pairs_kernel,
+from CosmoFuse.backend.aperture import (
     _build_cupy_aperture_tomo_density_kernel,
     _build_cupy_aperture_tomo_shear_kernel,
-    _build_cupy_degrade_rows_kernel,
+)
+from CosmoFuse.backend.degrade import _build_cupy_degrade_rows_kernel
+from CosmoFuse.backend.density import (
     _build_cupy_density_density_tomo_packed_kernel,
     _build_cupy_density_density_tomo_vectorized_kernel,
     _build_cupy_density_shear_tomo_packed_kernel,
     _build_cupy_density_shear_tomo_vectorized_kernel,
+)
+from CosmoFuse.backend.shear import (
     _build_cupy_tomo_packed_kernel,
     _build_cupy_tomo_vectorized_kernel,
+)
+from CosmoFuse.backend.three_by_two import (
+    _build_cupy_3x2pt_tomo_aperture_kernel,
+    _build_cupy_3x2pt_tomo_pairs_kernel,
 )
 from CosmoFuse.correlations import Integrated3PCF
 

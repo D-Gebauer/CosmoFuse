@@ -1,5 +1,44 @@
 # Changelog
 
+## 7.4.0 (2026-10-21)
+
+**Typed CUDA launches; `backend.py` split into a package.** No numerical
+change: every public GPU path is bitwise identical to 7.3.0 (90 of 90 arrays: patch
+estimators at full resolution, packed, k = 2.9, per-row fallback, float64;
+`Global2PCF`; `Global3PCF`), and wall times are within run-to-run noise
+(A100: two 7.3.0 runs differ by up to 9 %, 7.4.0 lands within -6 % / +7 %).
+
+- A CuPy `RawKernel` launch is untyped -- its arguments are passed as raw
+  bytes in the order given -- so a scalar of the wrong width or an array of
+  the wrong dtype was not an error but a kernel reading garbage. Every launch
+  now goes through `backend.raw.TypedKernel`, which checks it against the
+  signature **parsed from the `.cu` source**: argument count, the dtype of
+  every pointer argument (template types resolved from the instantiation),
+  C-contiguity (except the parameters a kernel addresses through explicit
+  strides), and the range of every scalar, which it casts to the exact C
+  type. The 44 hand-written `np.int32(...)` / `np.int64(...)` casts in the
+  wrappers are gone. Because the numpy emulation of the tests launches
+  through the same layer, a wrapper that disagrees with its kernel now fails
+  in CI on a CPU-only machine.
+- Unsupported dtypes raise `TypeError` instead of silently selecting the
+  `double` / `long long` instantiation (`backend.raw.c_real`, `c_index`,
+  `c_complex`).
+- The aperture kernels use the shared compile cache: a *transient* NVRTC
+  failure is now retried on the next call instead of pinning the process to
+  the elementwise fallback (deterministic failures stay cached), as the other
+  kernels already did.
+- `CosmoFuse/backend.py` (3,019 lines) is now the package `CosmoFuse.backend`:
+  `core` (`Backend`, `get_backend`, `safe_divide`), one module per kernel
+  family with the Numba kernel and the GPU wrapper side by side (`aperture`,
+  `density`, `shear`, `three_by_two`, `degrade`, `threepoint`), `combinations`
+  (layouts of the tiled kernels) and `raw` (compile + launch).
+  `CosmoFuse.backend` still exports `Backend`, `get_backend` and
+  `safe_divide`; private names moved to the submodules, and
+  `CosmoFuse.threepoint_kernels` is now `CosmoFuse.backend.threepoint`.
+- New gate `tests/test_kernel_signatures.py`: every `__global__` kernel in
+  `cuda/` has a numpy twin in `tests/cuda_emulation.py`, every parameter type
+  is known, and the launch checks reject what they should.
+
 ## 7.3.0 (2026-10-21)
 
 **Global3PCF: `ggg()` 1.29x faster** (nside 512, DES Y3, A100: 2.01 -> 1.56 s;

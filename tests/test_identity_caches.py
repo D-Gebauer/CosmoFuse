@@ -226,13 +226,13 @@ class TestCombinationLayoutCache(unittest.TestCase):
     """
 
     def setUp(self):
-        from CosmoFuse.backend import _COMBINATION_LAYOUT_CACHE
+        from CosmoFuse.backend.combinations import _COMBINATION_LAYOUT_CACHE
 
         _COMBINATION_LAYOUT_CACHE.clear()
 
     @staticmethod
     def _layout(selection, n1, n2):
-        from CosmoFuse.backend import _combination_layout
+        from CosmoFuse.backend.combinations import _combination_layout
 
         comb_i = np.asarray([a for a, _ in selection], dtype=np.int32)
         comb_j = np.asarray([b for _, b in selection], dtype=np.int32)
@@ -245,14 +245,14 @@ class TestCombinationLayoutCache(unittest.TestCase):
 
         truths = {}
         for name, selection in (("first", first), ("second", second)):
-            from CosmoFuse.backend import _COMBINATION_LAYOUT_CACHE
+            from CosmoFuse.backend.combinations import _COMBINATION_LAYOUT_CACHE
 
             _COMBINATION_LAYOUT_CACHE.clear()
             layout, _ = self._layout(selection, 3, 3)
             truths[name] = np.asarray(layout.rows).copy()
         self.assertFalse(np.array_equal(truths["first"], truths["second"]))
 
-        from CosmoFuse.backend import _COMBINATION_LAYOUT_CACHE
+        from CosmoFuse.backend.combinations import _COMBINATION_LAYOUT_CACHE
 
         _COMBINATION_LAYOUT_CACHE.clear()
         for i in range(400):
@@ -265,7 +265,10 @@ class TestCombinationLayoutCache(unittest.TestCase):
             )
 
     def test_the_same_arrays_still_hit(self):
-        from CosmoFuse.backend import _COMBINATION_LAYOUT_CACHE, _combination_layout
+        from CosmoFuse.backend.combinations import (
+            _COMBINATION_LAYOUT_CACHE,
+            _combination_layout,
+        )
 
         comb_i = np.asarray([0, 1, 2], dtype=np.int32)
         comb_j = np.asarray([2, 0, 1], dtype=np.int32)

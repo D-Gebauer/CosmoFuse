@@ -1807,7 +1807,7 @@ class Integrated3PCF:
         packing exists to save, so the honest answer is to say where the
         limit is.
         """
-        from .backend import _MAX_TILED_ACCUMULATORS
+        from .backend.combinations import _MAX_TILED_ACCUMULATORS
 
         ncomb = nzbins * (nzbins + 1) // 2
         max_bins = 0
