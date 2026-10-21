@@ -5,7 +5,9 @@ A pair normally costs 24 bytes on the device: two int32 row indices and two
 complex64 rotation factors e^{2i phi}.  Packed it costs 8 bytes:
 
 * the rotation factors have unit modulus, so only their angle is kept, as a
-  uint16 (resolution 2 pi / 65536 = 9.6e-5 rad, error <= 4.8e-5 rad);
+  uint16 (resolution 2 pi / 65536 = 9.6e-5 rad, error <= 4.8e-5 rad): the
+  nearest code to the angle of the stored value, computed at float64 for
+  every rotation precision, so it does not depend on the machine;
 * the row indices become uint16 indices *local to the row block of their
   (patch, resolution level)*: the map rows of every patch are gathered into
   contiguous blocks (once per map), which also makes the random gathers of a
@@ -43,8 +45,14 @@ _ENCODE_CHUNK = 1 << 20  # pairs per angle-encoding pass
 
 
 def encode_angles(exp2phi: np.ndarray) -> np.ndarray:
-    """Unit-modulus complex rotation factors -> uint16 angles (round to nearest)."""
-    angle = np.angle(np.asarray(exp2phi))
+    """Unit-modulus complex rotation factors -> uint16 angles (round to nearest).
+
+    Always at float64: the angle of a complex64 value is computed exactly
+    enough there that the code is the nearest one, whereas a float32
+    ``arctan2`` (whose last bit depends on numpy's SIMD path, i.e. on the CPU)
+    picked the neighbouring code for ~0.07 % of real pairs (CosmoFuse <= 7.2.0).
+    """
+    angle = np.angle(np.asarray(exp2phi).astype(np.complex128, copy=False))
     steps = np.rint(angle / ANGLE_UNIT).astype(np.int64)
     return (steps % ANGLE_STEPS).astype(np.uint16)
 

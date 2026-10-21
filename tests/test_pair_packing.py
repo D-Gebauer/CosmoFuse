@@ -66,6 +66,22 @@ class TestCodec(unittest.TestCase):
         )
         self.assertEqual(packing.decode_angles(codes, np.complex64).dtype, np.complex64)
 
+    def test_codes_are_the_nearest_at_every_precision(self):
+        """complex64 input just off every half-step boundary: the code is the
+        nearest one to the angle of the stored value (a float32 arctan2
+        missed it for ~44 % of these, by up to 1.0008 half steps)."""
+        unit = packing.ANGLE_UNIT
+        k = np.arange(-32768, 32768)
+        eps = np.array([-3e-7, -1e-7, 1e-7, 3e-7]) * unit
+        alpha = ((k[:, None] + 0.5) * unit + eps[None, :]).ravel()
+        for dtype in (np.complex64, np.complex128):
+            with self.subTest(dtype=dtype):
+                z = np.exp(1j * alpha).astype(dtype)
+                exact = np.angle(z.astype(np.complex128))
+                back = packing.encode_angles(z).astype(np.float64) * unit
+                err = np.abs((back - exact + np.pi) % (2 * np.pi) - np.pi)
+                self.assertLessEqual(err.max(), unit / 2 * (1 + 1e-9))
+
     def test_pack_patch_reconstructs_rows(self):
         rng = np.random.default_rng(2)
         counts = np.array([5, 0, 7, 3])

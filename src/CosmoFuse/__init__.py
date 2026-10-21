@@ -35,7 +35,7 @@ from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 from .zeta_writer import ZetaWriter
 
-__version__ = "7.2.0"
+__version__ = "7.2.1"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 

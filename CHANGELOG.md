@@ -1,5 +1,34 @@
 # Changelog
 
+## 7.2.1 (2026-10-21)
+
+**Packed rotation angles are encoded at float64: the nearest code, the same
+on every machine.** Only `pack_pairs=True` / `pack_host_pairs=True` results
+change; exact pairs are untouched.
+
+- `packing.encode_angles` computed the angle of complex64 rotation factors
+  with a float32 `arctan2`, whose last bit depends on numpy's SIMD path,
+  i.e. on the CPU. For 0.070 % of the pairs (DES Y3, nside 512: 935,938 of
+  1.34 × 10⁹ codes) it then picked the neighbouring code instead of the
+  nearest one, and the same geometry packed differently on a laptop and on
+  seitz1. The angle is now always computed at float64 (complex64 values are
+  cast first), so the error is ≤ half a step (4.8e-5 rad) for every rotation
+  precision, as `packing.py` always claimed. Inputs that were already
+  complex128 encode exactly as before.
+- Effect: those pairs move by one step (9.6e-5 rad); packing as a whole moves
+  each estimate by ~1e-5 of its statistical error, and this is a small part
+  of that. Cost: 41 instead of 29 ns per angle on one thread, invisible in
+  `prepare()` at nside 512 (3.37 vs 3.41 s repeated, seitz1) and hidden
+  behind the pair search with `pack_host_pairs`.
+- Pair files written with `pack_host_pairs=True` by CosmoFuse ≤ 7.2.0 hold
+  the old codes and still load, reproducing the old numbers. To get the new
+  codes, pack again from the exact pairs (`find_pairs()`, or an exact file
+  with `pack_pairs=True`).
+- Gate: `test_codes_are_the_nearest_at_every_precision` (complex64 values just
+  off every half-step boundary; the float32 encoder missed 44 % of them).
+  Identical inputs now give identical codes on the laptop and on seitz1
+  (they did not before).
+
 ## 7.2.0 (2026-10-21)
 
 **The precompute, not the measurement: `prepare()` and `load_pairs()` 11–14×
