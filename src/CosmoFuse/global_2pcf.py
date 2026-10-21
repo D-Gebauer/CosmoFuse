@@ -21,9 +21,15 @@ Internally the tile pairs are handed to an :class:`Integrated3PCF` whose
 groups are tiles (:class:`_TileEngine`); it only overrides the normalisation
 seam ``_finish_pair_sums`` to keep the sums.  Everything that makes the patch
 path fast is therefore shared, not duplicated.
+
+With ``device=[0, 1, ...]`` every device gets an engine of its own holding a
+contiguous range of tiles (balanced by pair count) and the whole row space,
+treecode cells included -- a pair may reach into a tile another device owns.
+Measurements run in one thread per device and the per-tile sums are
+concatenated in tile order, so the result is bitwise that of one device.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
 import healpy as hp
@@ -36,6 +42,12 @@ from .global_geometry import (
     default_tile_nside,
     radec_to_xyz,
     unique_pairs,
+)
+from .multi_device import (
+    balanced_ranges,
+    device_list,
+    require_host_arrays,
+    run_on_devices,
 )
 from .results import TwoPointResult
 from .treecode import TreecodeGeometry, build_patch_cells, level_groups
@@ -84,7 +96,13 @@ class Global2PCF:
             side is still >= ``theta_max``.  With ``pack_pairs=True`` every
             (tile, level) row block, halo included, must hold <= 65536 rows;
             pass a larger ``tile_nside`` if it does not.
-        device, map_precision, rotation_precision, accumulation_precision,
+        device: ``"cpu"``, ``"gpu"``, ``"auto"``, a GPU id, or a list of GPU
+            ids.  A list splits the tiles across the devices (contiguous
+            ranges with about equal pair counts, ``tile_ranges``); each device
+            holds its share of the pairs and a copy of the maps.  Measurements
+            then take host arrays and return host results, bitwise equal to
+            a single-device run.
+        map_precision, rotation_precision, accumulation_precision,
         resolution_factor, pair_search_precision, pack_pairs, fastmath:
             as for :class:`~CosmoFuse.correlations.Integrated3PCF`.  The
             static treecode builds its cells over the whole footprint (there
@@ -99,7 +117,7 @@ class Global2PCF:
         theta_min: float = 10,
         theta_max: float = 170,
         tile_nside: Optional[int] = None,
-        device: Union[str, int] = "auto",
+        device: Union[str, int, Sequence[Union[str, int]]] = "auto",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float32",
         accumulation_precision: str = "same",
@@ -108,11 +126,9 @@ class Global2PCF:
         pack_pairs: bool = False,
         fastmath: bool = True,
     ) -> None:
-        if isinstance(device, (list, tuple, set)):
-            raise NotImplementedError(
-                "Global2PCF runs on one device; multi-device global estimators "
-                "are not implemented yet."
-            )
+        devices: List[Any] = (
+            device_list(device) if isinstance(device, (list, tuple, set)) else [device]
+        )
         if theta_min >= theta_max:
             raise ValueError("theta_min must be less than theta_max")
         theta_max_rad = np.radians(theta_max / 60.0)
@@ -121,29 +137,34 @@ class Global2PCF:
             auto_tiles = True
         else:
             auto_tiles = False
-        # The engine is a Integrated3PCF over *tiles*; its patch centres are
-        # the tile centres and its patch_size/theta_Q are never used (no
-        # patch search, no aperture).
-        self._engine = _TileEngine(
-            int(nside),
-            np.zeros(1),
-            np.zeros(1),
-            nbins=nbins,
-            theta_min=theta_min,
-            theta_max=theta_max,
-            patch_size=1.0,
-            theta_Q=1.0,
-            mask=mask,
-            fastmath=fastmath,
-            device=device,
-            map_precision=map_precision,
-            rotation_precision=rotation_precision,
-            accumulation_precision=accumulation_precision,
-            resolution_factor=resolution_factor,
-            pair_search_precision=pair_search_precision,
-            pack_pairs=pack_pairs,
-        )
-        e = self._engine
+        # An engine is a Integrated3PCF over *tiles*; its patch centres are
+        # the centres of the tiles it owns and its patch_size/theta_Q are
+        # never used (no patch search, no aperture).  One engine per device.
+        self._engines = [
+            _TileEngine(
+                int(nside),
+                np.zeros(1),
+                np.zeros(1),
+                nbins=nbins,
+                theta_min=theta_min,
+                theta_max=theta_max,
+                patch_size=1.0,
+                theta_Q=1.0,
+                mask=mask,
+                fastmath=fastmath,
+                device=dev,
+                map_precision=map_precision,
+                rotation_precision=rotation_precision,
+                accumulation_precision=accumulation_precision,
+                resolution_factor=resolution_factor,
+                pair_search_precision=pair_search_precision,
+                pack_pairs=pack_pairs,
+            )
+            for dev in devices
+        ]
+        self.devices = devices
+        # the engine every device-independent property is read from
+        self._engine = e = self._engines[0]
         coarse = self._coarse_nsides()
         if coarse and tile_nside > min(coarse):
             if not auto_tiles:
@@ -154,11 +175,19 @@ class Global2PCF:
                 )
             tile_nside = int(min(coarse))
         self.tiles = TileSet.from_rows(e.nside, e.map_inds, int(tile_nside))
-        phi, theta = self.tiles.centre_ang
-        e.phi_center = phi
-        e.theta_center = theta
-        e.n_patches = self.tiles.n_tiles
-        e.patch_size = float(np.degrees(hp.max_pixrad(self.tiles.tile_nside)) * 60.0)
+        if self.tiles.n_tiles < len(self._engines):
+            raise ValueError(
+                f"{self.tiles.n_tiles} tiles cannot be split across "
+                f"{len(self._engines)} devices; use a larger tile_nside"
+            )
+        patch_size = float(np.degrees(hp.max_pixrad(self.tiles.tile_nside)) * 60.0)
+        for eng in self._engines:
+            eng.patch_size = patch_size
+        # (first, stop) tile of every device.  Several devices are balanced
+        # by pair count, so their ranges are set when the pairs are installed.
+        self.tile_ranges: Optional[List[Tuple[int, int]]] = None
+        if len(self._engines) == 1:
+            self._assign_tiles([(0, self.tiles.n_tiles)])
 
     # ------------------------------------------------------------------ #
     # geometry
@@ -210,10 +239,11 @@ class Global2PCF:
 
     @property
     def ntotpairs(self) -> int:
-        return int(self._engine.ntotpairs)
+        return int(sum(int(e.ntotpairs) for e in self._engines))
 
     @property
     def backend(self) -> Any:
+        """The backend of the (first) device."""
         return self._engine.backend
 
     @property
@@ -329,18 +359,42 @@ class Global2PCF:
                 raise OverflowError(
                     "pixel + coarse-cell ids exceed the index dtype range"
                 )
-        e.pair_inds = pair_inds
-        e.pair_exp2phi = pair_exp2phi
-        e.bins = bins
-        e._treecode = treecode
-        e.packed_pairs = None
-        e.packed_block_ids = None
-        e.packed_block_sizes = None
-        e._invalidate_prepared_state()
+        if len(self._engines) == 1:
+            ranges = [(0, self.tiles.n_tiles)]
+        else:
+            ranges = balanced_ranges(
+                [p.shape[1] for p in pair_inds], len(self._engines)
+            )
+        self._assign_tiles(ranges)
+        for eng, (a, b) in zip(self._engines, ranges):
+            eng.pair_inds = pair_inds[a:b]
+            eng.pair_exp2phi = pair_exp2phi[a:b]
+            eng.bins = bins[a:b]
+            # every engine holds every cell: its pairs reach into other tiles
+            eng._treecode = treecode
+            eng.packed_pairs = None
+            eng.packed_block_ids = None
+            eng.packed_block_sizes = None
+            eng._invalidate_prepared_state()
+
+    def _assign_tiles(self, ranges: List[Tuple[int, int]]) -> None:
+        """Give engine ``i`` the tiles ``ranges[i]`` as its patches."""
+        phi, theta = self.tiles.centre_ang
+        for eng, (a, b) in zip(self._engines, ranges):
+            eng.phi_center = phi[a:b]
+            eng.theta_center = theta[a:b]
+            eng.n_patches = b - a
+        self.tile_ranges = list(ranges)
+
+    def _on_engines(self, fn: Callable[[_TileEngine], Any]) -> List[Any]:
+        """``fn(engine)`` for every engine; one thread per device if several."""
+        if len(self._engines) == 1:
+            return [fn(self._engine)]
+        return run_on_devices(self._engines, lambda eng, _i: fn(eng))
 
     def prepare(self, release_host_pairs: bool = False) -> None:
-        """Move the pairs to the backend device (idempotent)."""
-        self._engine.prepare(release_host_pairs=release_host_pairs)
+        """Move the pairs to the backend device(s) (idempotent)."""
+        self._on_engines(lambda eng: eng.prepare(release_host_pairs=release_host_pairs))
 
     def preprocess(self, release_host_pairs: bool = False) -> None:
         """``find_pairs()`` + ``prepare()``."""
@@ -350,12 +404,16 @@ class Global2PCF:
     def save_pairs(self, filepath: str) -> None:
         """Write the pair geometry (exact, host arrays) to HDF5."""
         e = self._engine
-        if e.bins is None or e.pair_inds is None:
+        if any(eng.bins is None or eng.pair_inds is None for eng in self._engines):
             raise RuntimeError(
                 "host pairs were released (release_host_pairs=True); recompute "
                 "them before save_pairs()."
             )
-        counts = np.array([p.shape[1] for p in e.pair_inds], dtype=np.int64)
+        # the tiles of all devices, in tile order
+        pair_inds = [p for eng in self._engines for p in eng.pair_inds]
+        pair_exp2phi = [p for eng in self._engines for p in eng.pair_exp2phi]
+        bins = [b for eng in self._engines for b in eng.bins]
+        counts = np.array([p.shape[1] for p in pair_inds], dtype=np.int64)
         offsets = np.concatenate(([0], np.cumsum(counts)))
         with h5py.File(filepath, "w") as fp:
             fp.attrs["kind"] = FORMAT_KIND
@@ -375,21 +433,19 @@ class Global2PCF:
             )
             fp.create_dataset("pair_offsets", data=offsets)
             fp.create_dataset(
-                "bins", data=np.stack([np.asarray(b, dtype=np.int64) for b in e.bins])
+                "bins", data=np.stack([np.asarray(b, dtype=np.int64) for b in bins])
             )
             fp.create_dataset(
                 "pair_inds",
                 data=(
-                    np.concatenate(e.pair_inds, axis=1)
-                    if e.pair_inds
-                    else np.zeros((2, 0))
+                    np.concatenate(pair_inds, axis=1) if pair_inds else np.zeros((2, 0))
                 ),
             )
             fp.create_dataset(
                 "pair_exp2phi",
                 data=(
-                    np.concatenate(e.pair_exp2phi, axis=1)
-                    if e.pair_exp2phi
+                    np.concatenate(pair_exp2phi, axis=1)
+                    if pair_exp2phi
                     else np.zeros((2, 0))
                 ),
             )
@@ -497,50 +553,52 @@ class Global2PCF:
         statistic: str,
         names: Tuple[str, ...],
         combinations: Sequence[Tuple[int, int]],
+        captured: Sequence[Tuple[Tuple[Any, ...], Any, int]],
         return_device: bool,
     ) -> TwoPointResult:
-        e = self._engine
-        nums, den, ncomb = e.take_captured()
-        xp = e.backend.module
-        shape = (ncomb, self.n_tiles, self.nbins)
-        acc = getattr(xp, e.acc_dtype.name)
-        tile_num = {
-            n: xp.real(a).reshape(shape).astype(acc, copy=False)
-            for n, a in zip(names, nums)
-        }
-        tile_weight = xp.real(den).reshape(shape).astype(acc, copy=False)
-        res = TwoPointResult(
-            statistic,
-            np.asarray(self.binedges).copy(),
-            tuple((int(a), int(b)) for a, b in combinations),
-            tile_num,
-            tile_weight,
-        )
-        if return_device and e.backend.name == "cupy":
-            return res
+        """Label the captured sums of every engine, tiles in tile order."""
+        parts = []
+        for eng, (nums, den, ncomb) in zip(self._engines, captured):
+            xp = eng.backend.module
+            shape = (ncomb, eng.n_patches, self.nbins)
+            acc = getattr(xp, eng.acc_dtype.name)
+            tile_num = {
+                n: xp.real(a).reshape(shape).astype(acc, copy=False)
+                for n, a in zip(names, nums)
+            }
+            tile_weight = xp.real(den).reshape(shape).astype(acc, copy=False)
+            parts.append((eng, tile_num, tile_weight))
+        combos = tuple((int(a), int(b)) for a, b in combinations)
+        binedges = np.asarray(self.binedges).copy()
+        if len(parts) == 1:
+            eng, tile_num, tile_weight = parts[0]
+            if return_device and eng.backend.name == "cupy":
+                return TwoPointResult(
+                    statistic, binedges, combos, tile_num, tile_weight
+                )
+
+        def host(eng: Any, a: Any) -> np.ndarray:
+            return np.asarray(eng.backend.to_numpy(a))
+
         return TwoPointResult(
-            res.statistic,
-            res.binedges,
-            res.combinations,
-            {k: np.asarray(e.backend.to_numpy(v)) for k, v in tile_num.items()},
-            np.asarray(e.backend.to_numpy(tile_weight)),
+            statistic,
+            binedges,
+            combos,
+            {
+                n: np.concatenate([host(eng, t[n]) for eng, t, _ in parts], axis=1)
+                for n in names
+            },
+            np.concatenate([host(eng, w) for eng, _, w in parts], axis=1),
         )
 
-    def gg(
-        self,
-        shear_maps: Any,
-        w: Any,
-        flip_g1: bool = False,
-        flip_g2: bool = False,
-        return_device: bool = True,
-    ) -> TwoPointResult:
-        """Tomographic ξ± of the footprint (TreeCorr ``GGCorrelation``).
+    def _check_inputs(self, name: str, *arrays: Any) -> None:
+        if len(self._engines) > 1:
+            require_host_arrays(name, arrays)
 
-        ``shear_maps``: ``(nz, 2, npix | n_active)``; ``w``: ``(nz, npix |
-        n_active)``.  Returns a ``"gg"`` :class:`TwoPointResult` with
-        ``.xi_p``, ``.xi_m``, rows = upper-triangle ``combinations``.
-        """
-        e = self._engine
+    @staticmethod
+    def _gg_sums(
+        e: _TileEngine, shear_maps: Any, w: Any, flip_g1: bool, flip_g2: bool
+    ) -> Tuple[Tuple[Tuple[Any, ...], Any, int], List[Tuple[int, int]]]:
         e._ensure_prepared()
         shear_arr = e._coerce_map_input_array(shear_maps)
         w_arr = e._coerce_map_input_array(w)
@@ -565,26 +623,12 @@ class Global2PCF:
             raise RuntimeError(
                 "the tomographic ξ± kernel is unavailable on this backend"
             )
-        return self._result(
-            "gg", ("xi_p", "xi_m"), Integrated3PCF.tomo_combinations(nz), return_device
-        )
+        return e.take_captured(), Integrated3PCF.tomo_combinations(nz)
 
-    def kk(
-        self,
-        k_maps: Any,
-        w: Any,
-        auto_only: bool = False,
-        return_device: bool = True,
-    ) -> TwoPointResult:
-        """Tomographic correlation of scalar fields -- w(θ) for overdensity
-        maps: ``Σ w_i w_j δ_i δ_j / Σ w_i w_j`` (TreeCorr ``KKCorrelation``
-        with ``k = δ``; equal to Landy-Szalay with randoms at the pixel
-        centres when ``w`` is the pixel coverage).
-
-        Returns a ``"kk"`` :class:`TwoPointResult` with ``.xi``; rows = upper
-        triangle, or the ``nz`` auto-correlations with ``auto_only=True``.
-        """
-        e = self._engine
+    @staticmethod
+    def _kk_sums(
+        e: _TileEngine, k_maps: Any, w: Any, auto_only: bool
+    ) -> Tuple[Tuple[Tuple[Any, ...], Any, int], List[Tuple[int, int]]]:
         e._ensure_prepared()
         arr = e._coerce_map_input_array(k_maps)
         if arr.ndim != 2:
@@ -593,32 +637,19 @@ class Global2PCF:
         e._density_density_tomo_vectorized(
             arr, w, None, nz, gc_auto_correlations_only=auto_only
         )
-        return self._result(
-            "kk",
-            ("xi",),
-            Integrated3PCF.tomo_combinations(nz, auto_only),
-            return_device,
-        )
+        return e.take_captured(), Integrated3PCF.tomo_combinations(nz, auto_only)
 
-    def kg(
-        self,
+    @staticmethod
+    def _kg_sums(
+        e: _TileEngine,
         k_maps: Any,
         shear_maps: Any,
         k_weights: Any,
         shear_weights: Any,
-        combinations: Optional[Sequence[Tuple[int, int]]] = None,
-        flip_g1: bool = False,
-        flip_g2: bool = False,
-        return_device: bool = True,
-    ) -> TwoPointResult:
-        """Tomographic γ_t of scalar (lens δ) × shear (source) maps:
-        ``Σ w_l w_s δ_l γ_t / Σ w_l w_s`` (TreeCorr ``KGCorrelation``).
-
-        Rows: all ``(lens, source)`` combinations, lens-major, or the given
-        ``combinations`` in order.  Returns a ``"kg"`` :class:`TwoPointResult`
-        with ``.xi``.
-        """
-        e = self._engine
+        combinations: Optional[Sequence[Tuple[int, int]]],
+        flip_g1: bool,
+        flip_g2: bool,
+    ) -> Tuple[Tuple[Tuple[Any, ...], Any, int], List[Tuple[int, int]]]:
         e._ensure_prepared()
         d_arr = e._coerce_map_input_array(k_maps)
         s_arr = e._coerce_map_input_array(shear_maps)
@@ -646,12 +677,94 @@ class Global2PCF:
             ggl_bin_combinations=combinations,
             shear_signs=(-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0),
         )
+        return e.take_captured(), Integrated3PCF.kg_combinations(nl, ns, combinations)
+
+    def _labelled(
+        self,
+        statistic: str,
+        names: Tuple[str, ...],
+        per_engine: Sequence[Tuple[Any, List[Tuple[int, int]]]],
+        return_device: bool,
+    ) -> TwoPointResult:
         return self._result(
-            "kg",
-            ("xi",),
-            Integrated3PCF.kg_combinations(nl, ns, combinations),
+            statistic,
+            names,
+            per_engine[0][1],
+            [captured for captured, _ in per_engine],
             return_device,
         )
+
+    def gg(
+        self,
+        shear_maps: Any,
+        w: Any,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+        return_device: bool = True,
+    ) -> TwoPointResult:
+        """Tomographic ξ± of the footprint (TreeCorr ``GGCorrelation``).
+
+        ``shear_maps``: ``(nz, 2, npix | n_active)``; ``w``: ``(nz, npix |
+        n_active)``.  Returns a ``"gg"`` :class:`TwoPointResult` with
+        ``.xi_p``, ``.xi_m``, rows = upper-triangle ``combinations``.
+        """
+        self._check_inputs("gg", shear_maps, w)
+        out = self._on_engines(
+            lambda e: self._gg_sums(e, shear_maps, w, flip_g1, flip_g2)
+        )
+        return self._labelled("gg", ("xi_p", "xi_m"), out, return_device)
+
+    def kk(
+        self,
+        k_maps: Any,
+        w: Any,
+        auto_only: bool = False,
+        return_device: bool = True,
+    ) -> TwoPointResult:
+        """Tomographic correlation of scalar fields -- w(θ) for overdensity
+        maps: ``Σ w_i w_j δ_i δ_j / Σ w_i w_j`` (TreeCorr ``KKCorrelation``
+        with ``k = δ``; equal to Landy-Szalay with randoms at the pixel
+        centres when ``w`` is the pixel coverage).
+
+        Returns a ``"kk"`` :class:`TwoPointResult` with ``.xi``; rows = upper
+        triangle, or the ``nz`` auto-correlations with ``auto_only=True``.
+        """
+        self._check_inputs("kk", k_maps, w)
+        out = self._on_engines(lambda e: self._kk_sums(e, k_maps, w, auto_only))
+        return self._labelled("kk", ("xi",), out, return_device)
+
+    def kg(
+        self,
+        k_maps: Any,
+        shear_maps: Any,
+        k_weights: Any,
+        shear_weights: Any,
+        combinations: Optional[Sequence[Tuple[int, int]]] = None,
+        flip_g1: bool = False,
+        flip_g2: bool = False,
+        return_device: bool = True,
+    ) -> TwoPointResult:
+        """Tomographic γ_t of scalar (lens δ) × shear (source) maps:
+        ``Σ w_l w_s δ_l γ_t / Σ w_l w_s`` (TreeCorr ``KGCorrelation``).
+
+        Rows: all ``(lens, source)`` combinations, lens-major, or the given
+        ``combinations`` in order.  Returns a ``"kg"`` :class:`TwoPointResult`
+        with ``.xi``.
+        """
+        self._check_inputs("kg", k_maps, shear_maps, k_weights, shear_weights)
+        out = self._on_engines(
+            lambda e: self._kg_sums(
+                e,
+                k_maps,
+                shear_maps,
+                k_weights,
+                shear_weights,
+                combinations,
+                flip_g1,
+                flip_g2,
+            )
+        )
+        return self._labelled("kg", ("xi",), out, return_device)
 
     def three_by_two_pt(
         self,
@@ -667,27 +780,30 @@ class Global2PCF:
     ) -> Dict[str, TwoPointResult]:
         """``{"gg": ..., "kk": ..., "kg": ...}`` in one call (the three pair
         statistics share one row expansion)."""
-        e = self._engine
-        with e._expansion_scope():
-            return {
-                "gg": self.gg(
-                    shear_maps,
-                    shear_weights,
-                    flip_g1=flip_g1,
-                    flip_g2=flip_g2,
-                    return_device=return_device,
-                ),
-                "kk": self.kk(
-                    k_maps, k_weights, auto_only=auto_only, return_device=return_device
-                ),
-                "kg": self.kg(
-                    k_maps,
-                    shear_maps,
-                    k_weights,
-                    shear_weights,
-                    combinations=combinations,
-                    flip_g1=flip_g1,
-                    flip_g2=flip_g2,
-                    return_device=return_device,
-                ),
-            }
+        self._check_inputs(
+            "three_by_two_pt", shear_maps, k_maps, shear_weights, k_weights
+        )
+
+        def run(e: _TileEngine) -> Dict[str, Any]:
+            with e._expansion_scope():
+                return {
+                    "gg": self._gg_sums(e, shear_maps, shear_weights, flip_g1, flip_g2),
+                    "kk": self._kk_sums(e, k_maps, k_weights, auto_only),
+                    "kg": self._kg_sums(
+                        e,
+                        k_maps,
+                        shear_maps,
+                        k_weights,
+                        shear_weights,
+                        combinations,
+                        flip_g1,
+                        flip_g2,
+                    ),
+                }
+
+        out = self._on_engines(run)
+        names = {"gg": ("xi_p", "xi_m"), "kk": ("xi",), "kg": ("xi",)}
+        return {
+            key: self._labelled(key, names[key], [o[key] for o in out], return_device)
+            for key in ("gg", "kk", "kg")
+        }

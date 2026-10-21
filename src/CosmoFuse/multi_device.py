@@ -18,11 +18,107 @@ Use it through ``Integrated3PCF(..., device=[0, 1])``::
                           nbins=8, theta_min=15, theta_max=250)
     corr.preprocess()                      # or corr.load_pairs(path)
     res = corr.gg(shear, w)                # res.M_a, res.xi_p, res.xi_m
+
+The footprint-wide estimators split the same way with their own unit of
+work -- tiles for :class:`~CosmoFuse.global_2pcf.Global2PCF`, centres for
+:class:`~CosmoFuse.global_3pcf.Global3PCF` -- through the helpers below.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+
+def device_list(devices: Any) -> List[Any]:
+    """Validate a device list: non-empty, no duplicate GPU ids.
+
+    Usually CUDA ids; any single-device spec works, so that the splitting can
+    be exercised with ``("cpu", "cpu")``.
+    """
+    ids = [int(d) if isinstance(d, (int, np.integer)) else d for d in devices]
+    if len(ids) == 0:
+        raise ValueError("devices must name at least one device")
+    int_ids = [d for d in ids if isinstance(d, int)]
+    if len(set(int_ids)) != len(int_ids):
+        raise ValueError(f"duplicate device ids in {ids}")
+    return ids
+
+
+def run_on_devices(parts: Sequence[Any], fn: Callable[[Any, int], Any]) -> List[Any]:
+    """Call ``fn(part, index)`` once per part, one thread per device.
+
+    Every part has a ``backend``; on a cupy backend the thread makes that
+    part's GPU current (CuPy's current device is thread-local) and
+    synchronises it before returning.  The first exception is re-raised.
+    """
+    import threading
+
+    out: List[Any] = [None] * len(parts)
+    errors: List[BaseException] = []
+
+    def worker(i: int) -> None:
+        try:
+            part = parts[i]
+            module = getattr(part.backend, "module", None)
+            cuda = getattr(module, "cuda", None)
+            if cuda is not None and part.backend.name == "cupy":
+                with cuda.Device(part.backend.device_id):
+                    out[i] = fn(part, i)
+                    cuda.runtime.deviceSynchronize()
+            else:
+                out[i] = fn(part, i)
+        except BaseException as exc:  # surface the first failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(parts))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+    return out
+
+
+def require_host_arrays(name: str, values: Sequence[Any]) -> None:
+    """Every device needs the maps on its own card, so device-resident inputs
+    are not forwarded to a multi-device call: host arrays only."""
+    for a in values:
+        if (
+            a is not None
+            and not isinstance(a, (np.ndarray, int, float, bool, str))
+            and hasattr(a, "__cuda_array_interface__")
+        ):
+            raise TypeError(
+                f"{name} on several devices takes host arrays; a device "
+                "array belongs to one GPU only."
+            )
+
+
+def balanced_ranges(work: Any, n_parts: int) -> List[Tuple[int, int]]:
+    """Split ``len(work)`` ordered units into ``n_parts`` contiguous,
+    non-empty ranges of about equal total ``work``."""
+    w = np.asarray(work, dtype=np.float64)
+    n = int(w.size)
+    if n < n_parts:
+        raise ValueError(f"{n} units of work cannot be split across {n_parts} devices")
+    cum = np.cumsum(w)
+    total = float(cum[-1]) if n else 0.0
+    bounds = [0]
+    for k in range(1, n_parts):
+        if total > 0:
+            target = total * k / n_parts
+            i = int(np.searchsorted(cum, target))  # cum[i] >= target
+            b = i + 1
+            if i > 0 and target - cum[i - 1] < cum[i] - target:
+                b = i
+        else:
+            b = (n * k) // n_parts
+        b = min(max(b, bounds[-1] + 1), n - (n_parts - k))
+        bounds.append(b)
+    bounds.append(n)
+    return [(bounds[i], bounds[i + 1]) for i in range(n_parts)]
+
 
 # Methods measured per device and assembled on the patch axis.  Aperture
 # outputs are (..., n_patches), pair outputs (..., n_patches, nbins).
@@ -54,14 +150,7 @@ class MultiDeviceIntegrated3PCF:
     ) -> None:
         from .correlations import Integrated3PCF
 
-        # Usually CUDA ids; anything Integrated3PCF accepts works, so that the
-        # splitting can be exercised with ("cpu", "cpu").
-        ids = [int(d) if isinstance(d, (int, np.integer)) else d for d in devices]
-        if len(ids) == 0:
-            raise ValueError("devices must name at least one device")
-        int_ids = [d for d in ids if isinstance(d, int)]
-        if len(set(int_ids)) != len(int_ids):
-            raise ValueError(f"duplicate device ids in {ids}")
+        ids = device_list(devices)
         phi = np.asarray(phi_center)
         theta = np.asarray(theta_center)
         if phi.size < len(ids):
@@ -158,52 +247,13 @@ class MultiDeviceIntegrated3PCF:
 
     def _run(self, fn: Any) -> List[Any]:
         """Call ``fn(part, index)`` once per device, in parallel threads."""
-        import threading
-
-        out: List[Any] = [None] * len(self.parts)
-        errors: List[BaseException] = []
-
-        def worker(i: int) -> None:
-            try:
-                part = self.parts[i]
-                module = getattr(part.backend, "module", None)
-                cuda = getattr(module, "cuda", None)
-                if cuda is not None and part.backend.name == "cupy":
-                    with cuda.Device(part.backend.device_id):
-                        out[i] = fn(part, i)
-                        cuda.runtime.deviceSynchronize()
-                else:
-                    out[i] = fn(part, i)
-            except BaseException as exc:  # surface the first failure
-                errors.append(exc)
-
-        threads = [
-            threading.Thread(target=worker, args=(i,)) for i in range(len(self.parts))
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        if errors:
-            raise errors[0]
-        return out
+        return run_on_devices(self.parts, fn)
 
     def _dispatch_method(self, name: str) -> Any:
         from .results import IntegratedResult
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            # every device needs the maps on its own card, so device-resident
-            # inputs are not forwarded: host arrays only
-            for a in tuple(args) + tuple(kwargs.values()):
-                if (
-                    a is not None
-                    and not isinstance(a, (np.ndarray, int, float, bool, str))
-                    and hasattr(a, "__cuda_array_interface__")
-                ):
-                    raise TypeError(
-                        f"{name} on several devices takes host arrays; a device "
-                        "array belongs to one GPU only."
-                    )
+            require_host_arrays(name, tuple(args) + tuple(kwargs.values()))
             kwargs.setdefault("return_device", False)
             results = self._run(lambda part, _i: getattr(part, name)(*args, **kwargs))
             if name in _ARRAY_METHODS:

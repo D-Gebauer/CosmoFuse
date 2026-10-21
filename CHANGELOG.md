@@ -1,5 +1,37 @@
 # Changelog
 
+## 7.1.0 (2026-10-21)
+
+**Several GPUs for the global estimators.** `Global2PCF(..., device=[0, 1])`
+and `Global3PCF(..., device=[0, 1])` used to raise `NotImplementedError`.
+
+- **`Global2PCF`** gives every device an engine of its own with a contiguous
+  range of tiles (`tile_ranges`, balanced by pair count) and the whole row
+  space, treecode cells included, because a pair can reach into a tile that
+  another device owns. Measurements run in one thread per device. The
+  per-tile sums are concatenated in tile order, so the result is **bitwise**
+  that of one device: full resolution, static treecode and packed pairs,
+  `gg`, `kk`, `kg` and `three_by_two_pt`.
+- **`Global3PCF`** gives every device a contiguous range of centres
+  (`centre_ranges`, balanced by pair count) with its slice of the pair CSR.
+  The removal of the degenerate terms is linear, so every device returns the
+  finished multipoles of its centres and the results add. They differ from
+  one device only by summation order (≤ 1e-13, the same as the centre
+  chunking).
+- Device memory for the pairs scales as 1 / n_devices; the maps are copied to
+  every device. A multi-device call takes host arrays and returns host
+  results, as for `Integrated3PCF`. Unlike the patch group, both global
+  estimators also *write* pair files from a group, and a file written by a
+  group loads on one device and vice versa.
+- `multi_device.py` now holds the shared pieces (device-list validation, the
+  thread-per-device runner, the host-array guard, `balanced_ranges`), and the
+  `Integrated3PCF` group uses them unchanged.
+- Gates: `tests/test_global_multi_device.py` covers two and three CPU
+  "devices" against one device, pair files, the split, the GPU orchestration
+  of every engine via the numpy twins, and a real two-GPU test (`gpu`
+  marker; it skips below two GPUs). Not yet benchmarked on real multi-GPU
+  hardware.
+
 ## 7.0.1 (2026-10-17)
 
 Packaging and hygiene, no change to any number.

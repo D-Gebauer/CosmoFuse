@@ -342,6 +342,14 @@ res = correlation.gg(shear_maps, weights)
 Write pair files from a single-device instance; a multi-device group only
 reads them.
 
+The global estimators take a list too: `Global2PCF` splits its tiles and `Global3PCF` its
+centres across the devices, in contiguous ranges with about equal pair counts
+(`tile_ranges`, `centre_ranges`). Every device holds its share of the pairs and a copy of the
+maps, since a pair can reach into a tile another device owns. `Global2PCF` returns exactly the
+single-device result; `Global3PCF` adds the devices' multipoles, which changes only the summation
+order. Both can write pair files from a group. As for `Integrated3PCF`, a multi-device call takes
+host arrays and returns host results.
+
 ### Streaming zetas to a file
 
 For long runs, `ZetaWriter` reduces each map-set to its i3PCFs and appends them to
@@ -382,7 +390,7 @@ map, on CPU or GPU, with the same `preprocess` / `save_pairs` / `load_pairs` wor
 from CosmoFuse import Global2PCF
 
 g2 = Global2PCF(nside, mask=mask, nbins=20, theta_min=5, theta_max=250,
-                resolution_factor=None, pack_pairs=False, device="auto")
+                resolution_factor=None, pack_pairs=False, device="auto")   # or device=[0, 1]
 g2.preprocess()                      # or g2.load_pairs("g2.h5") after g2.save_pairs(...)
 
 gg = g2.gg(shear_maps, w, flip_g1=True)              # TwoPointResult
@@ -406,7 +414,8 @@ centres (`brute=True`, `metric="Arc"`) to TreeCorr's rounding.
 ```python
 from CosmoFuse import Component, Global3PCF
 
-g3 = Global3PCF(nside, mask=mask, nbins=12, theta_min=15, theta_max=250, n_max=20, device="auto")
+g3 = Global3PCF(nside, mask=mask, nbins=12, theta_min=15, theta_max=250, n_max=20,
+                device="auto")                        # or device=[0, 1]: centres split per GPU
 g3.preprocess()
 
 res = g3.ggg(shear_maps, w, flip_g1=True)            # ThreePointResult, labels gamma0..gamma3
@@ -427,7 +436,7 @@ A triangle is seen from its centre vertex with legs in radial bins `b2`, `b3` an
 `phi = phi_3 - phi_2`. The multipoles are exact for every `n`; only the conversion to
 opening-angle bins (`binned()`) truncates at `n_max`. Spin-2 values are in the x-projection
 (`Re` = tangential); `to_centroid` converts binned values to the centroid projection. Results
-are sums, so tiles, chunks and devices add with `+`. Full resolution only; one device.
+are sums, so tiles, chunks and devices add with `+`. Full resolution only.
 
 ## Calculating i3PCFs
 

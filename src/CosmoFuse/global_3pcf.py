@@ -52,7 +52,17 @@ Scope
 Full resolution only: the static treecode suppresses multipole ``n`` by
 roughly ``exp(-n^2 sigma_phi^2 / 2)`` with ``sigma_phi ~ 0.4 / k``, so its
 validation for a 3PCF (which multipoles survive at which ``k``) has to come
-first.  One device.
+first.
+
+Several devices
+---------------
+Both steps are sums over centres, so with ``device=[0, 1, ...]`` every device
+takes a contiguous range of centres (about equal pair counts,
+``centre_ranges``) with its slice of the pair CSR and a copy of the maps --
+neighbours can be anywhere.  The degenerate-term subtraction is linear, so
+every device returns finished multipoles of its centres and the results add.
+They differ from one device only by summation order (as the centre chunking
+does).
 """
 
 import hashlib
@@ -65,6 +75,12 @@ import numpy as np
 
 from .backend import get_backend
 from .global_geometry import TileSet, default_tile_nside, ordered_pairs, radec_to_xyz
+from .multi_device import (
+    balanced_ranges,
+    device_list,
+    require_host_arrays,
+    run_on_devices,
+)
 from .results import Component, ThreePointResult
 from .utils import live_object_serial, pixel2RaDec
 
@@ -101,7 +117,9 @@ class Global3PCF:
         n_max: largest opening-angle multipole.
         tile_nside: tiles of the pair search (power of two); default: the
             smallest tiles whose side is >= ``theta_max``.
-        device: ``"cpu"``, ``"gpu"``, ``"auto"`` or a GPU id.
+        device: ``"cpu"``, ``"gpu"``, ``"auto"``, a GPU id, or a list of GPU
+            ids (centres split across the devices; measurements then take
+            host arrays).
         map_precision: precision of the field and weight maps on the device.
         rotation_precision: precision of the stored pair angles.
         accumulation_precision: ``"float64"`` (default) or ``"same"``
@@ -121,7 +139,7 @@ class Global3PCF:
         theta_max: float = 170,
         n_max: int = 20,
         tile_nside: Optional[int] = None,
-        device: Union[str, int] = "auto",
+        device: Union[str, int, Sequence[Union[str, int]]] = "auto",
         map_precision: Union[str, np.dtype, type] = "float64",
         rotation_precision: Union[str, np.dtype, type] = "float64",
         accumulation_precision: str = "float64",
@@ -129,11 +147,9 @@ class Global3PCF:
         fastmath: bool = True,
         centre_chunk: int = 2048,
     ) -> None:
-        if isinstance(device, (list, tuple, set)):
-            raise NotImplementedError(
-                "Global3PCF runs on one device; multi-device global estimators "
-                "are not implemented yet."
-            )
+        devices: List[Any] = (
+            device_list(device) if isinstance(device, (list, tuple, set)) else [device]
+        )
         nside = int(nside)
         if nbins <= 0:
             raise ValueError("nbins must be positive")
@@ -179,7 +195,34 @@ class Global3PCF:
         if tile_nside is None:
             tile_nside = default_tile_nside(nside, self.theta_max)
         self.tiles = TileSet.from_rows(nside, self.map_inds, int(tile_nside))
-        self.backend = get_backend(device)
+        self.devices = devices
+        # One estimator per device beyond the first, each measuring a range of
+        # centres; the group itself keeps the whole host geometry.
+        self._parts: List["Global3PCF"] = []
+        self.centre_ranges: Optional[List[Tuple[int, int]]] = None
+        if len(devices) > 1:
+            self._parts = [
+                Global3PCF(
+                    nside,
+                    mask=mask,
+                    nbins=nbins,
+                    theta_min=theta_min,
+                    theta_max=theta_max,
+                    n_max=n_max,
+                    tile_nside=tile_nside,
+                    device=dev,
+                    map_precision=map_precision,
+                    rotation_precision=rotation_precision,
+                    accumulation_precision=accumulation_precision,
+                    pair_search_precision=pair_search_precision,
+                    fastmath=fastmath,
+                    centre_chunk=centre_chunk,
+                )
+                for dev in devices
+            ]
+            self.backend: Any = self._parts[0].backend
+        else:
+            self.backend = get_backend(devices[0])
         self.device = device
 
         # host pair geometry (CSR by (centre, bin), centres in tile order)
@@ -313,9 +356,38 @@ class Global3PCF:
         )
         self._dev = None
         self._norm_cache.clear()
+        self._distribute()
+
+    def _distribute(self) -> None:
+        """Give every device a contiguous range of centres (views of the host
+        geometry; only the CSR offsets are rebased copies)."""
+        if not self._parts:
+            return
+        assert self.pair_offsets is not None and self.centre_rows is not None
+        assert self.nbr_rows is not None
+        assert self.phi_c is not None and self.phi_n is not None
+        nb = self.nbins
+        at_centre = self.pair_offsets[::nb]  # pair offset of every centre
+        self.centre_ranges = balanced_ranges(np.diff(at_centre), len(self._parts))
+        for part, (a, b) in zip(self._parts, self.centre_ranges):
+            p0, p1 = int(at_centre[a]), int(at_centre[b])
+            part.centre_rows = self.centre_rows[a:b]
+            part.pair_offsets = self.pair_offsets[a * nb : b * nb + 1] - p0
+            part.nbr_rows = self.nbr_rows[p0:p1]
+            part.phi_c = self.phi_c[p0:p1]
+            part.phi_n = self.phi_n[p0:p1]
+            part._dev = None
+            part._norm_cache.clear()
 
     def prepare(self) -> None:
-        """Upload the pair geometry to the backend device (idempotent)."""
+        """Upload the pair geometry to the backend device(s) (idempotent)."""
+        if self._parts:
+            if self.pair_offsets is None:
+                raise RuntimeError(
+                    "no pair geometry: call preprocess() or load_pairs() first"
+                )
+            run_on_devices(self._parts, lambda part, _i: part.prepare())
+            return
         if self._dev is not None:
             return
         if self.pair_offsets is None:
@@ -400,6 +472,7 @@ class Global3PCF:
             self.phi_n = fp["phi_n"][:].astype(self.rotation_dtype)
         self._dev = None
         self._norm_cache.clear()
+        self._distribute()
         self.prepare()
 
     # ------------------------------------------------------------------ #
@@ -669,6 +742,20 @@ class Global3PCF:
         ``components``: which field sits at which vertex (see
         :class:`Component`).
         """
+        if self._parts:
+            require_host_arrays(
+                "measure", [a for v, w, _s in fields.values() for a in (v, w)]
+            )
+            results = run_on_devices(
+                self._parts,
+                lambda part, _i: part.measure(
+                    fields, components, flip_g1=flip_g1, flip_g2=flip_g2
+                ),
+            )
+            total: ThreePointResult = results[0]
+            for res in results[1:]:
+                total = total + res
+            return total
         signs = (-1.0 if flip_g1 else 1.0, -1.0 if flip_g2 else 1.0)
         flist = [
             self._field(name, v, w, int(s), signs=signs if int(s) == 2 else (1.0, 1.0))
