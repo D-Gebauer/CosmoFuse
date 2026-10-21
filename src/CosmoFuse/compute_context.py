@@ -20,6 +20,49 @@ from typing import Any, Dict, Tuple
 class ComputeContext:
     """Owns runtime device buffers and lightweight caches."""
 
+    # Every runtime attribute, set by ``initialize_runtime_state`` from the
+    # defaults below (device arrays are cupy or numpy, hence ``Any``).
+    inds_dev: Any
+    inds_i_dev: Any
+    inds_j_dev: Any
+    exp2phi_dev: Any
+    bins_dev: Any
+    tot_bins_dev: Any
+    tot_bins_reduceat_dev: Any
+    ntotpairs: int
+    packed_pairs_dev: Any
+    packed_row_base_dev: Any
+    packed_perm_dev: Any
+    row_pix_dev: Any
+    Q_rows_flat: Any
+    degrade_ops: Any
+    degrade_csr: Any
+    frozen_map_memo: Any
+    _tomo_sumofweights_cache: Any
+    _tomo_sumofweights_cache_w_fingerprint: Any
+    _tomo_sumofweights_cache_prepare_version: Any
+    _xipm_sumofweights_cache: Any
+    _xipm_sumofweights_cache_w_fingerprint: Any
+    _xipm_sumofweights_cache_prepare_version: Any
+    pair_scratch: Any
+    aperture_scratch: Any
+    unit_weights_cache: Any
+    Q_inds_flat: Any
+    Q_cos_flat: Any
+    Q_sin_flat: Any
+    Q_val_flat: Any
+    Q_offsets: Any
+    Q_patch_area_flat: Any
+    Q_inds_dev: Any
+    Q_cos_dev: Any
+    Q_sin_dev: Any
+    Q_val_dev: Any
+    Q_offsets_dev: Any
+    Q_patch_area_dev: Any
+    fused_output_buffers: Any
+    prepare_version: int
+    tomo_combination_cache: Dict[Any, Any]
+
     # Pair geometry on device: pixel indices, rotation factors e^{2iφ},
     # bin offsets (CSR format), and total pair count
     _PREPARED_DEFAULTS: Tuple[Tuple[str, Any], ...] = (

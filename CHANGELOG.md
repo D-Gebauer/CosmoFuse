@@ -1,5 +1,33 @@
 # Changelog
 
+## 7.5.0 (2026-10-21)
+
+**`mypy --strict` passes, and the package ships a `py.typed` marker**, so type
+checkers use CosmoFuse's annotations in downstream code. No numerical change:
+every public GPU path is bitwise identical to 7.3.0/7.4.0.
+
+- `pyproject.toml` sets `strict = true` (it listed most strict flags but not
+  all, and `mypy src` reported 349 errors; 374 under `--strict`). healpy,
+  h5py, cupy and tqdm ship no type information and are typed as `Any`.
+- Annotations that were wrong, now fixed: functions that return a cupy array
+  with `return_device=True` were annotated `np.ndarray` (`m_a`, `m_g`, the
+  `zeta_*` methods and functions, the private pair paths) and are now `Any`;
+  the aperture filters `Q_crittenden`, `U_crittenden` and `Q_schneider`
+  take arrays as well as floats; `_compute_pairs_impl` returns 7 arrays, not 8.
+- `ComputeContext` declares its runtime attributes; `pair_inds`,
+  `pair_exp2phi` and `bins` are `Optional` (they are `None` after
+  `prepare(release_host_pairs=True)`), checked where they are used.
+- The launch wrappers' run-time switches (`kernel.tiled`, and `mode` /
+  `max_accumulators` of the single-pass 3x2pt tile) are attributes of small
+  wrapper classes (`backend.combinations.TiledWrapper`, `SinglePassWrapper`)
+  instead of attributes set on functions; usage is unchanged.
+- `numba.prange` is typed through `CosmoFuse._numba` (an alias of `range`
+  for the type checker, the real `prange` at run time).
+- CI gains a `lint` job (`make lint`: black, isort, flake8, mypy) with the
+  linters, numpy, numba, scipy and `scipy-stubs` pinned (checked in a clean
+  Python 3.12 venv), so the count cannot creep back up. `scipy-stubs` joins
+  the `dev` extras.
+
 ## 7.4.0 (2026-10-21)
 
 **Typed CUDA launches; `backend.py` split into a package.** No numerical

@@ -507,7 +507,10 @@ class Global2PCF:
                 "them before save_pairs()."
             )
         # the tiles of all devices, in tile order
-        bins = [b for eng in self._engines for b in eng.bins]
+        bins: List[np.ndarray] = []
+        for eng in self._engines:
+            assert eng.bins is not None  # checked above
+            bins.extend(eng.bins)
         counts = np.array([int(np.sum(b, dtype=np.int64)) for b in bins], np.int64)
         offsets = np.concatenate(([0], np.cumsum(counts)))
         with h5py.File(filepath, "w") as fp:
@@ -553,8 +556,12 @@ class Global2PCF:
     def _write_exact(self, fp: h5py.File, offsets: np.ndarray) -> None:
         """Per tile into preallocated datasets (no catalogue-sized copy)."""
         e = self._engine
-        pair_inds = [p for eng in self._engines for p in eng.pair_inds]
-        pair_exp2phi = [p for eng in self._engines for p in eng.pair_exp2phi]
+        pair_inds: List[np.ndarray] = []
+        pair_exp2phi: List[np.ndarray] = []
+        for eng in self._engines:
+            assert eng.pair_inds is not None and eng.pair_exp2phi is not None
+            pair_inds.extend(eng.pair_inds)
+            pair_exp2phi.extend(eng.pair_exp2phi)
         n = int(offsets[-1])
         d_inds = fp.create_dataset("pair_inds", shape=(2, n), dtype=e.index_dtype)
         d_exp = fp.create_dataset(

@@ -9,7 +9,7 @@ buffers are first used.  On CPU backends every operation degrades to a
 plain copy, so the same driver loop runs everywhere.
 """
 
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
@@ -60,7 +60,7 @@ class MapLoader:
         ]
         self.slot = 0
         self.event: Optional[Any] = None
-        self._slot_events: list = [None, None]
+        self._slot_events: List[Any] = [None, None]
 
     def stage(self, host_arrays: Mapping[str, Any]) -> int:
         """Enqueue the async host→device copy of *host_arrays* into the
@@ -161,7 +161,8 @@ class MapFileLoader:
         self._gpu = self.backend.name == "cupy" and hasattr(
             getattr(self.backend.module, "cuda", None), "Stream"
         )
-        self.stream = (
+        # None on the CPU path, which never touches it
+        self.stream: Any = (
             self.backend.create_stream(non_blocking=True) if self._gpu else None
         )
         self.host = [
@@ -172,8 +173,8 @@ class MapFileLoader:
             {k: self.backend.zeros(s, dtype=dtype) for k, s in shapes.items()}
             for _ in range(n_slots)
         ]
-        self._released = [None] * n_slots  # compute-stream events
-        self._uploaded = [None] * n_slots  # upload-stream events
+        self._released: List[Any] = [None] * n_slots  # compute-stream events
+        self._uploaded: List[Any] = [None] * n_slots  # upload-stream events
 
     def __len__(self) -> int:
         return len(self.sources)
@@ -187,7 +188,12 @@ class MapFileLoader:
         free = list(range(n_slots))
         ready: Dict[int, Tuple[int, Any]] = {}
         # "taken": number of maps handed to the consumer so far
-        state = {"error": None, "stop": False, "next_claim": 0, "taken": 0}
+        state: Dict[str, Any] = {
+            "error": None,
+            "stop": False,
+            "next_claim": 0,
+            "taken": 0,
+        }
         upload_lock = threading.Lock()
 
         def reader() -> None:

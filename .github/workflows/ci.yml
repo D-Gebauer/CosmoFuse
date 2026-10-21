@@ -7,6 +7,29 @@ on:
     branches: [ "main", "master" ]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+
+    - name: Install linters
+      # Pinned to the versions the tree is checked with locally: a newer
+      # black restyles, and newer numpy stubs or mypy report new errors, for
+      # reasons that have nothing to do with a change under review.
+      run: |
+        pip install --upgrade pip
+        pip install -e . numpy==2.4.6 numba==0.66.0 scipy==1.18.1 scipy-stubs==1.18.1.0 \
+          black==26.10.1 isort==9.0.1 flake8==7.3.0 mypy==2.3.1
+
+    - name: black, isort, flake8, mypy --strict
+      run: make lint
+
   test:
     runs-on: ubuntu-latest
     strategy:

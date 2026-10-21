@@ -118,8 +118,9 @@ def effective_resolution_factor(
     binedges: np.ndarray, level_nside: np.ndarray
 ) -> np.ndarray:
     """theta_lo / pixel size for every bin."""
-    resol = np.array([hp.nside2resol(int(ns)) for ns in level_nside])
-    return np.asarray(binedges[:-1], dtype=np.float64) / resol
+    resol = np.array([hp.nside2resol(int(ns)) for ns in level_nside], dtype=np.float64)
+    factor: np.ndarray = np.asarray(binedges[:-1], dtype=np.float64) / resol
+    return factor
 
 
 # ── analytic pair-count model (preflight) ─────────────────────────────────
@@ -210,7 +211,7 @@ def build_patch_cells(
         cell_ids, inv_fine = np.unique(parent_of_fine, return_inverse=True)
         n_cells = int(cell_ids.size)
 
-        cvec = np.stack(
+        cvec: np.ndarray = np.stack(
             [np.bincount(inv_fine, weights=vec[k], minlength=n_cells) for k in range(3)]
         )
         norm = np.sqrt(np.sum(cvec * cvec, axis=0))

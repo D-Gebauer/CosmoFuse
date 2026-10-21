@@ -75,6 +75,7 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Tomographic measurements of all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
 - Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
+- Fully type-annotated (`mypy --strict` clean, ships `py.typed`)
 
 ## Installation
 Requires Python >= 3.12. Install using:

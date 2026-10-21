@@ -171,8 +171,7 @@ class MultiDeviceIntegrated3PCF:
                 phi[a:b],
                 theta[a:b],
                 *args,
-                device=dev,
-                **kwargs,
+                **dict(kwargs, device=dev),
             )
             for dev, (a, b) in zip(ids, self.patch_ranges)
         ]

@@ -1,6 +1,6 @@
 import itertools
 import weakref
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, cast
 
 import healpy as hp
 import numpy as np
@@ -9,7 +9,7 @@ from .correlation_helpers import Q_crittenden
 
 
 def pixel2RaDec(
-    pixel_indices: Union[int, np.ndarray], NSIDE: int
+    pixel_indices: Union[int, np.ndarray, Sequence[int]], NSIDE: int
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert pixel indices to right ascension and declination.
 
@@ -20,8 +20,9 @@ def pixel2RaDec(
     Returns:
         Tuple of (ra, dec) in radians
     """
+    pix_for_healpy: Union[int, np.ndarray]
     if np.isscalar(pixel_indices):
-        pix_for_healpy = int(pixel_indices)
+        pix_for_healpy = int(cast(int, pixel_indices))
     else:
         pix_arr = np.asarray(pixel_indices)
         if np.issubdtype(pix_arr.dtype, np.unsignedinteger):

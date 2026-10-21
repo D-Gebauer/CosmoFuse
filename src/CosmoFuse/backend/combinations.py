@@ -6,7 +6,7 @@ is classified against it once and, when it is a subset, gathered from a
 canonical temporary.
 """
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Tuple, cast
 
 import numpy as np
 
@@ -37,6 +37,35 @@ class _CombinationLayout:
         self.mode = mode  # "triangle" | "auto" | "cartesian"
         self.canonical_ncomb = canonical_ncomb  # rows the tile produces
         self.rows = rows  # canonical row per request, None = identity
+
+
+class TiledWrapper:
+    """A pair-kernel launch wrapper whose combination-tiled kernel can be
+    switched off: ``tiled = False`` forces the per-(bin, row) fallback
+    (tests and benchmarks compare the two)."""
+
+    def __init__(self, launch: Callable[..., bool]) -> None:
+        self.tiled = True
+        self._launch = launch
+
+    def __call__(self, *args: Any) -> bool:
+        return self._launch(*args)
+
+
+class SinglePassWrapper:
+    """The launch wrapper of the single-pass 3x2pt tile.  ``mode``:
+    ``"auto"`` (within ``max_accumulators``), ``"single"`` (always, for
+    benchmarks) or ``"off"``; it returns which of (ξ±, ξ_g, ξ_t) it computed."""
+
+    def __init__(
+        self, launch: Callable[..., Tuple[bool, bool, bool]], max_accumulators: int
+    ) -> None:
+        self.mode = "auto"
+        self.max_accumulators = max_accumulators
+        self._launch = launch
+
+    def __call__(self, *args: Any) -> Tuple[bool, bool, bool]:
+        return self._launch(*args)
 
 
 _COMBINATION_LAYOUT_CACHE: dict[
@@ -80,7 +109,7 @@ def _combination_layout(
     )
     cached = _COMBINATION_LAYOUT_CACHE.get(key, _KERNEL_CACHE_MISS)
     if cached is not _KERNEL_CACHE_MISS:
-        return cached
+        return cast(Optional[_CombinationLayout], cached)
 
     def to_host(a: Any) -> np.ndarray:
         return np.asarray(a.get() if hasattr(a, "get") else a).astype(np.int64)

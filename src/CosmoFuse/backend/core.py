@@ -79,7 +79,7 @@ def _build_safe_divide_kernel(module: Any) -> Any:
 
 
 def _is_device_array(module: Any, array: Any) -> bool:
-    return type(array).__module__.split(".")[0] == module.__name__.split(".")[0]
+    return bool(type(array).__module__.split(".")[0] == module.__name__.split(".")[0])
 
 
 def safe_divide(
@@ -152,35 +152,41 @@ class Backend:
         degrade_rows_kernel: Optional[Any] = None,
         kernel_3pcf_multipoles: Optional[Any] = None,
     ) -> None:
+        # Kernel slots are Any: a Numba dispatcher, a CuPy kernel, a launch
+        # wrapper, or None where the backend has no such kernel.
         self.name = name
         self.module = module
         self.device_id = device_id
-        self.xipm_cross_corr_kernel = xipm_cross_corr_kernel
-        self.xipm_auto_corr_kernel = xipm_auto_corr_kernel
-        self.xipm_tomo_vectorized_kernel = xipm_tomo_vectorized_kernel
-        self.xipm_tomo_packed_kernel = xipm_tomo_packed_kernel
-        self.aperture_density_kernel = aperture_density_kernel
-        self.aperture_shear_kernel = aperture_shear_kernel
-        self.aperture_tomo_shear_kernel = aperture_tomo_shear_kernel
-        self.aperture_tomo_density_kernel = aperture_tomo_density_kernel
-        self.kernel_density_density = kernel_density_density
-        self.kernel_density_shear = kernel_density_shear
-        self.kernel_density_density_tomo_vectorized = (
+        self.xipm_cross_corr_kernel: Any = xipm_cross_corr_kernel
+        self.xipm_auto_corr_kernel: Any = xipm_auto_corr_kernel
+        self.xipm_tomo_vectorized_kernel: Any = xipm_tomo_vectorized_kernel
+        self.xipm_tomo_packed_kernel: Any = xipm_tomo_packed_kernel
+        self.aperture_density_kernel: Any = aperture_density_kernel
+        self.aperture_shear_kernel: Any = aperture_shear_kernel
+        self.aperture_tomo_shear_kernel: Any = aperture_tomo_shear_kernel
+        self.aperture_tomo_density_kernel: Any = aperture_tomo_density_kernel
+        self.kernel_density_density: Any = kernel_density_density
+        self.kernel_density_shear: Any = kernel_density_shear
+        self.kernel_density_density_tomo_vectorized: Any = (
             kernel_density_density_tomo_vectorized
         )
-        self.kernel_density_shear_tomo_vectorized = kernel_density_shear_tomo_vectorized
-        self.kernel_density_density_tomo_packed = kernel_density_density_tomo_packed
-        self.kernel_density_shear_tomo_packed = kernel_density_shear_tomo_packed
+        self.kernel_density_shear_tomo_vectorized: Any = (
+            kernel_density_shear_tomo_vectorized
+        )
+        self.kernel_density_density_tomo_packed: Any = (
+            kernel_density_density_tomo_packed
+        )
+        self.kernel_density_shear_tomo_packed: Any = kernel_density_shear_tomo_packed
         # CPU: the Numba kernel computing all six 3x2pt outputs.  GPU: the
         # aperture sections; the pair statistics use the tiled pair kernels.
-        self.kernel_3x2pt_tomo_fused = kernel_3x2pt_tomo_fused
-        self.kernel_3x2pt_tomo_aperture = kernel_3x2pt_tomo_aperture
-        self.kernel_3x2pt_tomo_pairs = kernel_3x2pt_tomo_pairs
+        self.kernel_3x2pt_tomo_fused: Any = kernel_3x2pt_tomo_fused
+        self.kernel_3x2pt_tomo_aperture: Any = kernel_3x2pt_tomo_aperture
+        self.kernel_3x2pt_tomo_pairs: Any = kernel_3x2pt_tomo_pairs
         # Fused static-treecode row degrade (None on CPU / without a
         # raw compiler; the sparse chain is then used instead).
-        self.degrade_rows_kernel = degrade_rows_kernel
+        self.degrade_rows_kernel: Any = degrade_rows_kernel
         # Step 1 of the multipole three-point estimator (Global3PCF).
-        self.kernel_3pcf_multipoles = kernel_3pcf_multipoles
+        self.kernel_3pcf_multipoles: Any = kernel_3pcf_multipoles
 
         self.asarray = module.asarray
         self.zeros = module.zeros
@@ -225,8 +231,8 @@ class Backend:
         elif self.name == "cupy":
             if stream is not None:
                 with stream:
-                    return self.module.asnumpy(array)
-            return self.module.asnumpy(array)
+                    return np.asarray(self.module.asnumpy(array))
+            return np.asarray(self.module.asnumpy(array))
         return np.asarray(array)
 
     def get_memory_pool(self) -> Optional[Any]:
@@ -536,7 +542,7 @@ def get_backend(device: Union[str, int] = "auto") -> "Backend":
             kernel_3pcf_multipoles=_cpu_3pcf_multipoles,
         )
 
-    elif device_type == "gpu":
+    else:  # device_type == "gpu"
         try:
             import cupy
 

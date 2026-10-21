@@ -33,12 +33,12 @@ returns the *full* angles (needed for odd multipoles) at both ends.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, cast
 
 import healpy as hp
 import numpy as np
-from numba import njit, prange
 
+from ._numba import njit, prange
 from .treecode import is_power_of_two
 
 # ── tiles ─────────────────────────────────────────────────────────────────
@@ -397,8 +397,9 @@ def unique_pairs(
     fastmath: bool = True,
 ) -> Tuple[np.ndarray, ...]:
     cos_edges = np.cos(np.asarray(binedges, dtype=core_xyz.dtype))
-    return _kernel("unique", fastmath)(
-        core_ids, core_xyz, cand_ids, cand_xyz, cos_edges
+    return cast(
+        Tuple[np.ndarray, ...],
+        _kernel("unique", fastmath)(core_ids, core_xyz, cand_ids, cand_xyz, cos_edges),
     )
 
 
@@ -411,6 +412,7 @@ def ordered_pairs(
     fastmath: bool = True,
 ) -> Tuple[np.ndarray, ...]:
     cos_edges = np.cos(np.asarray(binedges, dtype=core_xyz.dtype))
-    return _kernel("ordered", fastmath)(
-        core_ids, core_xyz, cand_ids, cand_xyz, cos_edges
+    return cast(
+        Tuple[np.ndarray, ...],
+        _kernel("ordered", fastmath)(core_ids, core_xyz, cand_ids, cand_xyz, cos_edges),
     )

@@ -233,7 +233,8 @@ class Global3PCF:
         self.phi_c: Optional[np.ndarray] = None
         self.phi_n: Optional[np.ndarray] = None
         self._dev: Optional[Dict[str, Any]] = None
-        self._norm_cache: Dict[Any, Dict[str, Any]] = {}
+        # weights key -> {component fields: normalisation multipoles}
+        self._norm_cache: Dict[Any, Dict[Tuple[str, str, str], Any]] = {}
 
     # ------------------------------------------------------------------ #
     # geometry
@@ -637,6 +638,7 @@ class Global3PCF:
         # centres are subtracted once at the end.
         acc: Dict[str, Any] = {}
         deg: Dict[str, Any] = {}
+        assert self.centre_rows is not None  # prepared
         n_centres = int(self.centre_rows.size)
         idx_cache: Dict[Tuple[int, ...], Any] = {}
 
@@ -786,7 +788,7 @@ class Global3PCF:
         return derived
 
     def _weights_key(self, fields: Sequence[_Field]) -> Tuple[Any, ...]:
-        key = []
+        key: List[Tuple[Any, ...]] = []
         for f in fields:
             if self._is_device_array(f.w):
                 key.append((f.name, "dev", live_object_serial(f.w), tuple(f.w.shape)))

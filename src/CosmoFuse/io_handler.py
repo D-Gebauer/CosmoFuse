@@ -59,12 +59,15 @@ class PairIOHandler:
             )
 
         n_patches = owner.n_patches
+        assert owner.bins is not None
         if packed:
+            assert owner.packed_pairs is not None
             pair_counts = np.array(
                 [owner.packed_pairs[i].shape[0] for i in range(n_patches)],
                 dtype=np.int64,
             )
         else:
+            assert owner.pair_inds is not None and owner.pair_exp2phi is not None
             pair_counts = np.array(
                 [owner.pair_inds[i].shape[1] for i in range(n_patches)], dtype=np.int64
             )
@@ -149,6 +152,7 @@ class PairIOHandler:
             if packed:
                 PairIOHandler._save_packed_pairs(owner, fp, pair_offsets, total_pairs)
             else:
+                assert owner.pair_inds is not None and owner.pair_exp2phi is not None
                 d_inds = fp.create_dataset(
                     pair_name, shape=(2, total_pairs), dtype=owner.pair_inds[0].dtype
                 )
@@ -200,6 +204,9 @@ class PairIOHandler:
         like any other.
         """
         n_patches = owner.n_patches
+        assert owner.packed_pairs is not None
+        assert owner.packed_block_ids is not None
+        assert owner.packed_block_sizes is not None
         if n_patches:
             block_sizes = np.stack(
                 [np.asarray(s, dtype=np.int64) for s in owner.packed_block_sizes]
@@ -294,8 +301,8 @@ class PairIOHandler:
         """
         file_k = fp.attrs.get("resolution_factor", None)
         file_k = None if file_k is None else float(file_k)
-        file_ap = int(fp.attrs.get("aperture_nside", owner.nside))
-        file_ap = None if file_ap == int(owner.nside) else file_ap
+        file_ap_nside = int(fp.attrs.get("aperture_nside", owner.nside))
+        file_ap = None if file_ap_nside == int(owner.nside) else file_ap_nside
         if "level_nside" in fp:
             file_levels = fp["level_nside"][:].astype(np.int64)
         else:
@@ -400,6 +407,7 @@ class PairIOHandler:
             ps, pe = int(pair_offsets[i]) - p0, int(pair_offsets[i + 1]) - p0
             qs, qe = int(q_offsets[i]) - q0, int(q_offsets[i + 1]) - q0
             if not packed:
+                assert owner.pair_inds is not None and owner.pair_exp2phi is not None
                 owner.pair_inds.append(pair_inds_flat[:, ps:pe])
                 owner.pair_exp2phi.append(pair_exp2phi_flat[:, ps:pe])
             owner.bins.append(bins_arr[i - start_ind])

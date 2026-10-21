@@ -2,13 +2,13 @@ import hashlib
 import logging
 import weakref
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import healpy as hp
 import numpy as np
-from numba import njit, prange
 from scipy.special import binom
 
+from ._numba import njit, prange
 from .backend import get_backend, safe_divide
 from .compute_context import ComputeContext
 from .correlation_helpers import calculate_all_zetas as _calculate_all_zetas_helper
@@ -109,7 +109,6 @@ def _compute_pairs_impl(
     dec: np.ndarray,
     binedges: np.ndarray,
 ) -> Tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -332,7 +331,8 @@ def _normalize_precision(
             f"{name} must be one of {list(allowed.keys())}; got {precision!r}"
         )
 
-    return np.dtype(allowed[precision_name])
+    dtype: np.dtype[Any] = np.dtype(allowed[precision_name])
+    return dtype
 
 
 class Integrated3PCF:
@@ -360,6 +360,11 @@ class Integrated3PCF:
         map_precision: Float precision for map/shear/weight arrays.
         rotation_precision: Float precision for rotation/filter values.
     """
+
+    # Set while an ``_expansion_scope()`` is open (absent otherwise).
+    _expansion_depth: int
+    _expansion_memo: Optional[Dict[Any, Any]]
+    _expansion_layout: Optional[str]
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Any:
         """``device=[0, 1, ...]`` builds a patch-parallel multi-GPU group.
@@ -588,7 +593,9 @@ class Integrated3PCF:
                 raise ValueError(
                     "Mask length must match number of pixels for given nside"
                 )
-            self.map_inds = np.where(mask)[0].astype(self.index_dtype, copy=False)
+            self.map_inds: np.ndarray = np.where(mask)[0].astype(
+                self.index_dtype, copy=False
+            )
         else:
             self.map_inds = np.arange(hp.nside2npix(self.nside), dtype=self.index_dtype)
         self.map_mask = np.zeros(hp.nside2npix(self.nside), dtype=bool)
@@ -598,13 +605,15 @@ class Integrated3PCF:
             # a single-element device list is just that device; several
             # devices are handled by MultiDeviceIntegrated3PCF (see __new__)
             device = list(device)[0]
-        self.backend = get_backend(device)
-        self.device = device
+        self.device: Union[str, int] = cast(Union[str, int], device)
+        self.backend = get_backend(self.device)
         self.compute_context = ComputeContext()
 
-        self.pair_inds = []
-        self.pair_exp2phi = []
-        self.bins = []
+        # Per patch; None once released by prepare(release_host_pairs=True)
+        # (pack_host_pairs also drops each patch's entry once it is packed).
+        self.pair_inds: Optional[List[Any]] = []
+        self.pair_exp2phi: Optional[List[Any]] = []
+        self.bins: Optional[List[np.ndarray]] = []
         # Aperture geometry, filled by find_aperture_pairs()/load_pairs().
         # Empty rather than absent: ensure_aperture_pairs() reads Q_inds to
         # decide whether the cached geometry can be reused, so without these
@@ -1004,7 +1013,7 @@ class Integrated3PCF:
     ) -> Tuple[Any, Any, np.ndarray]:
         cached = self.compute_context.tomo_combination_cache.get(nzbins)
         if cached is not None:
-            return cached
+            return cast(Tuple[Any, Any, np.ndarray], cached)
 
         comb_i_np = np.zeros(nzbin_combs, dtype=np.int32)
         comb_j_np = np.zeros(nzbin_combs, dtype=np.int32)
@@ -1030,7 +1039,7 @@ class Integrated3PCF:
         cache_key = ("cross", nlens_bins, nsource_bins)
         cached = self.compute_context.tomo_combination_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return cast(Tuple[Any, Any], cached)
 
         ncomb = nlens_bins * nsource_bins
         comb_i_np = np.zeros(ncomb, dtype=np.int32)
@@ -1075,7 +1084,7 @@ class Integrated3PCF:
         cache_key = ("density", nzbins, bool(gc_auto_correlations_only))
         cached = self.compute_context.tomo_combination_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return cast(Tuple[Any, Any, np.ndarray, int], cached)
 
         if gc_auto_correlations_only:
             ncomb = nzbins
@@ -1211,8 +1220,9 @@ class Integrated3PCF:
         ctx = self.compute_context
         cached = getattr(ctx, "Q_rows_flat", None)
         if cached is not None and cached[0] is self.Q_inds_flat:
-            return cached[1]
+            return cast(np.ndarray, cached[1])
         lut = self._global_to_row_lut()
+        rows: np.ndarray
         if lut is None:
             rows = self.Q_inds_flat
         else:
@@ -1382,7 +1392,7 @@ class Integrated3PCF:
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
         g1_arr = self._coerce_map_input_array(g1)
         g2_arr = self._coerce_map_input_array(g2)
@@ -1394,7 +1404,7 @@ class Integrated3PCF:
 
     def _aperture_shear_rows(
         self, g1_arr: Any, g2_arr: Any, w_arr: Any, return_device: bool = True
-    ) -> np.ndarray:
+    ) -> Any:
         """Aperture mass of one map whose virtual rows are already appended."""
         kernel = getattr(self.backend, "aperture_shear_kernel", None)
         if kernel is None:
@@ -1490,7 +1500,7 @@ class Integrated3PCF:
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
 
         map_values_arr = self._coerce_map_input_array(map_values)
@@ -1502,7 +1512,7 @@ class Integrated3PCF:
 
     def _aperture_density_rows(
         self, map_values_arr: Any, w_arr: Any, return_device: bool = True
-    ) -> np.ndarray:
+    ) -> Any:
         """Aperture density of one map whose virtual rows are already appended."""
         kernel = getattr(self.backend, "aperture_density_kernel", None)
         if kernel is None:
@@ -1601,13 +1611,15 @@ class Integrated3PCF:
                 "unavailable; reload or recompute pairs before prepare()."
             )
 
+        bins = self.bins
+        assert bins is not None  # host_pairs_available
         size = 0
         ninds = []
         for i in range(self.n_patches):
             # int(): np.sum over unsigned bins yields uint64, and under
             # legacy (numpy<2) promotion `int + uint64` silently becomes
             # float64, which is later rejected as an array shape.
-            patchsize = int(np.sum(self.bins[i]))
+            patchsize = int(np.sum(bins[i]))
             size += patchsize
             ninds.append(patchsize)
 
@@ -1667,16 +1679,17 @@ class Integrated3PCF:
                     packed[lo:hi] = packed_i
                 if keep_unpacked:
                     temp_inds[:, lo:hi] = unpack_rows(
-                        packed_i, blocks, self.bins[i], groups, self.index_dtype
+                        packed_i, blocks, bins[i], groups, self.index_dtype
                     )
                     temp_exp2phi[:, lo:hi] = decode_angles(
                         packed_i[:, 2:].T, self.rotation_complex_dtype
                     )
             elif pack:
+                assert self.pair_inds is not None and self.pair_exp2phi is not None
                 _, id_blocks, _ = pack_patch(
                     self.pair_inds[i],
                     self.pair_exp2phi[i],
-                    self.bins[i],
+                    bins[i],
                     groups,
                     out=packed[lo:hi],
                 )
@@ -1687,6 +1700,7 @@ class Integrated3PCF:
                         packed[lo:hi, 2:].T, self.rotation_complex_dtype
                     )
             else:
+                assert self.pair_inds is not None and self.pair_exp2phi is not None
                 temp_inds[:, lo:hi] = self._pair_ids_to_rows(self.pair_inds[i], lut)
                 temp_exp2phi[:, lo:hi] = self.pair_exp2phi[i]
             return blocks
@@ -1702,9 +1716,9 @@ class Integrated3PCF:
                 ]
                 packed_blocks.extend(blocks)
                 n_packed_rows += int(sizes.sum())
-            temp_bins[i * self.nbins : (i + 1) * self.nbins] = self.bins[i]
+            temp_bins[i * self.nbins : (i + 1) * self.nbins] = bins[i]
             temp_bins_tot[1 + i * self.nbins : 1 + (i + 1) * self.nbins] = (
-                first_patch_ind[i] + np.cumsum(self.bins[i], dtype=np.int64)
+                first_patch_ind[i] + np.cumsum(bins[i], dtype=np.int64)
             )
         # free the npix-sized lookup table before the uploads
         lut = None
@@ -2355,14 +2369,14 @@ class Integrated3PCF:
         return val.reshape((self.n_patches, self.nbins))
 
     def _normalize_tomo_sumofweights_per_comb(
-        self, sumofweights: Union[np.ndarray, float], nzbin_combs: int
+        self, sumofweights: Any, nzbin_combs: int
     ) -> Any:
         nbins_total = self.n_patches * self.nbins
         if self._is_backend_native_array(sumofweights):
             # Device arrays whose shape already matches an accepted layout
             # are reshaped on device — no GPU→host round-trip.
             backend_dtype = getattr(self.backend.module, self.map_dtype.name)
-            s = sumofweights
+            s: Any = sumofweights
             if s.ndim == 2 and s.shape == (nzbin_combs, nbins_total):
                 return s.astype(backend_dtype, copy=False)
             if s.ndim == 3 and s.shape == (nzbin_combs, self.n_patches, self.nbins):
@@ -2445,7 +2459,7 @@ class Integrated3PCF:
         return False
 
     def _normalize_tomo_sumofweights_directional(
-        self, sumofweights: Union[np.ndarray, float], nzbin_combs: int
+        self, sumofweights: Any, nzbin_combs: int
     ) -> Any:
         """Accept either one sum per combination or one per orientation.
 
@@ -2576,7 +2590,7 @@ class Integrated3PCF:
             live_object_serial(self.map_inds),
         )
         if cache is not None and cache[0] == key:
-            return cache[1]
+            return cast(Tuple[np.ndarray, np.ndarray, np.ndarray], cache[1])
         shift = 2 * (int(np.log2(self.nside)) - int(np.log2(self.aperture_nside)))
         nest = hp.ring2nest(self.nside, np.asarray(self.map_inds, dtype=np.int64))
         parent = hp.nest2ring(self.aperture_nside, nest >> shift)
@@ -2645,7 +2659,7 @@ class Integrated3PCF:
             # rows == pixels, and virtual row a has id npix + a == n_active + a
             return ids
         if self.n_appended == 0:
-            return lut[ids]
+            return cast(np.ndarray, lut[ids])
         npix = self.npix
         virtual = ids >= npix
         rows = lut[np.where(virtual, 0, ids)]
@@ -2672,7 +2686,7 @@ class Integrated3PCF:
         ``row_pix``) and row-space arrays (last axis ``n_active``; returned
         unchanged).  Works for host and device arrays.
         """
-        shape = getattr(array, "shape", ())
+        shape: Tuple[int, ...] = getattr(array, "shape", ())
         if len(shape) == 0:
             return array
         n_last = int(shape[-1])
@@ -2805,7 +2819,7 @@ class Integrated3PCF:
         kind = "cupy" if use_cupy else "numpy"
         ops = cache.get(kind)
         if ops is not None:
-            return ops
+            return cast(Dict[str, Any], ops)
 
         if use_cupy:
             import cupyx.scipy.sparse as sparse
@@ -2862,7 +2876,7 @@ class Integrated3PCF:
         ctx = self.compute_context
         cached = getattr(ctx, "degrade_csr", None)
         if cached is not None:
-            return cached
+            return cast(Dict[str, Any], cached)
         xp = self.backend.module
 
         def dev(indptr: Any, indices: Any) -> Tuple[Any, Any, int]:
@@ -2944,9 +2958,12 @@ class Integrated3PCF:
         call cost more than the multiply it feeds.
         """
         key = (tuple(float(s) for s in scales), np.dtype(dtype).name, xp is np)
-        cache = getattr(self, "_sign_scale_cache", None)
+        cache: Optional[Dict[Tuple[Tuple[float, ...], str, bool], Any]] = getattr(
+            self, "_sign_scale_cache", None
+        )
         if cache is None:
-            cache = self._sign_scale_cache = {}
+            cache = {}
+            self._sign_scale_cache = cache
         arr = cache.get(key)
         if arr is None:
             arr = cache[key] = xp.asarray(list(key[0]), dtype=dtype)
@@ -3677,7 +3694,7 @@ class Integrated3PCF:
             # inherit its digest.  Holding the reference costs nothing and
             # pins nothing.
             if cached is not None and cached[0]() is w_np:
-                return cached[1]
+                return cast(Tuple[Tuple[int, ...], str, str], cached[1])
         # blake2b accepts buffer-protocol objects: hashing a memoryview gives
         # the same digest as .tobytes() without the full byte copy.
         digest = hashlib.blake2b(memoryview(w_contiguous).cast("B")).hexdigest()
@@ -3688,9 +3705,7 @@ class Integrated3PCF:
             _FINGERPRINT_MEMO[memo_key] = (weakref.ref(w_np), result)
         return result
 
-    def _normalize_xipm_sumofweights(
-        self, sumofweights: Union[np.ndarray, float]
-    ) -> Any:
+    def _normalize_xipm_sumofweights(self, sumofweights: Any) -> Any:
         expected_size = self.n_patches * self.nbins
         if self._is_backend_native_array(sumofweights):
             # Device arrays are validated and reshaped from metadata only —
@@ -4199,7 +4214,7 @@ class Integrated3PCF:
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         """Tomographic aperture mass ``M_a`` at every patch centre.
 
         ``shear_maps``: ``(nz, 2, npix | n_active)``, ``w``: ``(nz, npix |
@@ -4285,7 +4300,7 @@ class Integrated3PCF:
         w: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         """Tomographic aperture density ``M_g`` at every patch centre.
 
         ``density_maps``, ``w``: ``(nz, npix | n_active)``.  Returns
@@ -4431,11 +4446,7 @@ class Integrated3PCF:
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-    ) -> Union[
-        np.ndarray,
-        Tuple[np.ndarray, np.ndarray],
-        Tuple[np.ndarray, np.ndarray, np.ndarray],
-    ]:
+    ) -> Any:
         """Compute full GGL tomography output.
 
         The ``flip_g1``/``flip_g2`` flags follow TreeCorr's sign convention,
@@ -4799,7 +4810,7 @@ class Integrated3PCF:
         sumofweights: Optional[np.ndarray] = None,
         gc_auto_correlations_only: bool = False,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         """Compute tomographic galaxy clustering w(theta).
 
         By default, computes upper-triangular tomographic pairs including cross-bin
@@ -4831,7 +4842,7 @@ class Integrated3PCF:
         flip_g1: bool = False,
         flip_g2: bool = False,
         return_device: bool = True,
-    ) -> np.ndarray:
+    ) -> Any:
         """Tomographic density-shear correlation, directional lens -> source.
 
         The first argument (`density_maps`) is always treated as the lens field and the
@@ -4904,35 +4915,35 @@ class Integrated3PCF:
             return self.backend.module.real(gammat)
         return np.real(self.backend.to_numpy(gammat))
 
-    def zeta_g_plus(self, M_g: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+    def zeta_g_plus(self, M_g: np.ndarray, xi_p: np.ndarray) -> Any:
         """Compute zeta_g_plus with g at center and xi+ on annulus."""
         return _zeta_g_plus_helper(M_g, xi_p)
 
-    def zeta_g_minus(self, M_g: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+    def zeta_g_minus(self, M_g: np.ndarray, xi_m: np.ndarray) -> Any:
         """Compute zeta_g_minus with g at center and xi- on annulus."""
         return _zeta_g_minus_helper(M_g, xi_m)
 
-    def zeta_a_plus(self, M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+    def zeta_a_plus(self, M_a: np.ndarray, xi_p: np.ndarray) -> Any:
         """Compute zeta_a_plus with a at center and xi+ on annulus."""
         return _zeta_a_plus_helper(M_a, xi_p)
 
-    def zeta_a_minus(self, M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+    def zeta_a_minus(self, M_a: np.ndarray, xi_m: np.ndarray) -> Any:
         """Compute zeta_a_minus with a at center and xi- on annulus."""
         return _zeta_a_minus_helper(M_a, xi_m)
 
-    def zeta_g_g(self, M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+    def zeta_g_g(self, M_g: np.ndarray, xi_g: np.ndarray) -> Any:
         """Compute zeta_g_g with g at center and galaxy auto-correlation on annulus."""
         return _zeta_g_g_helper(M_g, xi_g)
 
-    def zeta_a_g(self, M_a: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+    def zeta_a_g(self, M_a: np.ndarray, xi_g: np.ndarray) -> Any:
         """Compute zeta_a_g with a at center and galaxy auto-correlation on annulus."""
         return _zeta_a_g_helper(M_a, xi_g)
 
-    def zeta_g_t(self, M_g: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+    def zeta_g_t(self, M_g: np.ndarray, xi_t: np.ndarray) -> Any:
         """Compute zeta_g_t with g at center and tangential shear on annulus."""
         return _zeta_g_t_helper(M_g, xi_t)
 
-    def zeta_a_t(self, M_a: np.ndarray, xi_t: np.ndarray) -> np.ndarray:
+    def zeta_a_t(self, M_a: np.ndarray, xi_t: np.ndarray) -> Any:
         """Compute zeta_a_t with a at center and tangential shear on annulus."""
         return _zeta_a_t_helper(M_a, xi_t)
 
@@ -5016,6 +5027,8 @@ class Integrated3PCF:
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
         on_gpu = self.backend.name == "cupy"
+        aperture_kernel: Any = None
+        fused_kernel: Any = None
         if on_gpu:
             aperture_kernel = getattr(self.backend, "kernel_3x2pt_tomo_aperture", None)
             if aperture_kernel is None:

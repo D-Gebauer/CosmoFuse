@@ -8,11 +8,12 @@ GPU: per-pair ``ElementwiseKernel`` contributions and the combination-tiled
 from typing import Any
 
 import numpy as np
-from numba import njit, prange
 
+from .._numba import njit, prange
 from .combinations import (
     _MAX_TILED_ACCUMULATORS,
     _MAX_VECTOR_TOMO_BINS,
+    TiledWrapper,
     _combination_layout,
 )
 from .raw import (
@@ -321,7 +322,7 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
 
         layout = _combination_layout(comb_i, comb_j, "triangle", nzbins)
         if (
-            _cupy_tomo_vectorized_kernel.tiled
+            wrapper.tiled
             and layout is not None
             and layout.mode == "triangle"
             and layout.rows is None
@@ -384,8 +385,8 @@ def _build_cupy_tomo_vectorized_kernel(module: Any) -> Any:
         out_den[...] = tmp_den[0::2] + tmp_den[1::2]
         return True
 
-    _cupy_tomo_vectorized_kernel.tiled = True
-    return _cupy_tomo_vectorized_kernel
+    wrapper = TiledWrapper(_cupy_tomo_vectorized_kernel)
+    return wrapper
 
 
 def _build_cupy_tomo_packed_kernel(module: Any) -> Any:

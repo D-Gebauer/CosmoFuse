@@ -7,8 +7,8 @@ the block-reduced tomographic kernels of ``cuda/aperture_tomo.cu``.
 from typing import Any, Optional, Tuple
 
 import numpy as np
-from numba import njit, prange
 
+from .._numba import njit, prange
 from .raw import _CUPY_FASTMATH_OPTIONS, KernelFile, _has_raw_cuda_compiler, c_real
 
 # Beyond this many tomographic bins the fused aperture kernels (one block per

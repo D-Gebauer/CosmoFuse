@@ -13,7 +13,7 @@ Handles the spatial geometry needed for 2-point and aperture statistics:
   into tangential and cross components.
 """
 
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import healpy as hp
 import numpy as np
@@ -181,7 +181,7 @@ class PairGeometry:
         )
 
     @staticmethod
-    def preflight_pair_memory(owner: "Integrated3PCF") -> Optional[dict]:
+    def preflight_pair_memory(owner: "Integrated3PCF") -> Optional[Dict[str, Any]]:
         """Project the pair memory *before* pair finding and fail early.
 
         Uses the analytic pair-separation distribution of a disc with the
@@ -281,9 +281,12 @@ class PairGeometry:
         PairGeometry.preflight_pair_memory(owner)
 
         coarse = PairGeometry.coarse_nsides(owner)
-        pair_inds, pair_exp2phi, bins = [], [], []
+        pair_inds: List[Any] = []
+        pair_exp2phi: List[Any] = []
+        bins: List[np.ndarray] = []
         patch_cells: List[PatchCells] = []
         for i in trange(owner.n_patches, desc="2PCF pairs", unit=" patches"):
+            result: Tuple[Any, ...]
             if coarse:
                 result = PairGeometry.get_pairs_helper_levels(owner, i)
                 patch_cells.append(result[3])
@@ -346,17 +349,21 @@ class PairGeometry:
         """
         groups = level_groups(owner.level_nside)
 
+        assert owner.pair_inds is not None and owner.pair_exp2phi is not None
+        assert owner.bins is not None
+        pair_inds, pair_exp2phi, bins = owner.pair_inds, owner.pair_exp2phi, owner.bins
+
         def pack_one(i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
             out = pack_host_patch(
-                owner.pair_inds[i],
-                owner.pair_exp2phi[i],
-                owner.bins[i],
+                pair_inds[i],
+                pair_exp2phi[i],
+                bins[i],
                 groups,
                 owner.index_dtype,
             )
             # free the exact arrays of this patch as soon as it is packed
-            owner.pair_inds[i] = None
-            owner.pair_exp2phi[i] = None
+            pair_inds[i] = None
+            pair_exp2phi[i] = None
             return out
 
         out = map_patches(pack_one, owner.n_patches)
@@ -371,8 +378,8 @@ class PairGeometry:
         owner: "Integrated3PCF",
         pixels_RA_Q_patch: np.ndarray,
         pixels_dec_Q_patch: np.ndarray,
-        Q_patch_center_RA: float,
-        Q_patch_center_dec: float,
+        Q_patch_center_RA: Union[float, np.ndarray],
+        Q_patch_center_dec: Union[float, np.ndarray],
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute the aperture geometry for pixels relative to a patch centre.
@@ -468,6 +475,7 @@ class PairGeometry:
         cell_pix: np.ndarray,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        assert owner.aperture_nside is not None  # coarse aperture only
         nside_ap = int(owner.aperture_nside)
         pix_center = hp.ang2pix(nside_ap, owner.theta_center[i], owner.phi_center[i])
         disc = hp.query_disc(

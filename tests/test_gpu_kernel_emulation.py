@@ -79,7 +79,7 @@ def emulated_gpu(corr):
     calls = {name: 0 for name in _EMULATED_KERNEL_ATTRS}
 
     def _counting(name, wrapped):
-        if not isinstance(wrapped, types.FunctionType):
+        if not callable(wrapped):
             # a bundle of entry points (degrade_rows_kernel): count each
             proxy = types.SimpleNamespace()
             for attr in dir(wrapped):

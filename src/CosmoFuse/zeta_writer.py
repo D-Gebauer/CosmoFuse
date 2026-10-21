@@ -58,7 +58,7 @@ thread genuinely overlaps with the next map-set's kernels.
 import json
 import queue
 import threading
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple, cast
 
 import numpy as np
 
@@ -97,7 +97,7 @@ def _to_host(a: Any) -> np.ndarray:
     if _is_device_array(a):
         import cupy
 
-        return cupy.asnumpy(a)
+        return cast(np.ndarray, cupy.asnumpy(a))
     return np.asarray(a)
 
 

@@ -32,8 +32,8 @@ import math
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
-from numba import njit, prange
 
+from .._numba import njit, prange
 from .raw import KernelFile, _has_raw_cuda_compiler, c_real
 
 # Threads per block of the CUDA kernel (one block per centre).

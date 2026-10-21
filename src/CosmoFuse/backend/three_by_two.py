@@ -5,14 +5,15 @@ sections of ``cuda/tomo_fused_3x2pt.cu`` and the single-pass pair tile of
 ``cuda/tomo_tiled_3x2pt.cu`` (the standalone tiles cover what it cannot).
 """
 
-from typing import Any, Tuple
+from typing import Any, List, Tuple
 
 import numpy as np
-from numba import njit, prange
 
+from .._numba import njit, prange
 from .aperture import _use_fused_aperture
 from .combinations import (
     _MAX_TILED_3X2PT_ACCUMULATORS,
+    SinglePassWrapper,
     _combination_layout,
     _CombinationLayout,
     _scatter_canonical_rows,
@@ -256,7 +257,7 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
     build = KernelFile(module, "tomo_fused_3x2pt.cu", "Fused 3x2pt aperture")
     # One non-blocking stream per section, created lazily on first launch
     # (per device: each Backend instance gets its own builder closure).
-    section_streams: list = []
+    section_streams: List[Any] = []
 
     def _cupy_3x2pt_tomo_aperture_kernel(
         density_map: Any,
@@ -367,7 +368,7 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
     ) -> Tuple[bool, bool, bool]:
         """``geometry`` is ``(ind_i, ind_j, rot_i, rot_j)`` or, packed,
         ``(pairs, row_base)``."""
-        mode = _cupy_3x2pt_tomo_pairs_kernel.mode
+        mode = wrapper.mode
         if mode == "off" or not _has_raw_cuda_compiler(module):
             return none
         n_density = int(density_map.shape[1])
@@ -390,7 +391,7 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
             2 * dd.canonical_ncomb,
             2 * ds.canonical_ncomb,
         )
-        budget = _cupy_3x2pt_tomo_pairs_kernel.max_accumulators
+        budget = wrapper.max_accumulators
         if mode != "single" and n_ss + n_dd + n_ds > budget:
             return none
         do = (1, 1, 1)
@@ -464,6 +465,7 @@ def _build_cupy_3x2pt_tomo_pairs_kernel(module: Any) -> Any:
             _scatter_canonical_rows(module, ds, xit_den, out_xit_den)
         return (True, True, True)
 
-    _cupy_3x2pt_tomo_pairs_kernel.mode = "auto"
-    _cupy_3x2pt_tomo_pairs_kernel.max_accumulators = _MAX_TILED_3X2PT_ACCUMULATORS
-    return _cupy_3x2pt_tomo_pairs_kernel
+    wrapper = SinglePassWrapper(
+        _cupy_3x2pt_tomo_pairs_kernel, _MAX_TILED_3X2PT_ACCUMULATORS
+    )
+    return wrapper

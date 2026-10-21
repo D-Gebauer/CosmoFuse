@@ -290,7 +290,9 @@ class ThreePointResult:
         b = np.asarray(phi_edges[1:], dtype=np.float64)[:, None]
         nn = n[None, :].astype(np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
-            c = (np.exp(-1j * nn * a) - np.exp(-1j * nn * b)) / (2j * np.pi * nn)
+            c: np.ndarray = (np.exp(-1j * nn * a) - np.exp(-1j * nn * b)) / (
+                2j * np.pi * nn
+            )
         c[:, n == 0] = (b - a) / (2.0 * np.pi)
         return c
 

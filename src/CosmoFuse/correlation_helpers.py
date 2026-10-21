@@ -19,12 +19,12 @@ The eight estimators are:
 """
 
 import itertools
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 
-def _xp(*arrays: object) -> object:
+def _xp(*arrays: object) -> Any:
     """The array module owning ``arrays`` -- numpy, or cupy on a GPU.
 
     The zeta reduction is a handful of means over the patch axis, so it can
@@ -40,7 +40,7 @@ def _xp(*arrays: object) -> object:
     return np
 
 
-def Q_crittenden(theta: float, theta_Q: float = 90) -> float:
+def Q_crittenden(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
     """Exponential compensated aperture filter of Crittenden et al. (2002).
 
     Tangential-shear filter of the Gaussian compensated aperture:
@@ -76,7 +76,7 @@ def Q_crittenden(theta: float, theta_Q: float = 90) -> float:
     return theta**2 / (4 * np.pi * theta_Q**4) * np.exp(-(theta**2) / (2 * theta_Q**2))
 
 
-def U_crittenden(theta: float, theta_Q: float = 90) -> np.ndarray:
+def U_crittenden(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
     """Convergence-space partner of :func:`Q_crittenden`:
 
         U(θ) = 1/(2π θ_Q²) · (1 - θ²/(2θ_Q²)) · exp(-θ²/(2θ_Q²)).
@@ -104,7 +104,7 @@ def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
     return np.where(x2 < 1.0, values, 0.0)
 
 
-def Q_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
+def Q_schneider(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
     """Polynomial compensated aperture filter of Schneider et al. (1998).
 
     The widely used ℓ = 1 member of the polynomial filter family:
@@ -236,7 +236,7 @@ class _ZetaIndices:
         self.pairs = pairs
         self._device_copies: Dict[int, Tuple[object, object]] = {}
 
-    def for_module(self, xp: object) -> Tuple[object, object]:
+    def for_module(self, xp: Any) -> Tuple[Any, Any]:
         runtime = getattr(getattr(xp, "cuda", None), "runtime", None)
         if runtime is None:
             # numpy, or a numpy-backed stand-in: the host arrays index it.
@@ -293,10 +293,10 @@ def _cross_indices(nzbins: int, n_correlations: int) -> _ZetaIndices:
 
 
 def _zeta_covariance(
-    central: np.ndarray,
-    annulus: np.ndarray,
+    central: Any,
+    annulus: Any,
     indices: _ZetaIndices,
-) -> np.ndarray:
+) -> Any:
     """Patch covariance of every (centre, annulus) combination at once.
 
         out[:, k, :] = ⟨C_{c_k} · A_{p_k}⟩_patches - ⟨C_{c_k}⟩·⟨A_{p_k}⟩
@@ -340,10 +340,10 @@ def _layout_indices(
 
 
 def _zeta_from_fields(
-    central_field: np.ndarray,
-    annulus_field: np.ndarray,
+    central_field: Any,
+    annulus_field: Any,
     symmetric: Optional[bool] = None,
-) -> np.ndarray:
+) -> Any:
     """Compute i3PCF: covariance between a central aperture field and an
     annular 2PCF field.
 
@@ -377,7 +377,7 @@ def _zeta_from_fields(
 
 def zeta_g_plus(
     M_g: np.ndarray, xi_p: np.ndarray, symmetric: Optional[bool] = None
-) -> np.ndarray:
+) -> Any:
     """i3PCF: galaxy density M_g at centre × cosmic shear ξ+ on annulus.
 
     Correlates the smoothed galaxy overdensity with the parity-even
@@ -395,7 +395,7 @@ def zeta_g_plus(
 
 def zeta_g_minus(
     M_g: np.ndarray, xi_m: np.ndarray, symmetric: Optional[bool] = None
-) -> np.ndarray:
+) -> Any:
     """i3PCF: galaxy density M_g at centre × cosmic shear ξ- on annulus.
 
     Like ζ_g+ but using the parity-odd shear correlation ξ-; sensitive
@@ -411,7 +411,7 @@ def zeta_g_minus(
     return _zeta_from_fields(M_g, xi_m, symmetric=symmetric)
 
 
-def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
+def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> Any:
     """i3PCF: aperture mass M_ap at centre × cosmic shear ξ+ on annulus.
 
     Correlates the aperture mass (a pure E-mode measure of projected
@@ -420,12 +420,12 @@ def zeta_a_plus(M_a: np.ndarray, xi_p: np.ndarray) -> np.ndarray:
     return _zeta_from_fields(M_a, xi_p, symmetric=True)
 
 
-def zeta_a_minus(M_a: np.ndarray, xi_m: np.ndarray) -> np.ndarray:
+def zeta_a_minus(M_a: np.ndarray, xi_m: np.ndarray) -> Any:
     """i3PCF: aperture mass M_ap at centre × cosmic shear ξ- on annulus."""
     return _zeta_from_fields(M_a, xi_m, symmetric=True)
 
 
-def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
+def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> Any:
     """i3PCF: galaxy density M_g at centre × galaxy clustering ξ_g on annulus.
 
     Probes the galaxy-galaxy-galaxy three-point function — the excess
@@ -437,7 +437,7 @@ def zeta_g_g(M_g: np.ndarray, xi_g: np.ndarray) -> np.ndarray:
 
 def zeta_a_g(
     M_a: np.ndarray, xi_g: np.ndarray, symmetric: Optional[bool] = None
-) -> np.ndarray:
+) -> Any:
     """i3PCF: aperture mass M_ap at centre × galaxy clustering ξ_g on annulus.
 
     Cross-correlates the projected mass (via lensing) with galaxy
@@ -455,7 +455,7 @@ def zeta_a_g(
 
 def zeta_g_t(
     M_g: np.ndarray, xi_t: np.ndarray, symmetric: Optional[bool] = None
-) -> np.ndarray:
+) -> Any:
     """i3PCF: galaxy density M_g at centre × tangential shear γ_t on annulus.
 
     Uses the galaxy-galaxy lensing signal as the annular field; probes
@@ -466,7 +466,7 @@ def zeta_g_t(
 
 def zeta_a_t(
     M_a: np.ndarray, xi_t: np.ndarray, symmetric: Optional[bool] = None
-) -> np.ndarray:
+) -> Any:
     """i3PCF: aperture mass M_ap at centre × tangential shear γ_t on annulus.
 
     Correlates lensing mass with galaxy-galaxy lensing; probes the
@@ -609,8 +609,8 @@ def calculate_all_zetas(
     ``xi_t_symmetric`` is the older spelling of that override for the two γ_t
     estimators; ``symmetric`` wins where both name one.
     """
-    centrals = {"M_g": M_g, "M_a": M_a}
-    annuli = {"xi_p": xi_p, "xi_m": xi_m, "xi_g": xi_g, "xi_t": xi_t}
+    centrals: Dict[str, Any] = {"M_g": M_g, "M_a": M_a}
+    annuli: Dict[str, Any] = {"xi_p": xi_p, "xi_m": xi_m, "xi_g": xi_g, "xi_t": xi_t}
     overrides = dict(symmetric or {})
     unknown = set(overrides) - {entry[0] for entry in _ZETA_PLAN}
     if unknown:

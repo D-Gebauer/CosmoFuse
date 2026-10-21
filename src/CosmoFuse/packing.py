@@ -35,6 +35,8 @@ import numba
 import numpy as np
 from numba import njit
 
+from ._numba import get_num_threads as _get_num_threads
+
 #: Device/host bytes per pair of the packed payload:
 #: ``(npairs, 4) uint16`` = two local row indices + two angles.
 PACKED_BYTES_PER_PAIR = 4 * np.dtype(np.uint16).itemsize
@@ -220,7 +222,7 @@ def map_patches(fn: Callable[[int], _T], n: int) -> List[_T]:
     the per-patch packing steps release the GIL.  Results keep patch order
     and the first exception is re-raised.
     """
-    workers = min(max(1, int(numba.get_num_threads())), int(n))
+    workers = min(max(1, int(_get_num_threads())), int(n))
     if workers <= 1:
         return [fn(i) for i in range(n)]
     with ThreadPoolExecutor(max_workers=workers) as pool:
