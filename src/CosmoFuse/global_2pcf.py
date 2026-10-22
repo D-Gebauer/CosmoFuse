@@ -396,7 +396,7 @@ class Global2PCF:
             radius = float(e.binedges[b1])
             key = (t, radius)
             if key not in reach_cache:
-                reach_cache[key] = ts.reach(t, radius)
+                reach_cache[key] = ts.reach(t, radius, e.pair_search_precision)
             core_ids, core_xyz = level.core(t)
             cand_ids, cand_xyz = level.of_tiles(reach_cache[key])
             ids_a, ids_b, c1, s1, c2, s2, counts = unique_pairs(

@@ -1,5 +1,24 @@
 # Changelog
 
+## 7.5.1 (2026-10-22)
+
+**Fix: the tile reach of the global pair searches covers float32
+over-acceptance.** With `pair_search_precision="float32"`, `Global2PCF` and
+`Global3PCF` bin pairs on a float32 cosine, which accepts separations up to
+~1′ beyond `theta_max` (3.2e-4 rad measured at `theta_max` = 1′; the
+cosine resolution near θ = 0 is coarse). `TileSet.reach` widened its
+candidate disc by only 1e-9 rad, so such a pair could be dropped whenever its
+tile lay outside the disc, and the result then depended on the tiling.
+The margin is now `global_geometry.search_slack(radius, precision)`, which
+bounds that excess (cosine error of 4 eps plus 8 eps of position error per
+point; the measured excess stays below 0.5 of it from 1′ to 20°). At float64
+the bound is below 1e-9 for any radius above 1e-6 rad, so the default search
+is unchanged, bit for bit. The 2PCF tiling gate
+(`test_full_resolution_any_tiling`) now runs at float32 as well, and
+`TestReachMargin` checks the bound directly. With the old margin the test
+footprint loses no pair at any tiling (the HEALPix disc query is
+conservative), but nothing guaranteed it.
+
 ## 7.5.0 (2026-10-21)
 
 **`mypy --strict` passes, and the package ships a `py.typed` marker**, so type

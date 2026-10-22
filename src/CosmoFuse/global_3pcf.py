@@ -324,7 +324,7 @@ class Global3PCF:
         cnt_parts: List[np.ndarray] = []
         for t in range(ts.n_tiles):
             a, b = int(ts.row_indptr[t]), int(ts.row_indptr[t + 1])
-            reach = ts.reach(t, float(self.binedges[-1]))
+            reach = ts.reach(t, float(self.binedges[-1]), self.pair_search_precision)
             sel = np.concatenate(
                 [np.arange(ts.row_indptr[u], ts.row_indptr[u + 1]) for u in reach]
             )

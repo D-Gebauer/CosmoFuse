@@ -122,23 +122,46 @@ class TileSet:
         idx = np.minimum(idx, self.n_tiles - 1)
         return np.where(self.tile_ids[idx] == parent, idx, -1)
 
-    def reach(self, t: int, radius: float) -> np.ndarray:
-        """Indices of the tiles that may hold a point within ``radius``
-        (radians) of any point of tile ``t`` (tile ``t`` included)."""
+    def reach(self, t: int, radius: float, precision: Any = "float64") -> np.ndarray:
+        """Indices of the tiles that may hold a point accepted by a pair
+        search at ``precision`` with ``radius`` (radians) from any point of
+        tile ``t`` (tile ``t`` included)."""
         r = hp.max_pixrad(self.tile_nside) + float(radius)
         if r >= np.pi:
             return np.arange(self.n_tiles)
         # max_pixrad bounds the centre-to-corner distance of every tile, so a
         # disc of max_pixrad + radius around tile t's centre, queried
         # inclusively, contains every tile with a point within ``radius`` of
-        # tile t.  The 1e-9 guards the boundary of the inclusive test.
+        # tile t.  The margin covers pairs the search accepts beyond
+        # ``radius`` (search_slack); 1e-9 guards the boundary of the
+        # inclusive test and is the whole margin at float64.
+        margin = max(1e-9, search_slack(float(radius), precision))
         cand = hp.query_disc(
-            self.tile_nside, self.centre_vec[t], r + 1e-9, inclusive=True, nest=True
+            self.tile_nside, self.centre_vec[t], r + margin, inclusive=True, nest=True
         )
         idx = np.searchsorted(self.tile_ids, cand)
         idx = np.minimum(idx, self.n_tiles - 1)
         keep = self.tile_ids[idx] == cand
         return np.unique(idx[keep])
+
+
+def search_slack(radius: float, precision: Any) -> float:
+    """Bound (radians) on how far beyond ``radius`` a separation can lie and
+    still be accepted by a pair search at ``precision``.
+
+    The search compares ``cos(theta)`` from unit vectors at ``precision``
+    against ``cos(radius)`` at ``precision``: the cosine is off by a few
+    ``eps`` (dot product and edge rounding, taken as 4 eps), which near
+    ``theta = 0`` is a large angle, and each unit vector is off its pixel
+    centre by up to 8 eps (ra/dec rounding and the trigonometry of
+    ``radec_to_xyz``).  Measured excess at float32: <= 0.5 of this bound
+    for radius 1'..20 deg.  At float64 it is below 1e-9 (so ``reach`` keeps
+    its 1e-9 margin unchanged) for any radius above 1e-6 rad.
+    """
+    eps = float(np.finfo(np.dtype(precision)).eps)
+    cos_r = np.cos(radius)
+    beyond = float(np.arccos(max(cos_r - 4.0 * eps, -1.0))) - radius
+    return max(beyond, 0.0) + 16.0 * eps
 
 
 @dataclass

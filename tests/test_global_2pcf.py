@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from CosmoFuse import Global2PCF, Integrated3PCF, TwoPointResult
+from CosmoFuse.global_geometry import TileSet, radec_to_xyz, search_slack
 
 from .test_gpu_kernel_emulation import emulated_gpu
 
@@ -121,10 +122,16 @@ class TestOnePatchReference(unittest.TestCase):
         self.assertLess(_rel(kg.xi, ref_kg.xi_t[:, 0]), tol)
 
     def test_full_resolution_any_tiling(self):
-        p = _one_patch(self.mask)
-        for tile_nside in (2, 4, 8):
-            with self.subTest(tile_nside=tile_nside):
-                self._compare(_global(self.mask, tile_nside=tile_nside), p)
+        for precision in ("float64", "float32"):
+            p = _one_patch(self.mask, pair_search_precision=precision)
+            for tile_nside in (2, 4, 8):
+                with self.subTest(precision=precision, tile_nside=tile_nside):
+                    g = _global(
+                        self.mask,
+                        tile_nside=tile_nside,
+                        pair_search_precision=precision,
+                    )
+                    self._compare(g, p)
 
     def test_static_treecode(self):
         g = _global(self.mask, resolution_factor=2.0)
@@ -144,6 +151,50 @@ class TestOnePatchReference(unittest.TestCase):
             Global2PCF(
                 NSIDE, mask=self.mask, tile_nside=64, **_kw(resolution_factor=2.0)
             )
+
+
+class TestReachMargin(unittest.TestCase):
+    """The tile reach covers every pair the search accepts beyond theta_max."""
+
+    def test_search_slack_bounds_float32_acceptance(self):
+        rng = np.random.default_rng(0)
+        n = 200_000
+        for theta_max in np.radians(np.array([1.0, 10.0, 100.0, 480.0, 1200.0]) / 60):
+            with self.subTest(theta_max_arcmin=np.degrees(theta_max) * 60):
+                slack = search_slack(theta_max, "float32")
+                ra1 = rng.uniform(0, 2 * np.pi, n)
+                dec1 = np.arcsin(rng.uniform(-1, 1, n))
+                v1 = radec_to_xyz(ra1, dec1, np.float64)
+                east = np.stack([-np.sin(ra1), np.cos(ra1), np.zeros(n)])
+                north = np.cross(v1.T, east.T).T
+                a = rng.uniform(0, 2 * np.pi, n)
+                sep = theta_max + rng.uniform(0, slack, n)
+                v2 = np.cos(sep) * v1 + np.sin(sep) * (
+                    np.cos(a) * east + np.sin(a) * north
+                )
+                ra2 = np.arctan2(v2[1], v2[0]) % (2 * np.pi)
+                dec2 = np.arcsin(np.clip(v2[2], -1, 1))
+                x1 = radec_to_xyz(ra1, dec1, np.float32)
+                x2 = radec_to_xyz(ra2, dec2, np.float32)
+                cos_theta = x1[0] * x2[0] + x1[1] * x2[1] + x1[2] * x2[2]
+                accepted = cos_theta > np.cos(np.float32(theta_max))
+                excess = (sep - theta_max)[accepted]
+                # the old 1e-9 margin is far too small at float32 ...
+                self.assertGreater(excess.max(), 1e-7)
+                # ... and the bound holds with room to spare
+                self.assertLess(excess.max(), 0.6 * slack)
+
+    def test_float64_margin_unchanged(self):
+        for theta_max in np.radians(np.array([0.1, 1.0, 480.0, 1200.0]) / 60):
+            self.assertLess(search_slack(theta_max, "float64"), 1e-9)
+
+    def test_float32_reach_contains_float64_reach(self):
+        ts = TileSet.from_rows(NSIDE, np.flatnonzero(_setup()[0]), 8)
+        radius = np.radians(BINS["theta_max"] / 60)
+        for t in range(ts.n_tiles):
+            r64 = ts.reach(t, radius)
+            r32 = ts.reach(t, radius, "float32")
+            self.assertTrue(np.isin(r64, r32).all())
 
 
 class TestResultsAndInputs(unittest.TestCase):
