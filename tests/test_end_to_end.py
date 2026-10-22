@@ -320,24 +320,27 @@ class TestEndToEnd(unittest.TestCase):
             cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
             vartheta = np.arccos(cos_vartheta)
 
-            sin_vartheta = np.sqrt(np.clip(1 - cos_vartheta**2, 0.0, None))
-            cos_phi = np.ones_like(sin_vartheta)
-            sin_phi = np.zeros_like(sin_vartheta)
-            valid = sin_vartheta > 0
-            cos_phi[valid] = (
-                np.sin(q_ra[valid] - center_ra)
-                * np.cos(q_dec[valid])
-                / sin_vartheta[valid]
+            # Projection from vector geometry, not from the bearing formula
+            # the package uses: d = direction of the great circle to the
+            # centre in the tangent plane of the pixel, in (east, north).
+            v = np.stack(hp.pix2vec(self.nside, qpix_inds), axis=1)
+            c = np.asarray(hp.ang2vec(np.pi / 2 - center_dec, center_ra))
+            d = c[None, :] - (v @ c)[:, None] * v
+            theta, phi = hp.pix2ang(self.nside, qpix_inds)
+            east = np.stack([-np.sin(phi), np.cos(phi), 0 * phi], axis=1)
+            north = np.stack(
+                [
+                    -np.cos(theta) * np.cos(phi),
+                    -np.cos(theta) * np.sin(phi),
+                    np.sin(theta),
+                ],
+                axis=1,
             )
-            sin_phi[valid] = (
-                np.cos(q_dec[valid]) * np.sin(center_dec)
-                - np.sin(q_dec[valid])
-                * np.cos(center_dec)
-                * np.cos(q_ra[valid] - center_ra)
-            ) / sin_vartheta[valid]
-
-            cos_2phi = cos_phi * cos_phi - sin_phi * sin_phi
-            sin_2phi = 2 * sin_phi * cos_phi
+            d_e = np.sum(d * east, axis=1)
+            d_n = np.sum(d * north, axis=1)
+            d2 = d_e**2 + d_n**2
+            cos_2phi = (d_e**2 - d_n**2) / d2
+            sin_2phi = -2 * d_e * d_n / d2
             gt = -g1[qpix_inds] * cos_2phi - g2[qpix_inds] * sin_2phi
             q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
 
@@ -407,6 +410,56 @@ class TestEndToEnd(unittest.TestCase):
         m_g_corr = self.corr.backend.to_numpy(self.corr._m_g_single(density, w))
 
         np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
+
+    def test_end_to_end_maperture_shear_matches_treecorr(self):
+        """M_a with TreeCorr's tangential projection: a brute-force
+        NGCorrelation with the centre pixel as the only lens, the filter
+        folded into the source weights and one radial bin, so
+        sum(w Q g_t) = xi * weight."""
+        self.corr.find_aperture_pairs()
+        g1 = self.shear_maps[1, 0]
+        g2 = self.shear_maps[1, 1]
+        w = self.w2
+        m_a_corr = self.corr.backend.to_numpy(self.corr._m_a_single(g1, g2, w))
+
+        m_a_tc = np.zeros(self.corr.n_patches)
+        for patch_idx in range(self.corr.n_patches):
+            qpix_inds, q_ra, q_dec, center_ra, center_dec, q_patch_area = (
+                self._get_aperture_patch_data(patch_idx)
+            )
+            vartheta = hp.rotator.angdist(
+                hp.ang2vec(np.pi / 2 - center_dec, center_ra),
+                hp.pix2vec(self.nside, qpix_inds),
+            )
+            q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
+            lens = treecorr.Catalog(
+                ra=[center_ra], dec=[center_dec], ra_units="rad", dec_units="rad"
+            )
+            src = treecorr.Catalog(
+                ra=q_ra,
+                dec=q_dec,
+                g1=g1[qpix_inds],
+                g2=g2[qpix_inds],
+                w=w[qpix_inds] * q_vals,
+                ra_units="rad",
+                dec_units="rad",
+            )
+            ng = treecorr.NGCorrelation(
+                nbins=1,
+                min_sep=1e-3,
+                max_sep=5 * self.corr.theta_Q + 3 * hp.nside2resol(self.nside, True),
+                sep_units="arcmin",
+                metric="Arc",
+                brute=True,
+            )
+            ng.process(lens, src)
+            m_a_tc[patch_idx] = (
+                q_patch_area * ng.xi[0] * ng.weight[0] / np.sum(w[qpix_inds])
+            )
+
+        self.assertGreater(np.abs(m_a_tc).max(), 0)
+        # TreeCorr's own angle arithmetic limits the agreement (~1e-8)
+        np.testing.assert_allclose(m_a_corr, m_a_tc, rtol=1e-6, atol=1e-12)
 
 
 if __name__ == "__main__":

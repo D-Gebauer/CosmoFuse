@@ -1,5 +1,30 @@
 # Changelog
 
+## 7.6.0 (2026-10-22)
+
+**Fix: the aperture mass `M_a` projects the shear along the great circle at
+the pixel.** `PairGeometry.get_pairs_patch_M_a` took the position angle from
+the bearing formula, but its x component carried cos(dec) of the *pixel*
+where the bearing at the pixel needs that of the *patch centre*. The two
+components therefore belonged to different bearings: |e^{2iφ}| was not 1
+off the centre (0.98–1.02 at 4.6°), and the direction was off too. **`M_a`
+changes with this release.** For nside 512 and θ_Q = 90′ on a lensing-like
+Gaussian field the old values differ from the corrected ones by 2.6 % (Dec
+−30°), 3.6 % (−45°) and 6.5 % (−60°) of the rms of `M_a`, and correlate
+with them at 0.998–0.9997. `M_g` (no angle), the patch and global 2PCFs and
+`Global3PCF` (exact pair rotations, gated against TreeCorr) are unchanged.
+Measurements made before 7.6.0 used one deterministic estimator for data and
+simulations, so they are internally consistent but must not be mixed with
+7.6.0 ones, and they differ from analytic `M_a` predictions at the level
+above.
+
+The end-to-end numpy reference copied the package's formula, so it could not
+catch this. It now projects with vector geometry (the tangent basis at the
+pixel), and a new test, `test_end_to_end_maperture_shear_matches_treecorr`,
+measures `M_a` with TreeCorr (a brute-force `NGCorrelation` with the centre
+pixel as the only lens and the filter in the source weights). Both tests fail
+on the old formula and pass to 1e-6 (TreeCorr) / 1e-8 (numpy).
+
 ## 7.5.1 (2026-10-22)
 
 **Fix: the tile reach of the global pair searches covers float32

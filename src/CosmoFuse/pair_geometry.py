@@ -407,9 +407,11 @@ class PairGeometry:
         cos_vartheta = cos_delta_ra * cos_dec_c * cos_dec + sin_dec_c * sin_dec
         vartheta = np.arccos(cos_vartheta)
         sin_vartheta = np.sqrt(1 - cos_vartheta**2)
-        # Position angle φ of each pixel relative to patch centre
-        # (components from the spherical bearing formula)
-        cos_phi = sin_delta_ra * cos_dec / sin_vartheta
+        # Position angle φ of the great circle to the centre, at the pixel
+        # (where the shear is defined): the bearing formula evaluated at the
+        # pixel.  Both components carry cos(dec) of the *centre*; before 7.6.0
+        # this one used the pixel's, so |e^{2iφ}| != 1 off the centre.
+        cos_phi = sin_delta_ra * cos_dec_c / sin_vartheta
         sin_phi = (
             cos_dec * sin_dec_c - sin_dec * cos_dec_c * cos_delta_ra
         ) / sin_vartheta
