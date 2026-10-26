@@ -835,9 +835,13 @@ class TestBackend(unittest.TestCase):
         q_cos = np.array([1.0], dtype=np.float64)
         q_sin = np.array([0.0], dtype=np.float64)
         q_val = np.array([2.0], dtype=np.float64)
-        k_val = np.array([5.0], dtype=np.float64)  # M_g's own filter
         q_offsets = np.array([0, 1], dtype=np.int64)
         q_patch_area = np.array([3.0], dtype=np.float64)
+        # M_g's own geometry: pixels 1 and 2, filter 5, area 3
+        k_inds = np.array([1, 2], dtype=np.uint32)
+        k_val = np.array([5.0, 5.0], dtype=np.float64)
+        k_offsets = np.array([0, 2], dtype=np.int64)
+        k_area = np.array([3.0], dtype=np.float64)
 
         ss_comb_i = np.array([0], dtype=np.int32)
         ss_comb_j = np.array([0], dtype=np.int32)
@@ -872,9 +876,12 @@ class TestBackend(unittest.TestCase):
             q_cos,
             q_sin,
             q_val,
-            k_val,
             q_offsets,
             q_patch_area,
+            k_inds,
+            k_val,
+            k_offsets,
+            k_area,
             ss_comb_i,
             ss_comb_j,
             dd_comb_i,
@@ -896,8 +903,9 @@ class TestBackend(unittest.TestCase):
 
         self.assertAlmostEqual(out_ma_num[0, 0], -120.0)
         self.assertAlmostEqual(out_ma_den[0, 0], 5.0)
-        self.assertAlmostEqual(out_mg_num[0, 0], 1155.0)  # 3 * 11 * 7 * k_val
-        self.assertAlmostEqual(out_mg_den[0, 0], 11.0)
+        # 3 * 5 * (3 * 20 + 11 * 7)
+        self.assertAlmostEqual(out_mg_num[0, 0], 2055.0)
+        self.assertAlmostEqual(out_mg_den[0, 0], 14.0)
         self.assertAlmostEqual(out_xip_num[0, 0], 24.0)
         self.assertAlmostEqual(out_xim_num[0, 0], 24.0)
         self.assertAlmostEqual(out_xipm_den[0, 0], 12.0)
@@ -934,9 +942,9 @@ class TestBackend(unittest.TestCase):
         q_cos = np.array([], dtype=np.float64)
         q_sin = np.array([], dtype=np.float64)
         q_val = np.array([], dtype=np.float64)
-        k_val = np.array([], dtype=np.float64)
         q_offsets = np.array([0, 0], dtype=np.int64)
         q_patch_area = np.array([1.0], dtype=np.float64)
+        k_inds, k_val, k_offsets, k_area = q_inds, q_val, q_offsets, q_patch_area
 
         ss_comb_i = np.array([], dtype=np.int32)
         ss_comb_j = np.array([], dtype=np.int32)
@@ -971,9 +979,12 @@ class TestBackend(unittest.TestCase):
             q_cos,
             q_sin,
             q_val,
-            k_val,
             q_offsets,
             q_patch_area,
+            k_inds,
+            k_val,
+            k_offsets,
+            k_area,
             ss_comb_i,
             ss_comb_j,
             dd_comb_i,
@@ -1019,9 +1030,12 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=q_dtype),
             np.zeros(1, dtype=q_dtype),
             np.zeros(1, dtype=q_dtype),
-            np.zeros(1, dtype=q_dtype),  # k_val
             np.arange(npatches + 1, dtype=np.int64),
             np.ones(npatches, dtype=q_dtype),
+            np.zeros(1, dtype=np.uint32),  # k_inds
+            np.zeros(1, dtype=q_dtype),  # k_val
+            np.arange(npatches + 1, dtype=np.int64),  # k_offsets
+            np.ones(npatches, dtype=q_dtype),  # k_area
             np.zeros((n_shear, npatches), dtype=dtype),
             np.zeros((n_shear, npatches), dtype=dtype),
             np.zeros((n_density, npatches), dtype=dtype),
@@ -1157,7 +1171,7 @@ class TestBackend(unittest.TestCase):
             self.assertEqual(grid, expected_grid)
             self.assertEqual(block, (256,))
             # The section selector is appended as the last kernel argument
-            # (after the 15 wrapper args + npatches).
+            # (after the 18 wrapper args + npatches).
             self.assertEqual(int(launch_args[-1]), section)
             self.assertEqual(len(launch_args), len(args) + 2)
             self.assertEqual(int(launch_args[4]), 4)

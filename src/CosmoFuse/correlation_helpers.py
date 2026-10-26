@@ -109,8 +109,9 @@ def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
 
 
 def U_tophat(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
-    """Top-hat aperture of radius θ_Q, the default filter of the scalar
-    aperture ``M_g``:
+    """Top-hat *filter* of radius θ_Q for the scalar aperture ``M_g`` (not
+    its default -- that is the exact weighted mean over the patch disc, see
+    :meth:`Integrated3PCF.m_g`):
 
         U(θ) = 1 / (2π (1 - cos θ_Q))    for θ ≤ θ_Q,  else 0,
 

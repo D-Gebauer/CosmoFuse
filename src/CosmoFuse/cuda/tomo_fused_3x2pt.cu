@@ -8,8 +8,9 @@
  *
  *   M_ap   aperture mass: tangential shear convolved with the compensated
  *          filter Q(theta) around each patch centre        (this file, z=0)
- *   M_g    scalar aperture: delta_g (or kappa) convolved with its own filter
- *          U(theta), by default a top hat               (this file, z=1)
+ *   M_g    scalar aperture of delta_g (or kappa) on its own geometry
+ *          (k_inds/k_val/k_offsets/k_area): by default the weighted mean
+ *          over the patch disc, else a filter U on the M_ap discs (z=1)
  *   xi+/-  cosmic shear        (tomo_vectorized_xipm.cu, tiled kernels)
  *   xi_g   galaxy clustering   (density_density_tomo_vectorized.cu)
  *   xi_t   galaxy-galaxy lensing (density_shear_tomo_vectorized.cu)
@@ -30,8 +31,8 @@
  * `gpu_3x2pt_tomo_aperture_fused` is the default: one block per patch with
  * the tomographic bins looped inside it, so the disc geometry (q_inds +
  * q_cos + q_sin + q_val, 16 B per disc pixel) is read once per pixel
- * rather than once per bin (k_val replaces q_cos/q_sin/q_val in section 1).  Same restructure, same reasoning and the same
- * bitwise guarantee as the standalone kernels in aperture_tomo.cu -- see
+ * rather than once per bin (section 1 reads the k_* geometry instead).
+ * Same restructure, same reasoning and the same bitwise guarantee as the standalone kernels in aperture_tomo.cu -- see
  * that file's header.  The per-(patch, bin) kernel stays as the fallback
  * for bin counts beyond the accumulator budget.
  */
@@ -56,9 +57,12 @@ __global__ void gpu_3x2pt_tomo_aperture(
     const QT* q_cos,              /* cos(2phi) of pixel w.r.t. patch centre     */
     const QT* q_sin,              /* sin(2phi) of pixel w.r.t. patch centre     */
     const QT* q_val,              /* Q(theta): shear filter value (M_ap)        */
-    const QT* k_val,              /* U(theta): scalar filter value (M_g)        */
     const long long* q_offsets,   /* CSR offsets per patch                       */
     const QT* q_patch_area,       /* solid angle of each patch (steradians)      */
+    const unsigned int* k_inds,   /* M_g geometry: pixel rows per patch          */
+    const QT* k_val,              /* M_g filter value (1 for the patch mean)     */
+    const long long* k_offsets,   /* M_g CSR offsets per patch                   */
+    const QT* k_area,             /* M_g area factor (1 for the patch mean)      */
     ACC* out_ma_num,           /* aperture mass numerator   [n_shear x npatches]   */
     ACC* out_ma_den,           /* aperture mass denominator (sum of weights)        */
     ACC* out_mg_num,           /* galaxy density numerator [n_density x npatches]   */
@@ -97,15 +101,15 @@ __global__ void gpu_3x2pt_tomo_aperture(
         return;
     }
 
-    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * U ] / Sum_pix [ w ] */
+    /* z=1 : M_g = k_area * Sum_pix [ w * delta_g * k_val ] / Sum_pix [ w ] */
     if (section == 1) {
         if (x >= npatches || y >= N_DENSITY) return;
-        const long long start = q_offsets[x];
-        const long long stop = q_offsets[x + 1];
+        const long long start = k_offsets[x];
+        const long long stop = k_offsets[x + 1];
         ACC sum_num = (ACC)0.0;
         ACC sum_den = (ACC)0.0;
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
-            const unsigned int pix = q_inds[idx];
+            const unsigned int pix = k_inds[idx];
             const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;
             const T wv = density_w[d_idx];
             sum_num += (ACC)(wv * density[d_idx] * (T)k_val[idx]);
@@ -114,7 +118,7 @@ __global__ void gpu_3x2pt_tomo_aperture(
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
         if (lane == 0) {
             const long long out_idx = (long long)y * (long long)npatches + x;
-            out_mg_num[out_idx] = (ACC)q_patch_area[x] * sum_num;
+            out_mg_num[out_idx] = (ACC)k_area[x] * sum_num;
             out_mg_den[out_idx] = sum_den;
         }
         return;
@@ -140,9 +144,12 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
     const QT* q_cos,
     const QT* q_sin,
     const QT* q_val,
-    const QT* k_val,
     const long long* q_offsets,
     const QT* q_patch_area,
+    const unsigned int* k_inds,
+    const QT* k_val,
+    const long long* k_offsets,
+    const QT* k_area,
     ACC* out_ma_num,
     ACC* out_ma_den,
     ACC* out_mg_num,
@@ -153,17 +160,17 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
     const long long x = (long long)blockIdx.x;  /* patch index */
     if (x >= (long long)npatches) return;
 
-    const long long start = q_offsets[x];
-    const long long stop = q_offsets[x + 1];
     /* One buffer pair for every bin of either section (ACC is the wider
        of the two types in play, so the allocation covers both). */
     __shared__ ACC s1[BLOCK_SIZE];
     __shared__ ACC s2[BLOCK_SIZE];
-    const ACC area = (ACC)q_patch_area[x];
 
     /* z=0 : M_ap = A_patch * Sum_pix [ w * gamma_t * Q ] / Sum_pix [ w ],
        gamma_t = -gamma_1 cos(2phi) - gamma_2 sin(2phi) around the centre */
     if (section == 0) {
+        const long long start = q_offsets[x];
+        const long long stop = q_offsets[x + 1];
+        const ACC area = (ACC)q_patch_area[x];
         ACC sn[N_SHEAR];
         ACC sd[N_SHEAR];
 #pragma unroll
@@ -200,15 +207,18 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
         return;
     }
 
-    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * U ] / Sum_pix [ w ] */
+    /* z=1 : M_g = k_area * Sum_pix [ w * delta_g * k_val ] / Sum_pix [ w ] */
     if (section == 1) {
+        const long long start = k_offsets[x];
+        const long long stop = k_offsets[x + 1];
+        const ACC area = (ACC)k_area[x];
         ACC sn[N_DENSITY];
         ACC sd[N_DENSITY];
 #pragma unroll
         for (int y = 0; y < N_DENSITY; ++y) { sn[y] = (ACC)0.0; sd[y] = (ACC)0.0; }
 
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
-            const unsigned int pix = q_inds[idx];
+            const unsigned int pix = k_inds[idx];
             const T qv = (T)k_val[idx];
 #pragma unroll
             for (int y = 0; y < N_DENSITY; ++y) {

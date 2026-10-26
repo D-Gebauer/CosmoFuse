@@ -69,6 +69,11 @@ def _legacy_layout(corr: Integrated3PCF) -> Integrated3PCF:
     legacy.Q_val, legacy.Q_patch_area = corr.Q_val, corr.Q_patch_area
     legacy._prepare_aperture_flat()
     legacy.prepare()
+    # the patch-mean M_g geometry from the same footprint (rows == pixels)
+    full_mask = legacy.map_mask
+    legacy.map_mask = corr.map_mask
+    legacy._k_aperture_geometry()
+    legacy.map_mask = full_mask
     assert legacy.n_active == NPIX
     return legacy
 

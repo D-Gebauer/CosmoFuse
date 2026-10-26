@@ -29,7 +29,7 @@ from .packing import (
     unpack_rows,
 )
 from .pair_finder import PairFinder
-from .pair_geometry import PairGeometry
+from .pair_geometry import KApertureGeometry, PairGeometry
 from .results import IntegratedResult
 from .treecode import (
     TreecodeGeometry,
@@ -1076,29 +1076,52 @@ class Integrated3PCF:
     ) -> None:
         PairGeometry.ensure_aperture_pairs(self, aperture_filter=aperture_filter)
 
-    def _k_aperture_values(
-        self, aperture_filter: Optional[Callable[..., Any]] = None
-    ) -> np.ndarray:
-        """Host filter values of the scalar aperture ``M_g`` (default
-        :func:`~CosmoFuse.correlation_helpers.U_tophat`), aligned with
-        ``Q_inds_flat``; builds the aperture geometry if there is none."""
+    def _k_aperture_values(self, aperture_filter: Callable[..., Any]) -> np.ndarray:
+        """Values of a scalar filter U on the shear aperture discs, aligned
+        with ``Q_inds_flat``; builds the aperture geometry if there is none."""
         return PairGeometry.k_aperture_values(self, aperture_filter)
 
-    def _k_aperture_values_dev(
+    def _k_aperture_geometry(
         self, aperture_filter: Optional[Callable[..., Any]] = None
-    ) -> Any:
-        """Device copy of :meth:`_k_aperture_values` (rotation precision,
-        like ``Q_val_dev``)."""
-        values = self._k_aperture_values(aperture_filter)
+    ) -> KApertureGeometry:
+        """Host geometry of the scalar aperture ``M_g`` (row space): the
+        patch-disc mean by default, else ``aperture_filter`` on the shear
+        aperture discs (see :meth:`PairGeometry.k_aperture_geometry`)."""
+        return PairGeometry.k_aperture_geometry(self, aperture_filter)
+
+    def _k_aperture_geometry_dev(
+        self, aperture_filter: Optional[Callable[..., Any]] = None
+    ) -> Tuple[Any, Any, Any, Any]:
+        """Device ``(rows uint32, values, offsets int64, area)`` of
+        :meth:`_k_aperture_geometry`.  A filter on the shear discs shares
+        their device indices, offsets and areas; only its values upload."""
+        host = self._k_aperture_geometry(aperture_filter)
         ctx = self.compute_context
+        # The values array identifies the geometry: each one is cached with
+        # its geometry and held here, so its identity cannot be reissued.
         cached = ctx.Q_val_k_dev
-        if cached is not None and cached[0] is values:
-            return cached[1]
+        if cached is not None and cached[0] is host.values:
+            return cast(Tuple[Any, Any, Any, Any], cached[1])
         module = self.backend.module
-        dev = module.ascontiguousarray(
-            self.backend.to_device(np.asarray(values, dtype=self.rotation_dtype))
-        )
-        ctx.Q_val_k_dev = (values, dev)
+
+        def upload(arr: np.ndarray, dtype: Any) -> Any:
+            return module.ascontiguousarray(
+                self.backend.to_device(np.asarray(arr, dtype=dtype))
+            )
+
+        values_dev = upload(host.values, self.rotation_dtype)
+        if aperture_filter is not None:
+            if ctx.Q_inds_dev is None:
+                self._prepare_aperture_device_buffers()
+            dev = (ctx.Q_inds_dev, values_dev, ctx.Q_offsets_dev, ctx.Q_patch_area_dev)
+        else:
+            dev = (
+                upload(host.rows, np.uint32),
+                values_dev,
+                upload(host.offsets, np.int64),
+                upload(host.area, self.rotation_dtype),
+            )
+        ctx.Q_val_k_dev = (host.values, dev)
         return dev
 
     def _get_selected_tomo_density_combination_indices(
@@ -1541,7 +1564,7 @@ class Integrated3PCF:
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
     ) -> Any:
-        self._k_aperture_values(aperture_filter)
+        self._k_aperture_geometry(aperture_filter)
 
         map_values_arr = self._coerce_map_input_array(map_values)
         w_arr = self._coerce_map_input_array(w)
@@ -1559,8 +1582,8 @@ class Integrated3PCF:
         return_device: bool = True,
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Any:
-        """Aperture density of one map whose virtual rows are already appended
-        (``aperture_filter`` = the scalar filter U, default top hat)."""
+        """Scalar aperture of one map whose virtual rows are already appended
+        (``aperture_filter``: see :meth:`m_g`)."""
         kernel = getattr(self.backend, "aperture_density_kernel", None)
         if kernel is None:
             raise RuntimeError(
@@ -1570,13 +1593,14 @@ class Integrated3PCF:
 
         if self.backend.name == "numpy":
             m_g = np.zeros(self.n_patches, dtype=self.map_dtype)
+            geom = self._k_aperture_geometry(aperture_filter)
             kernel(
-                self._aperture_row_inds(),
-                self._k_aperture_values(aperture_filter),
-                self.Q_offsets,
+                geom.rows,
+                geom.values,
+                geom.offsets,
                 map_values_arr,
                 w_arr,
-                self.Q_patch_area_flat,
+                geom.area,
                 m_g,
             )
             return m_g
@@ -1584,12 +1608,9 @@ class Integrated3PCF:
         module = self.backend.module
         backend_dtype = getattr(module, self.map_dtype.name)
 
-        if self.compute_context.Q_inds_dev is None:
-            self._prepare_aperture_device_buffers()
-        Q_inds_dev = self.compute_context.Q_inds_dev
-        Q_val_dev = self._k_aperture_values_dev(aperture_filter)
-        Q_offsets_dev = self.compute_context.Q_offsets_dev
-        Q_patch_area_dev = self.compute_context.Q_patch_area_dev
+        Q_inds_dev, Q_val_dev, Q_offsets_dev, Q_patch_area_dev = (
+            self._k_aperture_geometry_dev(aperture_filter)
+        )
         map_values_dev = self._to_backend_array(map_values_arr, dtype=backend_dtype)
         w_dev = self._to_backend_array(w_arr, dtype=backend_dtype)
 
@@ -4348,28 +4369,34 @@ class Integrated3PCF:
         aperture_filter: Optional[Callable[..., Any]] = None,
         return_device: bool = True,
     ) -> Any:
-        """Tomographic scalar aperture ``M_g`` at every patch centre:
-        ``A · Σ w f U / Σ w`` over each aperture disc.
+        """Tomographic scalar aperture ``M_g`` at every patch centre.
 
-        ``aperture_filter`` is the scalar filter U: by default
-        :func:`~CosmoFuse.correlation_helpers.U_tophat` (radius ``theta_Q``,
-        i.e. the mean of the field in the cap); pass ``U_crittenden`` or
-        ``U_schneider`` for the compensated aperture mass of a convergence
-        map.  ``density_maps``, ``w``: ``(nz, npix | n_active)``.  Returns
+        ``aperture_filter=None`` (default): the weighted mean of the field
+        over the patch disc, ``Σ w f / Σ w`` over the unmasked pixels within
+        ``patch_size`` of the centre -- the top-hat window of the patch 2PCFs,
+        as in Halder et al. 2023 (eq. 3.11); with ``aperture_nside``, of the
+        map degraded to that level.
+
+        A filter U (``U_crittenden``, ``U_schneider``, ``U_tophat`` or any
+        ``f(theta, theta_Q)``): ``A · Σ w f U / Σ w`` over the aperture disc
+        of ``M_a`` (5 θ_Q), e.g. the compensated aperture mass of a
+        convergence map with ``U_crittenden``.
+
+        ``density_maps``, ``w``: ``(nz, npix | n_active)``.  Returns
         ``(nz, n_patches)``.
         """
         density_arr = self._coerce_map_input_array(density_maps)
         w_arr = self._coerce_map_input_array(w)
 
-        self._k_aperture_values(aperture_filter)  # builds the geometry if needed
+        self._k_aperture_geometry(aperture_filter)  # builds the geometry if needed
 
         kernel = getattr(self.backend, "aperture_tomo_density_kernel", None)
         if kernel is not None and self.backend.name == "cupy":
             module = self.backend.module
             map_backend_dtype = getattr(module, self.map_dtype.name)
-            if self.compute_context.Q_inds_dev is None:
-                self._prepare_aperture_device_buffers()
-            ctx = self.compute_context
+            k_inds, k_val, k_offsets, k_area = self._k_aperture_geometry_dev(
+                aperture_filter
+            )
             nzbins = int(density_arr.shape[0])
             density_dev = self._to_backend_array(density_arr, dtype=self.map_dtype)
             w_dev = self._to_backend_array(w_arr, dtype=self.map_dtype)
@@ -4385,10 +4412,10 @@ class Integrated3PCF:
             launched = kernel(
                 density_rows,
                 w_rows,
-                ctx.Q_inds_dev,
-                self._k_aperture_values_dev(aperture_filter),
-                ctx.Q_offsets_dev,
-                ctx.Q_patch_area_dev,
+                k_inds,
+                k_val,
+                k_offsets,
+                k_area,
                 out_num,
                 out_den,
             )
@@ -5085,7 +5112,7 @@ class Integrated3PCF:
         # shear filter first: a new Q rebuilds the geometry, which the
         # scalar filter values are then evaluated on
         self._ensure_aperture_pairs(aperture_filter=aperture_filter)
-        k_val_host = self._k_aperture_values(k_aperture_filter)
+        self._k_aperture_geometry(k_aperture_filter)
 
         module = self.backend.module
         map_backend_dtype = getattr(module, self.map_dtype.name)
@@ -5153,9 +5180,11 @@ class Integrated3PCF:
         q_cos = self.compute_context.Q_cos_dev
         q_sin = self.compute_context.Q_sin_dev
         q_val = self.compute_context.Q_val_dev
-        k_val = self._k_aperture_values_dev(k_aperture_filter) if on_gpu else k_val_host
         q_offsets = self.compute_context.Q_offsets_dev
         q_patch_area = self.compute_context.Q_patch_area_dev
+        k_inds, k_val, k_offsets, k_area = self._k_aperture_geometry_dev(
+            k_aperture_filter
+        )
 
         (
             out_ma_num,
@@ -5196,9 +5225,12 @@ class Integrated3PCF:
                 np.ascontiguousarray(q_cos),
                 np.ascontiguousarray(q_sin),
                 np.ascontiguousarray(q_val),
-                np.ascontiguousarray(k_val),
                 np.ascontiguousarray(q_offsets),
                 np.ascontiguousarray(q_patch_area),
+                np.ascontiguousarray(k_inds),
+                np.ascontiguousarray(k_val),
+                np.ascontiguousarray(k_offsets),
+                np.ascontiguousarray(k_area),
                 np.ascontiguousarray(ss_comb_i),
                 np.ascontiguousarray(ss_comb_j),
                 np.ascontiguousarray(dd_comb_i),
@@ -5231,9 +5263,12 @@ class Integrated3PCF:
                 q_cos,
                 q_sin,
                 q_val,
-                k_val,
                 q_offsets,
                 q_patch_area,
+                k_inds,
+                k_val,
+                k_offsets,
+                k_area,
                 out_ma_num,
                 out_ma_den,
                 out_mg_num,
@@ -5658,8 +5693,8 @@ class Integrated3PCF:
         ``xi_g`` is the field estimator ``Σ w w δ δ / Σ w w`` (TreeCorr
         ``KKCorrelation``); rows ``kk_combinations`` (upper triangle, or the
         autos with ``auto_only=True``).  ``aperture_filter`` is the scalar
-        filter of ``M_g`` (default ``U_tophat``; ``U_crittenden`` for the
-        aperture mass of a κ map), see :meth:`m_g`.
+        filter of ``M_g`` (default: the patch-disc mean; ``U_crittenden``
+        for the aperture mass of a κ map), see :meth:`m_g`.
         """
         if apertures:
             M_g, xi_g = self._kk_full(
@@ -5710,7 +5745,7 @@ class Integrated3PCF:
 
         ``aperture_filter`` is the shear filter of ``M_a`` (default
         ``Q_crittenden``), ``k_aperture_filter`` the scalar filter of ``M_g``
-        (default ``U_tophat``).
+        (default: the patch-disc mean, see :meth:`m_g`).
         """
         nl, ns = self._nz(k_maps), self._nz(shear_maps)
         combos = tuple(self.kg_combinations(nl, ns, combinations))
@@ -5774,8 +5809,8 @@ class Integrated3PCF:
         ``{"shear": ..., "density": ...}``, or one ``(nz, npix)`` array for
         both samples when they share the tomography.  ``aperture_filter`` is
         the shear filter of ``M_a`` (default ``Q_crittenden``),
-        ``k_aperture_filter`` the scalar filter of ``M_g`` (default
-        ``U_tophat``).
+        ``k_aperture_filter`` the scalar filter of ``M_g`` (default: the
+        patch-disc mean, see :meth:`m_g`).
         """
         M_a, M_g, xi_p, xi_m, xi_g, xi_t = self._three_by_two_pt_arrays(
             shear_maps,

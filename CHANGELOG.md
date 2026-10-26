@@ -1,5 +1,34 @@
 # Changelog
 
+## 7.6.2 (2026-10-26)
+
+**`M_g` defaults to the patch mean of Halder et al. 2023.** In "Beyond
+3×2-point cosmology" (arXiv:2305.17132, eq. 3.11 and Sec. 5) M_g is the mean
+of the density contrast over the top-hat window W *in which the patch 2PCFs
+are measured* (radius θ_T = `patch_size`, normalised by the area of W). 7.6.1
+approximated this with a top-hat filter of radius θ_Q on the aperture discs of
+`M_a`, normalised like every filter aperture (`A · Σ w f U / Σ w` over the
+5 θ_Q disc), which differs from the paper whenever θ_Q ≠ `patch_size`, by
+the pixelisation of the cap area (N_in Ω_pix / A_cap), and with a mask
+(masked pixels in the cap lowered M_g). The default is now exact:
+`M_g = Σ_W w f / Σ_W w` over the unmasked pixels within `patch_size` of the
+centre, centre pixel included -- the pixels the 2PCF search uses. With
+`aperture_nside` it is the patch mean of the degraded map, so
+`TestCoarseApertureLevel` (aperture statistics ≡ those of the degraded maps)
+still holds. **`M_g` changes again**, from 7.6.1 and from 7.6.0. A filter
+still selects the filter aperture: `aperture_filter=Q_crittenden` is 7.6.0
+(bitwise), `aperture_filter=U_tophat` is 7.6.1, `U_crittenden` the κ
+aperture mass.
+
+The scalar aperture now has its own geometry (`KApertureGeometry`: rows,
+values, offsets, area), built from the patch discs (cached per footprint and
+centres) or, for a filter, the aperture discs of `M_a` plus the evaluated U.
+The fused 3x2pt aperture kernels (`tomo_fused_3x2pt.cu`, both variants, and
+the CPU kernel) therefore take `k_inds`, `k_val`, `k_offsets`, `k_area` for
+section 1 in place of 7.6.1's `k_val` alone; the emulation twin follows. The
+single-map CPU kernel `_cpu_aperture_density_kernel` returns 0 instead of NaN
+for an empty aperture, like every other `M_g` path.
+
 ## 7.6.1 (2026-10-26)
 
 **`M_g` has its own filter, by default a top hat of radius θ_Q.** The scalar

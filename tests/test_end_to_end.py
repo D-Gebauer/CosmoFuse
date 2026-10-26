@@ -5,7 +5,7 @@ import healpy as hp
 import numpy as np
 import treecorr
 
-from CosmoFuse import Q_crittenden, U_crittenden
+from CosmoFuse import Q_crittenden, U_crittenden, U_tophat
 from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
 
@@ -364,11 +364,9 @@ class TestEndToEnd(unittest.TestCase):
         return (1 - x2) * np.exp(-x2) / (2 * np.pi * theta_q**2)
 
     def _reference_maperture_density_numpy(
-        self, density: np.ndarray, w: np.ndarray, filter_numpy=None
+        self, density: np.ndarray, w: np.ndarray, filter_numpy
     ) -> np.ndarray:
-        """Scalar aperture; ``filter_numpy`` defaults to the top hat."""
-        if filter_numpy is None:
-            filter_numpy = self._u_tophat_numpy
+        """Scalar aperture with a filter on the 5 theta_Q aperture discs."""
         m_g = np.zeros(self.corr.n_patches, dtype=np.float64)
 
         for patch_idx in range(self.corr.n_patches):
@@ -422,18 +420,25 @@ class TestEndToEnd(unittest.TestCase):
         density = self.density_maps[1]
         w = self.w2
 
-        # default: top hat of radius theta_Q -- the mean of the field in the
-        # cap, so for a constant field M_g is that constant up to the
-        # pixelisation of the cap area
-        m_g_ref = self._reference_maperture_density_numpy(density, w)
+        # default: the weighted mean over the patch disc (Halder et al. 2023)
+        m_g_ref = np.zeros(self.corr.n_patches)
+        for patch_idx in range(self.corr.n_patches):
+            vec = hp.ang2vec(self.theta_center[patch_idx], self.phi_center[patch_idx])
+            disc = hp.query_disc(
+                self.nside, vec=vec, radius=np.radians(self.corr.patch_size / 60)
+            )
+            disc = disc[np.isin(disc, self.map_inds)]
+            m_g_ref[patch_idx] = np.sum(w[disc] * density[disc]) / np.sum(w[disc])
         m_g_corr = self.corr.backend.to_numpy(self.corr._m_g_single(density, w))
         np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
         self.assertTrue(np.any(m_g_ref != 0))
 
-        # explicit filters: Q (the pre-7.6.1 default) and the compensated U
+        # explicit filters on the aperture discs: Q (the 7.6.0 default), the
+        # compensated U and the disc-normalised top hat (the 7.6.1 default)
         for filter_fn, filter_numpy in (
             (Q_crittenden, self._q_t_numpy),
             (U_crittenden, self._u_crittenden_numpy),
+            (U_tophat, self._u_tophat_numpy),
         ):
             with self.subTest(filter=filter_fn.__name__):
                 m_g_ref = self._reference_maperture_density_numpy(
@@ -444,14 +449,25 @@ class TestEndToEnd(unittest.TestCase):
                 )
                 np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
 
-    def test_tophat_m_g_is_the_cap_mean(self):
-        """Unit weights and a constant field: the top hat gives
+    def test_patch_mean_of_a_constant_is_the_constant(self):
+        """The default M_g is a weighted mean: exactly the constant for any
+        weights and mask."""
+        npix = hp.nside2npix(self.nside)
+        m_g = self.corr.backend.to_numpy(
+            self.corr._m_g_single(np.full(npix, 0.25), self.w2)
+        )
+        np.testing.assert_allclose(m_g, 0.25, rtol=1e-12)
+
+    def test_tophat_filter_m_g_is_the_cap_mean(self):
+        """Unit weights and a constant field: the U_tophat filter gives
         pixarea * N_in / cap area, N_in the observed pixels in the cap -- 1 up
         to the pixelisation of the cap where the cap is fully observed (a
         masked pixel lowers M_g; it is not renormalised away)."""
         self.corr.find_aperture_pairs()
         ones = np.ones(hp.nside2npix(self.nside))
-        m_g = self.corr.backend.to_numpy(self.corr._m_g_single(ones, ones))
+        m_g = self.corr.backend.to_numpy(
+            self.corr._m_g_single(ones, ones, aperture_filter=U_tophat)
+        )
         theta_q = np.radians(self.corr.theta_Q / 60)
         cap_area = 2 * np.pi * (1 - np.cos(theta_q))
         n_full = 0

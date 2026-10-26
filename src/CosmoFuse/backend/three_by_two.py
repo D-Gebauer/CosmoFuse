@@ -42,9 +42,12 @@ def _cpu_3x2pt_tomo_fused_kernel(
     q_cos: np.ndarray,
     q_sin: np.ndarray,
     q_val: np.ndarray,
-    k_val: np.ndarray,
     q_offsets: np.ndarray,
     q_patch_area: np.ndarray,
+    k_inds: np.ndarray,
+    k_val: np.ndarray,
+    k_offsets: np.ndarray,
+    k_area: np.ndarray,
     ss_comb_i: np.ndarray,
     ss_comb_j: np.ndarray,
     dd_comb_i: np.ndarray,
@@ -91,21 +94,21 @@ def _cpu_3x2pt_tomo_fused_kernel(
         out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
         out_ma_den[tomo_idx, patch_idx] = sum_w
 
-    # --- Scalar aperture M_g: δ_g convolved with its own filter U(θ) ---
+    # --- Scalar aperture M_g on its own geometry (patch disc or filter U) ---
     for flat_idx in prange(n_density * n_patches):
         tomo_idx = flat_idx // n_patches
         patch_idx = flat_idx - tomo_idx * n_patches
-        start = q_offsets[patch_idx]
-        stop = q_offsets[patch_idx + 1]
+        start = k_offsets[patch_idx]
+        stop = k_offsets[patch_idx + 1]
         sum_w = 0.0
         sum_num = 0.0
-        for q_idx in range(start, stop):
-            pix_idx = q_inds[q_idx]
+        for k_idx in range(start, stop):
+            pix_idx = k_inds[k_idx]
             weight = density_weights[pix_idx, tomo_idx]
             sum_w += weight
-            sum_num += weight * density_map[pix_idx, tomo_idx] * k_val[q_idx]
+            sum_num += weight * density_map[pix_idx, tomo_idx] * k_val[k_idx]
 
-        out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
+        out_mg_num[tomo_idx, patch_idx] = k_area[patch_idx] * sum_num
         out_mg_den[tomo_idx, patch_idx] = sum_w
 
     # --- Cosmic shear ξ+/ξ- ---
@@ -269,9 +272,12 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
         q_cos: Any,
         q_sin: Any,
         q_val: Any,
-        k_val: Any,
         q_offsets: Any,
         q_patch_area: Any,
+        k_inds: Any,
+        k_val: Any,
+        k_offsets: Any,
+        k_area: Any,
         out_ma_num: Any,
         out_ma_den: Any,
         out_mg_num: Any,
@@ -306,9 +312,12 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
             q_cos,
             q_sin,
             q_val,
-            k_val,
             q_offsets,
             q_patch_area,
+            k_inds,
+            k_val,
+            k_offsets,
+            k_area,
             out_ma_num,
             out_ma_den,
             out_mg_num,

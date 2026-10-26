@@ -977,9 +977,12 @@ def _emulate_fused_aperture(params, grid, args, fused=False):
         q_cos,
         q_sin,
         q_val,
-        k_val,
         q_offsets,
         q_patch_area,
+        k_inds,
+        k_val,
+        k_offsets,
+        k_area,
         out_ma_num,
         out_ma_den,
         out_mg_num,
@@ -1019,21 +1022,21 @@ def _emulate_fused_aperture(params, grid, args, fused=False):
                 ma_den[y * npatches + x] = np.sum(wv, dtype=acc)
         return
 
-    if section == 1:  # scalar aperture M_g, own filter U
+    if section == 1:  # scalar aperture M_g, own geometry
         mg_num = out_mg_num.reshape(-1)
         mg_den = out_mg_den.reshape(-1)
         for x in range(gx):
             if x >= npatches:
                 continue
-            start, stop = int(q_offsets[x]), int(q_offsets[x + 1])
-            pix = q_inds[start:stop].astype(np.int64)
+            start, stop = int(k_offsets[x]), int(k_offsets[x + 1])
+            pix = k_inds[start:stop].astype(np.int64)
             qv = k_val[start:stop]
             for y in range(gy):
                 if y >= n_density:
                     continue
                 d_idx = pix * n_density + y
                 wv = density_w_flat[d_idx]
-                mg_num[y * npatches + x] = acc(q_patch_area[x]) * np.sum(
+                mg_num[y * npatches + x] = acc(k_area[x]) * np.sum(
                     wv * density_flat[d_idx] * qv, dtype=acc
                 )
                 mg_den[y * npatches + x] = np.sum(wv, dtype=acc)

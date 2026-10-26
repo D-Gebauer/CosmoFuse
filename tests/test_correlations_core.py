@@ -767,7 +767,10 @@ class TestCorrelation(unittest.TestCase):
         density = FakeGPUArray(np.full(npix, 2.0, dtype=np.float64), device_id=0)
 
         shear_out = corr._m_a_single(g1, g2, w, aperture_filter=None)
-        density_out = corr._m_g_single(density, w, aperture_filter=None)
+        # a filter, so M_g runs on the mocked aperture geometry above
+        density_out = corr._m_g_single(
+            density, w, aperture_filter=lambda theta, _q: np.ones_like(theta)
+        )
 
         self.assertEqual(calls["native_input_to_device"], 0)
         self.assertEqual(shear_out.shape, (corr.Q_patch_area_flat.shape[0],))

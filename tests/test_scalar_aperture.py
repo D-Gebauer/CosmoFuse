@@ -1,12 +1,14 @@
-"""The scalar aperture ``M_g`` has its own filter.
+"""The scalar aperture ``M_g`` has its own geometry.
 
-``M_a`` (shear) keeps ``Q_crittenden``; ``M_g`` (any spin-0 field) defaults
-to a top hat of radius theta_Q (``U_tophat``) and takes ``U_crittenden`` /
-``U_schneider`` for the compensated aperture mass of a convergence map.  The
-two filters are independent everywhere both apertures are measured
-(``kg``, ``three_by_two_pt``), and the scalar values are evaluated from the
-stored aperture geometry, so changing them needs no new disc search and
-works on loaded pair files.
+``M_a`` (shear) keeps ``Q_crittenden``.  ``M_g`` (any spin-0 field) defaults
+to the weighted mean over the patch disc -- the top-hat window of the patch
+2PCFs, as in Halder et al. 2023 -- and takes a filter U (``U_crittenden`` /
+``U_schneider`` for the compensated aperture mass of a convergence map,
+``U_tophat``, or any callable) on the aperture discs of ``M_a``.  The two are
+independent everywhere both apertures are measured (``kg``,
+``three_by_two_pt``); filter values are evaluated from the stored aperture
+geometry, so changing them needs no new disc search and works on loaded pair
+files.
 """
 
 import os
@@ -28,6 +30,19 @@ from CosmoFuse.correlations import Integrated3PCF
 
 NSIDE = 64
 THETA_Q = 120.0
+
+
+def patch_mean_reference(corr, k, w):
+    """Σ w f / Σ w over the unmasked pixels within patch_size of each centre."""
+    out = np.zeros((k.shape[0], corr.n_patches))
+    for p in range(corr.n_patches):
+        vec = hp.ang2vec(corr.theta_center[p], corr.phi_center[p])
+        disc = hp.query_disc(corr.nside, vec, np.radians(corr.patch_size / 60))
+        disc = disc[corr.map_mask[disc]]
+        den = np.sum(w[:, disc], axis=1)
+        if np.all(den > 0):  # an empty (fully masked) patch gives 0
+            out[:, p] = np.sum(w[:, disc] * k[:, disc], axis=1) / den
+    return out
 
 
 def make_corr(**kwargs):
@@ -106,9 +121,11 @@ class TestScalarApertureFilter(unittest.TestCase):
             )
         )
 
-    def test_default_is_the_top_hat(self):
-        np.testing.assert_array_equal(self.m_g(), self.m_g(U_tophat))
-        self.assertFalse(np.allclose(self.m_g(), self.m_g(Q_crittenden)))
+    def test_default_is_the_patch_mean(self):
+        np.testing.assert_allclose(
+            self.m_g(), patch_mean_reference(self.corr, self.k, self.w_k), rtol=1e-12
+        )
+        self.assertFalse(np.allclose(self.m_g(), self.m_g(U_tophat)))
         np.testing.assert_array_equal(
             self.corr.kk(self.k, self.w_k, return_device=False).M_g, self.m_g()
         )
@@ -198,7 +215,27 @@ class TestCoarseApertureScalarFilter(unittest.TestCase):
         np.testing.assert_array_equal(
             corr._k_aperture_values(Q_crittenden), corr.Q_val_flat
         )
-        self.assertTrue(np.any(corr._k_aperture_values() > 0))
+        self.assertTrue(np.any(corr._k_aperture_values(U_tophat) > 0))
+
+    def test_patch_mean_follows_the_aperture_level(self):
+        """aperture_nside: the patch mean reads the degraded level's rows
+        (exactness against the degraded maps is gated in
+        test_static_treecode.TestCoarseApertureLevel)."""
+        corr = make_corr(aperture_nside=NSIDE // 2)
+        corr.find_aperture_pairs()
+        geom = corr._k_aperture_geometry()
+        self.assertTrue(np.all(geom.rows >= corr.n_active))
+        self.assertEqual(geom.offsets.size, corr.n_patches + 1)
+
+    def test_masked_patch_mean(self):
+        mask = np.ones(hp.nside2npix(NSIDE), dtype=bool)
+        mask[: mask.size // 2] = False  # northern half observed only
+        corr = make_corr(mask=mask)
+        _, k, _, w = random_maps()
+        k[:, ~mask] = 1e6  # never read
+        got = np.asarray(corr.m_g(k, w, return_device=False))
+        np.testing.assert_allclose(got, patch_mean_reference(corr, k, w), rtol=1e-12)
+        self.assertTrue(np.any(got != 0))  # at least one observed patch
 
 
 class TestConvergenceApertureMass(unittest.TestCase):

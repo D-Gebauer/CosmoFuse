@@ -59,7 +59,11 @@ def _cpu_aperture_density_kernel(
             weight = weights[pix_idx]
             sum_w += weight
             sum_wdelta_q += weight * map_values[pix_idx] * Q_val[i]
-        out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wdelta_q / sum_w
+        # 0, not NaN, for an empty aperture -- like every other M_g path
+        if sum_w == 0:
+            out_aperture[patch_idx] = 0.0
+        else:
+            out_aperture[patch_idx] = Q_patch_area[patch_idx] * sum_wdelta_q / sum_w
 
 
 @njit(fastmath=True, parallel=True, cache=True)

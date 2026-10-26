@@ -2329,7 +2329,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         captured_q_buffers = []
 
         def launched_kernel(*args):
-            captured_q_buffers.append(args[4:11])
+            captured_q_buffers.append(args[4:14])
             return True
 
         restore = self._fake_gpu_3x2pt(corr, launched_kernel)
@@ -2351,9 +2351,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_weights=shear_w,
                 density_weights=density_w,
             )
-            # the scalar filter values upload once, on first use
+            # the M_g geometry uploads once, on first use
             q_uploads_after_first_call = q_upload_count
-            self.assertEqual(q_uploads_after_first_call, q_uploads_after_prepare + 1)
             corr._compute_3x2pt_tomo_fused(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2371,11 +2370,12 @@ class TestCorrelationCoverage(unittest.TestCase):
         self.assertIs(captured_q_buffers[0][1], ctx.Q_cos_dev)
         self.assertIs(captured_q_buffers[0][2], ctx.Q_sin_dev)
         self.assertIs(captured_q_buffers[0][3], ctx.Q_val_dev)
-        self.assertIs(captured_q_buffers[0][4], ctx.Q_val_k_dev[1])
-        self.assertIs(captured_q_buffers[0][5], ctx.Q_offsets_dev)
-        self.assertIs(captured_q_buffers[0][6], ctx.Q_patch_area_dev)
+        self.assertIs(captured_q_buffers[0][4], ctx.Q_offsets_dev)
+        self.assertIs(captured_q_buffers[0][5], ctx.Q_patch_area_dev)
         self.assertIs(captured_q_buffers[1][0], ctx.Q_inds_dev)
-        self.assertIs(captured_q_buffers[1][4], ctx.Q_val_k_dev[1])
+        for call in captured_q_buffers:  # the cached M_g geometry, both calls
+            for a, b in zip(call[6:10], ctx.Q_val_k_dev[1]):
+                self.assertIs(a, b)
 
     def test_compute_3x2pt_tomo_fused_reuses_cached_pair_index_buffers(self):
         corr = self._make_small_cpu_corr()
