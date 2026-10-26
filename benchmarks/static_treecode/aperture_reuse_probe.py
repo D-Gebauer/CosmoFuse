@@ -30,7 +30,7 @@ just a correctness check -- `resolution_factor=None` must stay bit-for-bit
 identical to 4.20.0, so if the restructure cannot be bitwise it cannot ship,
 and this script is where that is established.
 
-Usage (on seitz1):
+Usage (on an A100 node: deploy_el9.sh, then remote_run.sh "<this command>"):
     PYTHONPATH=src python benchmarks/static_treecode/aperture_reuse_probe.py \
         --nside 512 --nz 4
 """

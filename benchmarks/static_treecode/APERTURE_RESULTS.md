@@ -186,4 +186,5 @@ python benchmarks/static_treecode/t10_zeta_level.py --analyse --a fine --b fine_
 Full per-triplet tables are written to
 `benchmarks/static_treecode/results/T10_fine_ap{256,128}_vs_fine.md` and the
 probe JSONs to `aperture_reuse_probe_{512,2048,2048_ap512}.json` — that
-directory is excluded from `deploy_seitz1.sh`, so they live on seitz1 only.
+directory is excluded from `deploy_seitz1.sh` (now `deploy_el9.sh`), so they live only in the deployed tree
+(`/project/ocean1-seitz/users/dgebauer/research/CosmoFuse-static-treecode/`, formerly seitz1:~/research).

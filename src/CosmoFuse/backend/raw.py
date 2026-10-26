@@ -30,7 +30,7 @@ logger = logging.getLogger("CosmoFuse.backend")
 
 # --std is mandatory: NVRTC refuses to instantiate name_expressions
 # (C++ templates) without an explicit standard.
-_CUPY_FASTMATH_OPTIONS = ("--use_fast_math", "--std=c++14")
+_CUPY_FASTMATH_OPTIONS = ("--use_fast_math", "--std=c++20")
 _CUDA_DIR = Path(__file__).resolve().parent.parent / "cuda"
 _CUDA_SOURCE_CACHE: Dict[str, str] = {}
 # Sentinel distinguishing "never attempted" from "compilation failed" in the

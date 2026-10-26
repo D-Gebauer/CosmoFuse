@@ -82,7 +82,8 @@ Requires Python >= 3.12. Install using:
 
     pip install git+https://github.com/D-Gebauer/CosmoFuse.git
 
-Note: for GPU execution, install CuPy in your environment.
+Note: for GPU execution, install CuPy in your environment. The kernels are compiled at run time by
+NVRTC as C++20, so CUDA ≥ 12 is required (e.g. `cupy-cuda13x`, tested with CuPy 14.2 / CUDA 13.0).
 
 ## USAGE
 

@@ -6,7 +6,7 @@ Runs the real CUDA kernels against the sparse chain they replace:
   * the virtual rows themselves, which is where any error would start;
   * speed -- `_expand_rows` alone and the whole device-resident call.
 
-Usage (on seitz1):
+Usage (on an A100 node: deploy_el9.sh, then remote_run.sh "<this command>"):
     PYTHONPATH=src python benchmarks/static_treecode/degrade_kernel_gate.py \
         --nside 512 --k 2.9 --nz 4
 """

@@ -10,7 +10,7 @@ Times, on the real A100 path, the three per-map passes that sit between
 and compares them against the whole device-resident call, so we can decide
 whether folding them into the degrade kernel's write is worth anything.
 
-Usage (on seitz1):
+Usage (on an A100 node: deploy_el9.sh, then remote_run.sh "<this command>"):
     PYTHONPATH=src python benchmarks/static_treecode/layout_overhead.py \
         --nside 512 --k 2.9 --nz 4
 """

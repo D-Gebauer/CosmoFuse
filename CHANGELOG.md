@@ -1,5 +1,24 @@
 # Changelog
 
+## 7.7.0 (2026-10-26)
+
+**CUDA kernels compile as C++20.** Every NVRTC compilation (`RawModule`,
+`RawKernel`, `ElementwiseKernel`) now uses `--use_fast_math --std=c++20`
+instead of `--std=c++14`. CuPy 14 on CUDA 13 ships CCCL 3, whose Thrust
+headers stop at anything below C++17 ("Thrust requires at least C++17"), so
+with it every GPU kernel failed to compile. **CUDA ≥ 12 is now required**
+(CUDA 11's NVRTC has no C++20). Results are unchanged: `pytest -m gpu` passes
+on an A100 80 GB with CuPy 14.2 / CUDA 13.0 (9 passed; the two tests that need
+two GPUs skipped), including the bitwise and ≤ 1e-12 GPU-vs-CPU gates, and the
+CPU suite passes (518 passed).
+
+GPU benchmark tooling follows seitz1 onto the el9 cluster (seitz1/seitz2 are
+SLURM nodes `usm-cl-seitz1/2` since 2026-10-21): `deploy_seitz1.sh` is now
+`benchmarks/static_treecode/deploy_el9.sh`, and `remote_run.sh` runs the
+command through `srun` on an A100 node with `~/.venvs/cosmo` (allocation via
+`SRUN_OPTS`). The deploy no longer `--delete`s probe JSONs that scripts wrote
+next to themselves in the deployed tree.
+
 ## 7.6.2 (2026-10-26)
 
 **`M_g` defaults to the patch mean of Halder et al. 2023.** In "Beyond
