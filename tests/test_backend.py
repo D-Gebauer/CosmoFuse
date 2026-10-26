@@ -835,6 +835,7 @@ class TestBackend(unittest.TestCase):
         q_cos = np.array([1.0], dtype=np.float64)
         q_sin = np.array([0.0], dtype=np.float64)
         q_val = np.array([2.0], dtype=np.float64)
+        k_val = np.array([5.0], dtype=np.float64)  # M_g's own filter
         q_offsets = np.array([0, 1], dtype=np.int64)
         q_patch_area = np.array([3.0], dtype=np.float64)
 
@@ -871,6 +872,7 @@ class TestBackend(unittest.TestCase):
             q_cos,
             q_sin,
             q_val,
+            k_val,
             q_offsets,
             q_patch_area,
             ss_comb_i,
@@ -894,7 +896,7 @@ class TestBackend(unittest.TestCase):
 
         self.assertAlmostEqual(out_ma_num[0, 0], -120.0)
         self.assertAlmostEqual(out_ma_den[0, 0], 5.0)
-        self.assertAlmostEqual(out_mg_num[0, 0], 462.0)
+        self.assertAlmostEqual(out_mg_num[0, 0], 1155.0)  # 3 * 11 * 7 * k_val
         self.assertAlmostEqual(out_mg_den[0, 0], 11.0)
         self.assertAlmostEqual(out_xip_num[0, 0], 24.0)
         self.assertAlmostEqual(out_xim_num[0, 0], 24.0)
@@ -932,6 +934,7 @@ class TestBackend(unittest.TestCase):
         q_cos = np.array([], dtype=np.float64)
         q_sin = np.array([], dtype=np.float64)
         q_val = np.array([], dtype=np.float64)
+        k_val = np.array([], dtype=np.float64)
         q_offsets = np.array([0, 0], dtype=np.int64)
         q_patch_area = np.array([1.0], dtype=np.float64)
 
@@ -968,6 +971,7 @@ class TestBackend(unittest.TestCase):
             q_cos,
             q_sin,
             q_val,
+            k_val,
             q_offsets,
             q_patch_area,
             ss_comb_i,
@@ -1015,6 +1019,7 @@ class TestBackend(unittest.TestCase):
             np.zeros(1, dtype=q_dtype),
             np.zeros(1, dtype=q_dtype),
             np.zeros(1, dtype=q_dtype),
+            np.zeros(1, dtype=q_dtype),  # k_val
             np.arange(npatches + 1, dtype=np.int64),
             np.ones(npatches, dtype=q_dtype),
             np.zeros((n_shear, npatches), dtype=dtype),
@@ -1152,7 +1157,7 @@ class TestBackend(unittest.TestCase):
             self.assertEqual(grid, expected_grid)
             self.assertEqual(block, (256,))
             # The section selector is appended as the last kernel argument
-            # (after the 14 wrapper args + npatches).
+            # (after the 15 wrapper args + npatches).
             self.assertEqual(int(launch_args[-1]), section)
             self.assertEqual(len(launch_args), len(args) + 2)
             self.assertEqual(int(launch_args[4]), 4)

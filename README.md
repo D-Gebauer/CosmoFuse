@@ -47,9 +47,9 @@ $$ \zeta_{g,g} = \langle M_g \, \xi_g \rangle $$
 
 The aperture number count is given by:
 
-$$ M_g = \frac{A \sum_{\text{p}}{w_p \delta_g Q_p}}{\sum_{\text{p}}{w_p}} $$
+$$ M_g = \frac{A \sum_{\text{p}}{w_p \delta_g U_p}}{\sum_{\text{p}}{w_p}} $$
 
-where $\delta_g$ is the galaxy overdensity (or counts). The annular galaxy auto-correlation is:
+where $\delta_g$ is the galaxy overdensity (or counts) and $U$ the scalar aperture filter, by default a top hat of radius $\theta_Q$, so that $M_g$ is the mean overdensity in the cap (see [Aperture filters](#aperture-filters)). The annular galaxy auto-correlation is:
 
 $$ \xi_g = \frac{\sum_{\text{pairs}}{w_1 w_2 \delta_1 \delta_2}}{\sum_{\text{pairs}}{w_1 w_2}} $$
 
@@ -74,7 +74,7 @@ where $\delta_l$ is the lens overdensity and $g_{s,t}$ is the source tangential 
 - Footprint-wide 3PCFs (shear Γ₀…Γ₃, scalar ζ, any mixed spin-0/spin-2 triplet) by multipole decomposition
 - Tomographic measurements of all probes on CPU and GPU
 - Automatic patch-center selection from a survey mask (optionally weighted by the compensated filter)
-- Modular compensated aperture filters (Crittenden et al. 2002 by default; Schneider et al. 1998 included)
+- Modular aperture filters: compensated shear filters for $M_a$ (Crittenden et al. 2002 by default; Schneider et al. 1998 included), a top hat (default) or their compensated convergence partners for $M_g$
 - Fully type-annotated (`mypy --strict` clean, ships `py.typed`)
 
 ## Installation
@@ -144,7 +144,7 @@ Then Calculate pairs:
 
     correlation.preprocess()
 
-`preprocess()` accepts an `aperture_filter`: the compensated filter used for the aperture mass (see [Aperture filters](#aperture-filters); default `Q_crittenden`).
+`preprocess()` accepts an `aperture_filter` (the shear filter $Q$ of $M_a$, default `Q_crittenden`) and a `k_aperture_filter` (the scalar filter $U$ of $M_g$, default `U_tophat`); see [Aperture filters](#aperture-filters).
 
 Optionally, the one-off Numba JIT compilation of the measurement kernels can be moved out of the first measurement call:
 
@@ -185,7 +185,27 @@ want to switch later.
 
 ### Aperture filters
 
-The aperture statistics $M_a$ and $M_g$ convolve the maps with a compensated filter $Q(\theta)$, evaluated for all pixels within $5\,\theta_Q$ of each patch center. The filter is modular: any callable `Q(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `Q(theta)` also works) can be passed as `aperture_filter` to `preprocess()`, `find_aperture_pairs()`, `select_patch_centers()`, and `Integrated3PCF.from_mask()`. Two tangential-shear filters $Q$ ship with the package (their convergence-space counterparts $U$, `U_crittenden` and `U_schneider`, are exported alongside them for theory work — they are not accepted as `aperture_filter`, which takes $Q$):
+The aperture statistics are evaluated for all pixels within $5\,\theta_Q$ of each patch center, each with its own filter:
+
+- $M_a$ (shear) projects the shear tangentially and convolves it with a filter $Q(\theta)$ — by default the compensated `Q_crittenden`;
+- $M_g$ (any scalar field: δ or κ) convolves the field with a filter $U(\theta)$ — by default the top hat `U_tophat`.
+
+Filters are modular: any callable `f(theta, theta_Q)` (with `theta` in radians and `theta_Q` in arcminutes; a single-argument `f(theta)` also works) can be passed. The `aperture_filter` keyword is the filter of the aperture the method measures: $Q$ for `m_a`/`gg`, $U$ for `m_g`/`kk`. `kg`, `three_by_two_pt`, `preprocess()` and `find_aperture_pairs()` measure (or prepare) both, so there `aperture_filter` is $Q$ and `k_aperture_filter` is $U$. The aperture discs are shared; changing $U$ does not repeat the disc search. `select_patch_centers()` and `Integrated3PCF.from_mask()` take an `aperture_filter` for the mask check.
+
+**`U_tophat` (default for $M_g$)** — a top hat of radius $\theta_Q$, normalised over the spherical cap:
+
+$$ U(\theta) = \frac{1}{2\pi\,(1 - \cos\theta_Q)} \;\; \text{for } \theta \le \theta_Q, \qquad U(\theta) = 0 \;\; \text{for } \theta > \theta_Q $$
+
+With uniform weights, $M_g$ is the mean of the field in the cap (up to the pixelisation of the cap area). The normalisation $A \sum w f U / \sum w$ runs over the observed pixels of the whole $5\,\theta_Q$ disc, so a masked pixel inside the cap lowers $M_g$ instead of being renormalised away. Pass `aperture_filter=U_tophat` to `select_patch_centers()` to bound that.
+
+**Convergence aperture mass.** For a κ map, the compensated $U$ partners of the shear filters below, `U_crittenden` and `U_schneider`, measure the aperture mass $M_{\rm ap} = \int U \kappa \,\mathrm{d}\Omega = \int Q \gamma_t \,\mathrm{d}\Omega$. It equals $M_a$ on the matching shear field up to the mask and the pixelisation (slope 1.0015 between the two at $\theta_Q$ = 13 pixels):
+
+    from CosmoFuse import U_crittenden
+
+    res = correlation.kk(kappa_maps, weights, aperture_filter=U_crittenden)
+    res.M_g, res.xi_g      # M_ap of κ, ξ_κκ
+
+Two tangential-shear filters $Q$ ship with the package:
 
 **`Q_crittenden` (default)** — the exponential compensated filter of [Crittenden et al. (2002)](https://arxiv.org/abs/astro-ph/0012336), as used for the i3PCF in [Halder et al. (2021)](https://arxiv.org/abs/2102.10177):
 
@@ -214,7 +234,7 @@ scalar field -- an overdensity map δ or a convergence map.  The class says
 | `Integrated3PCF` method | measures (per patch) | result fields |
 | :--- | :--- | :--- |
 | `gg(shear_maps, w)` | ξ± and the aperture mass at the patch centre | `M_a`, `xi_p`, `xi_m` |
-| `kk(k_maps, w)` | w(θ) (field estimator on δ) and the aperture count | `M_g`, `xi_g` |
+| `kk(k_maps, w)` | w(θ) (field estimator on δ or κ) and the scalar aperture | `M_g`, `xi_g` |
 | `kg(k_maps, shear_maps, k_w, shear_w, m_g=False, m_a=False)` | γ_t of lens δ × source shear (+ optional apertures) | `xi_t` (`M_g`, `M_a`) |
 | `three_by_two_pt(shear_maps, k_maps, weights)` | all six in one fused pass | all six |
 | `m_a(shear_maps, w)`, `m_g(k_maps, w)` | apertures only | array `(nz, n_patches)` |

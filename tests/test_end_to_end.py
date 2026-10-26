@@ -5,6 +5,7 @@ import healpy as hp
 import numpy as np
 import treecorr
 
+from CosmoFuse import Q_crittenden, U_crittenden
 from CosmoFuse.correlations import Integrated3PCF
 from CosmoFuse.utils import pixel2RaDec
 
@@ -350,9 +351,24 @@ class TestEndToEnd(unittest.TestCase):
 
         return m_a
 
+    @staticmethod
+    def _u_tophat_numpy(theta: np.ndarray, theta_q_arcmin: float) -> np.ndarray:
+        theta_q = np.radians(theta_q_arcmin / 60)
+        cap_area = 2 * np.pi * (1 - np.cos(theta_q))
+        return np.where(theta <= theta_q, 1.0 / cap_area, 0.0)
+
+    @staticmethod
+    def _u_crittenden_numpy(theta: np.ndarray, theta_q_arcmin: float) -> np.ndarray:
+        theta_q = np.radians(theta_q_arcmin / 60)
+        x2 = theta**2 / (2 * theta_q**2)
+        return (1 - x2) * np.exp(-x2) / (2 * np.pi * theta_q**2)
+
     def _reference_maperture_density_numpy(
-        self, density: np.ndarray, w: np.ndarray
+        self, density: np.ndarray, w: np.ndarray, filter_numpy=None
     ) -> np.ndarray:
+        """Scalar aperture; ``filter_numpy`` defaults to the top hat."""
+        if filter_numpy is None:
+            filter_numpy = self._u_tophat_numpy
         m_g = np.zeros(self.corr.n_patches, dtype=np.float64)
 
         for patch_idx in range(self.corr.n_patches):
@@ -365,7 +381,7 @@ class TestEndToEnd(unittest.TestCase):
             ) + np.sin(center_dec) * np.sin(q_dec)
             cos_vartheta = np.clip(cos_vartheta, -1.0, 1.0)
             vartheta = np.arccos(cos_vartheta)
-            q_vals = self._q_t_numpy(vartheta, self.corr.theta_Q)
+            q_vals = filter_numpy(vartheta, self.corr.theta_Q)
 
             m_g[patch_idx] = (
                 q_patch_area
@@ -406,10 +422,56 @@ class TestEndToEnd(unittest.TestCase):
         density = self.density_maps[1]
         w = self.w2
 
+        # default: top hat of radius theta_Q -- the mean of the field in the
+        # cap, so for a constant field M_g is that constant up to the
+        # pixelisation of the cap area
         m_g_ref = self._reference_maperture_density_numpy(density, w)
         m_g_corr = self.corr.backend.to_numpy(self.corr._m_g_single(density, w))
-
         np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
+        self.assertTrue(np.any(m_g_ref != 0))
+
+        # explicit filters: Q (the pre-7.6.1 default) and the compensated U
+        for filter_fn, filter_numpy in (
+            (Q_crittenden, self._q_t_numpy),
+            (U_crittenden, self._u_crittenden_numpy),
+        ):
+            with self.subTest(filter=filter_fn.__name__):
+                m_g_ref = self._reference_maperture_density_numpy(
+                    density, w, filter_numpy
+                )
+                m_g_corr = self.corr.backend.to_numpy(
+                    self.corr._m_g_single(density, w, aperture_filter=filter_fn)
+                )
+                np.testing.assert_allclose(m_g_corr, m_g_ref, rtol=1e-8, atol=1e-10)
+
+    def test_tophat_m_g_is_the_cap_mean(self):
+        """Unit weights and a constant field: the top hat gives
+        pixarea * N_in / cap area, N_in the observed pixels in the cap -- 1 up
+        to the pixelisation of the cap where the cap is fully observed (a
+        masked pixel lowers M_g; it is not renormalised away)."""
+        self.corr.find_aperture_pairs()
+        ones = np.ones(hp.nside2npix(self.nside))
+        m_g = self.corr.backend.to_numpy(self.corr._m_g_single(ones, ones))
+        theta_q = np.radians(self.corr.theta_Q / 60)
+        cap_area = 2 * np.pi * (1 - np.cos(theta_q))
+        n_full = 0
+        for patch_idx in range(self.corr.n_patches):
+            vec = hp.ang2vec(self.theta_center[patch_idx], self.phi_center[patch_idx])
+            pix_center = hp.ang2pix(
+                self.nside, self.theta_center[patch_idx], self.phi_center[patch_idx]
+            )
+            qpix_inds, *_ = self._get_aperture_patch_data(patch_idx)
+            vartheta = hp.rotator.angdist(
+                hp.pix2vec(self.nside, pix_center), hp.pix2vec(self.nside, qpix_inds)
+            )
+            n_in = int(np.count_nonzero(vartheta <= theta_q))
+            expected = hp.nside2pixarea(self.nside) * n_in / cap_area
+            np.testing.assert_allclose(m_g[patch_idx], expected, rtol=1e-8)
+            cap = hp.query_disc(self.nside, vec, theta_q)
+            if np.isin(cap, self.map_inds).all():
+                n_full += 1
+                np.testing.assert_allclose(m_g[patch_idx], 1.0, rtol=0.05)
+        self.assertGreater(n_full, 0)
 
     def test_end_to_end_maperture_shear_matches_treecorr(self):
         """M_a with TreeCorr's tangential projection: a brute-force

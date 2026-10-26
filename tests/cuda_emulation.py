@@ -977,6 +977,7 @@ def _emulate_fused_aperture(params, grid, args, fused=False):
         q_cos,
         q_sin,
         q_val,
+        k_val,
         q_offsets,
         q_patch_area,
         out_ma_num,
@@ -1018,7 +1019,7 @@ def _emulate_fused_aperture(params, grid, args, fused=False):
                 ma_den[y * npatches + x] = np.sum(wv, dtype=acc)
         return
 
-    if section == 1:  # galaxy mean density M_g
+    if section == 1:  # scalar aperture M_g, own filter U
         mg_num = out_mg_num.reshape(-1)
         mg_den = out_mg_den.reshape(-1)
         for x in range(gx):
@@ -1026,7 +1027,7 @@ def _emulate_fused_aperture(params, grid, args, fused=False):
                 continue
             start, stop = int(q_offsets[x]), int(q_offsets[x + 1])
             pix = q_inds[start:stop].astype(np.int64)
-            qv = q_val[start:stop]
+            qv = k_val[start:stop]
             for y in range(gy):
                 if y >= n_density:
                     continue

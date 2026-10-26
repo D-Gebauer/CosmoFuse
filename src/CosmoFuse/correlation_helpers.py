@@ -81,12 +81,14 @@ def U_crittenden(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
 
         U(θ) = 1/(2π θ_Q²) · (1 - θ²/(2θ_Q²)) · exp(-θ²/(2θ_Q²)).
 
-    Compensated (∫ dθ θ U(θ) = 0) and negative beyond θ = √2 θ_Q.  Not used
-    for measuring (CosmoFuse measures M_ap from the tangential shear with
-    Q); useful for mask-based patch selection, e.g.
-    ``select_patch_centers(..., aperture_filter=U_crittenden,
-    filter_weighting="signed")`` limits how far the mask may push the
-    aperture away from being compensated.
+    Compensated (∫ dθ θ U(θ) = 0) and negative beyond θ = √2 θ_Q.  Same
+    prefactor as :func:`Q_crittenden`, so the aperture mass of a convergence
+    map, ``m_g(kappa_maps, w, aperture_filter=U_crittenden)``, measures the
+    same M_ap = ∫ U κ dΩ = ∫ Q γ_t dΩ as ``m_a`` on the matching shear
+    (up to the mask and the 5 θ_Q truncation).  Also useful for mask-based
+    patch selection, e.g. ``select_patch_centers(...,
+    aperture_filter=U_crittenden, filter_weighting="signed")`` limits how
+    far the mask may push the aperture away from being compensated.
     """
     theta_q = np.radians(theta_Q / 60)
     x2 = np.asarray(theta) ** 2 / (2 * theta_q**2)
@@ -97,11 +99,40 @@ def U_schneider(theta: float, theta_Q: float = 90) -> np.ndarray:
     """Convergence-space partner of :func:`Q_schneider`:
 
     U(θ) = 9/(π θ_Q²) · (1 - x²)(1/3 - x²)   for x = θ/θ_Q ≤ 1, else 0.
+
+    Compensated; a scalar-field (``m_g``) filter like :func:`U_crittenden`.
     """
     theta_ap = np.radians(theta_Q / 60)
     x2 = (np.asarray(theta) / theta_ap) ** 2
     values = 9.0 / (np.pi * theta_ap**2) * (1.0 - x2) * (1.0 / 3.0 - x2)
     return np.where(x2 < 1.0, values, 0.0)
+
+
+def U_tophat(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:
+    """Top-hat aperture of radius θ_Q, the default filter of the scalar
+    aperture ``M_g``:
+
+        U(θ) = 1 / (2π (1 - cos θ_Q))    for θ ≤ θ_Q,  else 0,
+
+    normalised to ∫ U dΩ = 1 over the spherical cap, so that with uniform
+    weights ``M_g`` is the mean of the field inside the cap (up to the
+    pixelisation of the cap's area).  The normalisation of every aperture is
+    ``A · Σ w f U / Σ w`` over the observed pixels of the 5 θ_Q disc, so a
+    masked pixel *inside* the cap lowers ``M_g`` instead of being
+    renormalised away; ``select_patch_centers(..., aperture_filter=U_tophat)``
+    bounds that fraction.  Not compensated: for the aperture mass of a
+    convergence map use :func:`U_crittenden` or :func:`U_schneider`.
+
+    Args:
+        theta: Angular distance to the aperture centre (radians).
+        theta_Q: Aperture radius (arcminutes, default 90').
+
+    Returns:
+        Filter value U(θ).
+    """
+    theta_ap = np.radians(theta_Q / 60)
+    value = 1.0 / (2 * np.pi * (1.0 - np.cos(theta_ap)))
+    return np.where(np.asarray(theta) <= theta_ap, value, 0.0)
 
 
 def Q_schneider(theta: Union[float, np.ndarray], theta_Q: float = 90) -> Any:

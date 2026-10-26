@@ -1,5 +1,38 @@
 # Changelog
 
+## 7.6.1 (2026-10-26)
+
+**`M_g` has its own filter, by default a top hat of radius θ_Q.** The scalar
+aperture used the shear filter `Q_crittenden` (θ²-weighted, zero at the
+centre, peaking at √2 θ_Q), so `M_g` was a ring-weighted mean of δ rather than
+a count in an aperture. It now takes a scalar filter U: by default the new
+`U_tophat`, U = 1/(2π(1 − cos θ_Q)) inside θ_Q, normalised over the cap, so that
+with uniform weights `M_g` is the mean of the field in the cap. **`M_g` changes
+with this release** (and with it ζ_gg, ζ_g±, ζ_gt); `M_a` and all 2PCFs are
+untouched. Pass `aperture_filter=Q_crittenden` to `m_g`/`kk` (or
+`k_aperture_filter=Q_crittenden` to `kg`/`three_by_two_pt`) to reproduce
+7.6.0 bitwise (checked at float32 and float64 rotation precision).
+
+**Convergence aperture mass.** `U_crittenden` and `U_schneider` (exported
+before only for theory work and patch selection) are now measurement filters: `kk(kappa_maps, w,
+aperture_filter=U_crittenden)` gives M_ap = ∫ U κ dΩ. On a healpy-generated
+κ field and its E-mode shear it equals `m_a` with `Q_crittenden` to slope
+1.0015 and 0.6 % of the rms at θ_Q = 13 pixels (1.5 % at 6.6 pixels: the
+residual is pixelisation); `tests/test_scalar_aperture.py` gates it.
+
+**API.** `aperture_filter` stays the filter of the aperture a method
+measures: Q for `m_a`/`gg`, U for `m_g`/`kk`. `kg` and `three_by_two_pt`
+measure both, so there `aperture_filter` is now the shear filter of `M_a` only
+and the new `k_aperture_filter` is the scalar filter of `M_g`; a filter passed
+as `aperture_filter` no longer reaches `M_g`. `preprocess()` and
+`find_aperture_pairs()` take `k_aperture_filter` too. The aperture discs stay
+shared: U is evaluated from the stored geometry (pixel and centre-pixel
+distances, as for Q) and cached per geometry and filter, so changing it needs
+no new disc search, and pair files need no new dataset (old files load
+unchanged). The fused 3x2pt aperture kernels (`tomo_fused_3x2pt.cu`, both
+variants, and the CPU kernel) take a second filter array `k_val` for section
+1; the emulation twin follows.
+
 ## 7.6.0 (2026-10-22)
 
 **Fix: the aperture mass `M_a` projects the shear along the great circle at

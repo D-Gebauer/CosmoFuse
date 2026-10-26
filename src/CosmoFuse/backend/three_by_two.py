@@ -42,6 +42,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
     q_cos: np.ndarray,
     q_sin: np.ndarray,
     q_val: np.ndarray,
+    k_val: np.ndarray,
     q_offsets: np.ndarray,
     q_patch_area: np.ndarray,
     ss_comb_i: np.ndarray,
@@ -90,7 +91,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
         out_ma_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
         out_ma_den[tomo_idx, patch_idx] = sum_w
 
-    # --- Galaxy mean density M_g: δ_g convolved with Q(θ) per patch ---
+    # --- Scalar aperture M_g: δ_g convolved with its own filter U(θ) ---
     for flat_idx in prange(n_density * n_patches):
         tomo_idx = flat_idx // n_patches
         patch_idx = flat_idx - tomo_idx * n_patches
@@ -102,7 +103,7 @@ def _cpu_3x2pt_tomo_fused_kernel(
             pix_idx = q_inds[q_idx]
             weight = density_weights[pix_idx, tomo_idx]
             sum_w += weight
-            sum_num += weight * density_map[pix_idx, tomo_idx] * q_val[q_idx]
+            sum_num += weight * density_map[pix_idx, tomo_idx] * k_val[q_idx]
 
         out_mg_num[tomo_idx, patch_idx] = q_patch_area[patch_idx] * sum_num
         out_mg_den[tomo_idx, patch_idx] = sum_w
@@ -268,6 +269,7 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
         q_cos: Any,
         q_sin: Any,
         q_val: Any,
+        k_val: Any,
         q_offsets: Any,
         q_patch_area: Any,
         out_ma_num: Any,
@@ -304,6 +306,7 @@ def _build_cupy_3x2pt_tomo_aperture_kernel(module: Any) -> Any:
             q_cos,
             q_sin,
             q_val,
+            k_val,
             q_offsets,
             q_patch_area,
             out_ma_num,

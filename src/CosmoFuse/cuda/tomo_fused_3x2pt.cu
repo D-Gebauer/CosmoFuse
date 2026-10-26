@@ -8,7 +8,8 @@
  *
  *   M_ap   aperture mass: tangential shear convolved with the compensated
  *          filter Q(theta) around each patch centre        (this file, z=0)
- *   M_g    aperture galaxy density: delta_g convolved with Q  (this file, z=1)
+ *   M_g    scalar aperture: delta_g (or kappa) convolved with its own filter
+ *          U(theta), by default a top hat               (this file, z=1)
  *   xi+/-  cosmic shear        (tomo_vectorized_xipm.cu, tiled kernels)
  *   xi_g   galaxy clustering   (density_density_tomo_vectorized.cu)
  *   xi_t   galaxy-galaxy lensing (density_shear_tomo_vectorized.cu)
@@ -29,7 +30,7 @@
  * `gpu_3x2pt_tomo_aperture_fused` is the default: one block per patch with
  * the tomographic bins looped inside it, so the disc geometry (q_inds +
  * q_cos + q_sin + q_val, 16 B per disc pixel) is read once per pixel
- * rather than once per bin.  Same restructure, same reasoning and the same
+ * rather than once per bin (k_val replaces q_cos/q_sin/q_val in section 1).  Same restructure, same reasoning and the same
  * bitwise guarantee as the standalone kernels in aperture_tomo.cu -- see
  * that file's header.  The per-(patch, bin) kernel stays as the fallback
  * for bin counts beyond the accumulator budget.
@@ -54,7 +55,8 @@ __global__ void gpu_3x2pt_tomo_aperture(
     const unsigned int* q_inds,   /* pixel indices within each patch's aperture */
     const QT* q_cos,              /* cos(2phi) of pixel w.r.t. patch centre     */
     const QT* q_sin,              /* sin(2phi) of pixel w.r.t. patch centre     */
-    const QT* q_val,              /* Q(theta): compensated filter value          */
+    const QT* q_val,              /* Q(theta): shear filter value (M_ap)        */
+    const QT* k_val,              /* U(theta): scalar filter value (M_g)        */
     const long long* q_offsets,   /* CSR offsets per patch                       */
     const QT* q_patch_area,       /* solid angle of each patch (steradians)      */
     ACC* out_ma_num,           /* aperture mass numerator   [n_shear x npatches]   */
@@ -95,7 +97,7 @@ __global__ void gpu_3x2pt_tomo_aperture(
         return;
     }
 
-    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * Q ] / Sum_pix [ w ] */
+    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * U ] / Sum_pix [ w ] */
     if (section == 1) {
         if (x >= npatches || y >= N_DENSITY) return;
         const long long start = q_offsets[x];
@@ -106,7 +108,7 @@ __global__ void gpu_3x2pt_tomo_aperture(
             const unsigned int pix = q_inds[idx];
             const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;
             const T wv = density_w[d_idx];
-            sum_num += (ACC)(wv * density[d_idx] * (T)q_val[idx]);
+            sum_num += (ACC)(wv * density[d_idx] * (T)k_val[idx]);
             sum_den += (ACC)wv;
         }
         block_reduce_sum_pair(sum_num, sum_den, &sum_num, &sum_den);
@@ -138,6 +140,7 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
     const QT* q_cos,
     const QT* q_sin,
     const QT* q_val,
+    const QT* k_val,
     const long long* q_offsets,
     const QT* q_patch_area,
     ACC* out_ma_num,
@@ -197,7 +200,7 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
         return;
     }
 
-    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * Q ] / Sum_pix [ w ] */
+    /* z=1 : M_g = A_patch * Sum_pix [ w * delta_g * U ] / Sum_pix [ w ] */
     if (section == 1) {
         ACC sn[N_DENSITY];
         ACC sd[N_DENSITY];
@@ -206,7 +209,7 @@ __global__ void gpu_3x2pt_tomo_aperture_fused(
 
         for (long long idx = start + lane; idx < stop; idx += BLOCK_SIZE) {
             const unsigned int pix = q_inds[idx];
-            const T qv = (T)q_val[idx];
+            const T qv = (T)k_val[idx];
 #pragma unroll
             for (int y = 0; y < N_DENSITY; ++y) {
                 const long long d_idx = (long long)pix * (long long)N_DENSITY + (long long)y;

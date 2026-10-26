@@ -53,12 +53,14 @@ class ComputeContext:
     Q_val_flat: Any
     Q_offsets: Any
     Q_patch_area_flat: Any
+    Q_val_k_cache: Any
     Q_inds_dev: Any
     Q_cos_dev: Any
     Q_sin_dev: Any
     Q_val_dev: Any
     Q_offsets_dev: Any
     Q_patch_area_dev: Any
+    Q_val_k_dev: Any
     fused_output_buffers: Any
     prepare_version: int
     tomo_combination_cache: Dict[Any, Any]
@@ -105,7 +107,9 @@ class ComputeContext:
         ("unit_weights_cache", None),
     )
     # Aperture filter geometry on host: pixel indices within each patch's
-    # aperture, cos(2φ)/sin(2φ), filter values Q(θ), patch solid angles
+    # aperture, cos(2φ)/sin(2φ), filter values Q(θ), patch solid angles, and
+    # the scalar-aperture filter values U(θ) as (Q_inds_flat, filter key,
+    # filter, values) -- valid only for that geometry and filter
     _APERTURE_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
         ("Q_inds_flat", None),
         ("Q_cos_flat", None),
@@ -113,6 +117,7 @@ class ComputeContext:
         ("Q_val_flat", None),
         ("Q_offsets", None),
         ("Q_patch_area_flat", None),
+        ("Q_val_k_cache", None),
     )
     # Same aperture data transferred to device (GPU memory)
     _APERTURE_DEVICE_DEFAULTS: Tuple[Tuple[str, Any], ...] = (
@@ -122,6 +127,8 @@ class ComputeContext:
         ("Q_val_dev", None),
         ("Q_offsets_dev", None),
         ("Q_patch_area_dev", None),
+        # (host U values, device copy)
+        ("Q_val_k_dev", None),
     )
     # Pre-allocated output buffers for the fused kernel (M_ap, M_g,
     # ξ+, ξ-, ξ_g, ξ_t numerators and denominators)

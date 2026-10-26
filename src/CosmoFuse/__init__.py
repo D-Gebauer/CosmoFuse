@@ -16,6 +16,7 @@ from .correlation_helpers import (
     Q_schneider,
     U_crittenden,
     U_schneider,
+    U_tophat,
     calculate_all_zetas,
     zeta_a_g,
     zeta_a_minus,
@@ -35,7 +36,7 @@ from .treecode import DEFAULT_RESOLUTION_FACTOR
 from .utils import pixel2RaDec, select_patch_centers
 from .zeta_writer import ZetaWriter
 
-__version__ = "7.6.0"
+__version__ = "7.6.1"
 __author__ = "David Gebauer"
 __email__ = "git@gebauer.ai"
 
@@ -54,6 +55,7 @@ __all__ = [
     "Q_schneider",
     "U_crittenden",
     "U_schneider",
+    "U_tophat",
     "calculate_all_zetas",
     "zeta_g_plus",
     "zeta_g_minus",

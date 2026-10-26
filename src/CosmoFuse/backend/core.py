@@ -452,6 +452,7 @@ class Backend:
             q_val.astype(map_dtype),
             q_val.astype(map_dtype),
             q_val.astype(map_dtype),
+            q_val.astype(map_dtype),
             q_offsets,
             q_area.astype(map_dtype),
             comb,

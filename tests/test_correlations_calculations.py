@@ -14,6 +14,10 @@ from CosmoFuse.correlations import Integrated3PCF
 from ._results import fields_of
 
 
+def _unit_filter(theta, _theta_Q):
+    return np.ones_like(theta)
+
+
 class TestCorrelationCalculations(unittest.TestCase):
     """Test the Integrated3PCF class calculation methods."""
 
@@ -140,7 +144,8 @@ class TestCorrelationCalculations(unittest.TestCase):
         delta = np.random.rand(self.npix)
         w = np.ones(self.npix)
 
-        aperture_density = self.corr._m_g_single(delta, w)
+        # the mocked geometry has Q_val = 1; a unit filter reproduces it
+        aperture_density = self.corr._m_g_single(delta, w, aperture_filter=_unit_filter)
 
         self.assertEqual(aperture_density.shape, (1,))
 
@@ -187,7 +192,7 @@ class TestCorrelationCalculations(unittest.TestCase):
 
         self.corr.backend = FakeBackend()
 
-        aperture_density = self.corr._m_g_single(delta, w)
+        aperture_density = self.corr._m_g_single(delta, w, aperture_filter=_unit_filter)
         Q_inds = self.corr.Q_inds[0]
         Q_val = self.corr.Q_val[0]
         Q_patch_area = self.corr.Q_patch_area[0]

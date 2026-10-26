@@ -618,7 +618,17 @@ class TestCorrelationCoverage(unittest.TestCase):
             "_kk_pairs",
             return_value=wtheta_mock,
         ) as spy_wtheta:
-            N_ap, wtheta = fields_of(corr.kk(density_maps, density_w), "M_g", "xi_g")
+            # unit filter = the mocked Q_val (the default top hat is
+            # evaluated from the real centre distance instead)
+            N_ap, wtheta = fields_of(
+                corr.kk(
+                    density_maps,
+                    density_w,
+                    aperture_filter=lambda theta, _theta_Q: np.ones_like(theta),
+                ),
+                "M_g",
+                "xi_g",
+            )
 
         spy_wtheta.assert_called_once()
         np.testing.assert_allclose(N_ap[:, 0], np.array([2.0, 3.0], dtype=np.float64))
@@ -844,6 +854,9 @@ class TestCorrelationCoverage(unittest.TestCase):
         def custom_filter(theta, _theta_Q):
             return np.ones_like(theta)
 
+        def custom_k_filter(theta, _theta_Q):
+            return np.ones_like(theta)
+
         with (
             patch.object(
                 corr,
@@ -870,6 +883,7 @@ class TestCorrelationCoverage(unittest.TestCase):
                     density_w,
                     shear_w,
                     aperture_filter=custom_filter,
+                    k_aperture_filter=custom_k_filter,
                     m_g=True,
                     m_a=True,
                 ),
@@ -878,7 +892,8 @@ class TestCorrelationCoverage(unittest.TestCase):
                 "M_a",
             )
 
-        self.assertIs(spy_nap.call_args.kwargs["aperture_filter"], custom_filter)
+        # shear filter -> M_a, scalar filter -> M_g
+        self.assertIs(spy_nap.call_args.kwargs["aperture_filter"], custom_k_filter)
         self.assertIs(spy_map.call_args.kwargs["aperture_filter"], custom_filter)
 
     def test_density_shear_uses_directional_lens_source_pairs(self):
@@ -2314,7 +2329,7 @@ class TestCorrelationCoverage(unittest.TestCase):
         captured_q_buffers = []
 
         def launched_kernel(*args):
-            captured_q_buffers.append(args[4:10])
+            captured_q_buffers.append(args[4:11])
             return True
 
         restore = self._fake_gpu_3x2pt(corr, launched_kernel)
@@ -2336,6 +2351,9 @@ class TestCorrelationCoverage(unittest.TestCase):
                 shear_weights=shear_w,
                 density_weights=density_w,
             )
+            # the scalar filter values upload once, on first use
+            q_uploads_after_first_call = q_upload_count
+            self.assertEqual(q_uploads_after_first_call, q_uploads_after_prepare + 1)
             corr._compute_3x2pt_tomo_fused(
                 shear_maps=shear_maps,
                 density_maps=density_maps,
@@ -2346,15 +2364,18 @@ class TestCorrelationCoverage(unittest.TestCase):
             restore()
             corr.backend.to_device = original_to_device
 
-        self.assertEqual(q_upload_count, q_uploads_after_prepare)
+        ctx = corr.compute_context
+        self.assertEqual(q_upload_count, q_uploads_after_first_call)
         self.assertEqual(len(captured_q_buffers), 2)
-        self.assertIs(captured_q_buffers[0][0], corr.compute_context.Q_inds_dev)
-        self.assertIs(captured_q_buffers[0][1], corr.compute_context.Q_cos_dev)
-        self.assertIs(captured_q_buffers[0][2], corr.compute_context.Q_sin_dev)
-        self.assertIs(captured_q_buffers[0][3], corr.compute_context.Q_val_dev)
-        self.assertIs(captured_q_buffers[0][4], corr.compute_context.Q_offsets_dev)
-        self.assertIs(captured_q_buffers[0][5], corr.compute_context.Q_patch_area_dev)
-        self.assertIs(captured_q_buffers[1][0], corr.compute_context.Q_inds_dev)
+        self.assertIs(captured_q_buffers[0][0], ctx.Q_inds_dev)
+        self.assertIs(captured_q_buffers[0][1], ctx.Q_cos_dev)
+        self.assertIs(captured_q_buffers[0][2], ctx.Q_sin_dev)
+        self.assertIs(captured_q_buffers[0][3], ctx.Q_val_dev)
+        self.assertIs(captured_q_buffers[0][4], ctx.Q_val_k_dev[1])
+        self.assertIs(captured_q_buffers[0][5], ctx.Q_offsets_dev)
+        self.assertIs(captured_q_buffers[0][6], ctx.Q_patch_area_dev)
+        self.assertIs(captured_q_buffers[1][0], ctx.Q_inds_dev)
+        self.assertIs(captured_q_buffers[1][4], ctx.Q_val_k_dev[1])
 
     def test_compute_3x2pt_tomo_fused_reuses_cached_pair_index_buffers(self):
         corr = self._make_small_cpu_corr()

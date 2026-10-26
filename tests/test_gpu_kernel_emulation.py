@@ -23,6 +23,7 @@ from pathlib import Path
 import healpy as hp
 import numpy as np
 
+from CosmoFuse import Q_schneider, U_crittenden
 from CosmoFuse.backend.aperture import (
     _build_cupy_aperture_tomo_density_kernel,
     _build_cupy_aperture_tomo_shear_kernel,
@@ -340,6 +341,45 @@ class TestEmulatedGpuParityFloat64Rotations(unittest.TestCase):
         ):
             with self.subTest(output=label):
                 self._allclose(actual, ref)
+
+    def test_fused_3x2pt_separate_aperture_filters(self):
+        """M_a and M_g read different filter arrays (q_val / k_val) in the
+        fused aperture kernel."""
+        m = self.maps
+        kwargs = dict(
+            shear_maps=m["shear"],
+            k_maps=m["density"],
+            weights={"shear": m["w_shear"], "density": m["w_density"]},
+            aperture_filter=Q_schneider,
+            k_aperture_filter=U_crittenden,
+            return_device=False,
+        )
+        try:
+            ref = self.corr.three_by_two_pt(**kwargs)
+            ref_Mg = self.corr.m_g(
+                m["density"],
+                m["w_density"],
+                aperture_filter=U_crittenden,
+                return_device=False,
+            )
+            with emulated_gpu(self.corr) as calls:
+                got = self.corr.three_by_two_pt(**kwargs)
+                got_Mg = self.corr.m_g(
+                    m["density"],
+                    m["w_density"],
+                    aperture_filter=U_crittenden,
+                    return_device=False,
+                )
+        finally:
+            self.corr.find_aperture_pairs()  # back to the default filter
+        self.assertGreaterEqual(calls["kernel_3x2pt_tomo_aperture"], 1)
+        self.assertGreaterEqual(calls["aperture_tomo_density_kernel"], 1)
+        self._allclose(got.M_a, ref.M_a)
+        self._allclose(got.M_g, ref.M_g)
+        self._allclose(got_Mg, ref_Mg)
+        self._allclose(got.M_g, ref_Mg)
+        self.assertFalse(np.allclose(got.M_a, self.ref_fused[0]))
+        self.assertFalse(np.allclose(got.M_g, self.ref_fused[1]))
 
     def test_fused_3x2pt_single_pass_equals_three_tiles(self):
         """Single-pass tile == the three standalone tiles, also for auto-only

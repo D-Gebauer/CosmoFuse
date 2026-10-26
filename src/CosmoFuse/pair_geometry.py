@@ -10,16 +10,28 @@ Handles the spatial geometry needed for 2-point and aperture statistics:
 - **Aperture geometry**: For the aperture mass M_ap, computes for each pixel
   within a patch the angular distance θ to the patch centre, the compensated
   filter Q(θ), and the cos(2φ)/sin(2φ) factors needed to project the shear
-  into tangential and cross components.
+  into tangential and cross components.  The scalar aperture M_g reads the
+  same pixels with its own filter U(θ) (default: a top hat of radius θ_Q),
+  evaluated from that geometry on demand.
 """
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import healpy as hp
 import numpy as np
 from tqdm import trange
 
-from .correlation_helpers import Q_crittenden
+from .correlation_helpers import Q_crittenden, U_tophat
 from .packing import PACKED_BYTES_PER_PAIR, map_patches, pack_host_patch
 from .treecode import (
     PatchCells,
@@ -40,6 +52,13 @@ class PairGeometry:
         aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> Callable[..., Any]:
         return Q_crittenden if aperture_filter is None else aperture_filter
+
+    @staticmethod
+    def resolve_k_aperture_filter(
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> Callable[..., Any]:
+        """Filter of the scalar aperture ``M_g`` (default: :func:`U_tophat`)."""
+        return U_tophat if aperture_filter is None else aperture_filter
 
     @staticmethod
     def aperture_filter_key(aperture_filter: Callable[..., Any]) -> Any:
@@ -85,6 +104,72 @@ class PairGeometry:
 
         if owner._aperture_filter_active_key != filter_key:
             owner.find_aperture_pairs(aperture_filter=filter_fn)
+
+    @staticmethod
+    def k_aperture_values(
+        owner: "Integrated3PCF",
+        aperture_filter: Optional[Callable[..., Any]] = None,
+    ) -> np.ndarray:
+        """Flat filter values of the scalar aperture ``M_g``, aligned with
+        ``Q_inds_flat`` (cached per geometry and filter).
+
+        The shear filter Q is evaluated while the aperture discs are found
+        (and is stored in pair files); the scalar filter U is evaluated here
+        from the same pixels and patch centres, so a change of U needs no
+        new disc search and pair files need no extra dataset.  Builds the
+        aperture geometry first if there is none.
+        """
+        filter_fn = PairGeometry.resolve_k_aperture_filter(aperture_filter)
+        if owner.Q_inds_flat is None:
+            if owner.Q_inds:
+                owner._prepare_aperture_flat()
+            else:
+                owner.find_aperture_pairs()
+        if owner.Q_inds_flat is None:  # no patches
+            return np.zeros(0, dtype=owner.rotation_dtype)
+        key = PairGeometry.aperture_filter_key(filter_fn)
+        ctx = owner.compute_context
+        cached = ctx.Q_val_k_cache
+        # (geometry, key, filter): the filter is held so that its key, a
+        # live-object serial, cannot be reissued while the entry exists.
+        if cached is not None and cached[0] is owner.Q_inds_flat and cached[1] == key:
+            return cast(np.ndarray, cached[3])
+        values = PairGeometry._evaluate_k_aperture_filter(owner, filter_fn)
+        ctx.Q_val_k_cache = (owner.Q_inds_flat, key, filter_fn, values)
+        ctx.Q_val_k_dev = None
+        return values
+
+    @staticmethod
+    def _evaluate_k_aperture_filter(
+        owner: "Integrated3PCF", filter_fn: Callable[..., Any]
+    ) -> np.ndarray:
+        """U(ϑ) for every aperture pixel, ϑ measured from the centre pixel
+        exactly as :meth:`get_pairs_M_a_helper` measures it for Q."""
+        q_inds = np.asarray(owner.Q_inds_flat, dtype=np.int64)
+        offsets = np.asarray(owner.Q_offsets, dtype=np.int64)
+        n_patches = offsets.size - 1
+        counts = np.diff(offsets)
+        ap_cells = owner._aperture_cells()
+        if ap_cells is None:
+            nside_q = int(owner.nside)
+            pix = q_inds
+        else:
+            # coarse aperture level: ids are virtual rows npix + cell index
+            assert owner.aperture_nside is not None
+            nside_q = int(owner.aperture_nside)
+            pix = ap_cells[0][q_inds - hp.nside2npix(owner.nside)]
+        theta_c = np.asarray(owner.theta_center[:n_patches], dtype=np.float64)
+        phi_c = np.asarray(owner.phi_center[:n_patches], dtype=np.float64)
+        centre_pix = hp.ang2pix(nside_q, theta_c, phi_c)
+        ra_c, dec_c = pixel2RaDec(centre_pix, nside_q)
+        ra_c = np.repeat(np.asarray(ra_c), counts)
+        dec_c = np.repeat(np.asarray(dec_c), counts)
+        ra, dec = pixel2RaDec(pix, nside_q)
+        cos_vartheta = np.cos(ra - ra_c) * np.cos(dec_c) * np.cos(dec) + np.sin(
+            dec_c
+        ) * np.sin(dec)
+        vartheta = np.arccos(np.clip(cos_vartheta, -1.0, 1.0))
+        return PairGeometry.evaluate_aperture_filter(owner, filter_fn, vartheta)
 
     @staticmethod
     def get_pairs_patch(
@@ -511,6 +596,7 @@ class PairGeometry:
     def find_aperture_pairs(
         owner: "Integrated3PCF",
         aperture_filter: Optional[Callable[..., Any]] = None,
+        k_aperture_filter: Optional[Callable[..., Any]] = None,
     ) -> None:
         filter_fn = PairGeometry.resolve_aperture_filter(aperture_filter)
         owner.Q_cos, owner.Q_sin, owner.Q_val, owner.Q_inds, owner.Q_patch_area = (
@@ -534,6 +620,8 @@ class PairGeometry:
 
         owner._prepare_aperture_flat()
         owner._aperture_filter_active_key = PairGeometry.aperture_filter_key(filter_fn)
+        if k_aperture_filter is not None:
+            PairGeometry.k_aperture_values(owner, k_aperture_filter)
 
     @staticmethod
     def prepare_aperture_flat(owner: "Integrated3PCF") -> None:

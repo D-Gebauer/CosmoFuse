@@ -203,9 +203,14 @@ class FusedApertureAgreementBase:
             xp.zeros((n_density, NPATCHES), dtype=acc),
             xp.zeros((n_density, NPATCHES), dtype=acc),
         )
+        # M_g reads its own filter (k_val), distinct from M_ap's q_val
+        q_inds, q_cos, q_sin, q_val, q_offsets, q_area = geom
+        k_val = q_val[::-1].copy()
         limit = _MAX_FUSED_APERTURE_BINS if fused else 0
         with patch("CosmoFuse.backend.aperture._MAX_FUSED_APERTURE_BINS", limit):
-            ok = kernel(*maps, *geom, *out)
+            ok = kernel(
+                *maps, q_inds, q_cos, q_sin, q_val, k_val, q_offsets, q_area, *out
+            )
         self.assertTrue(ok)
         self.sync()
         return tuple(self.to_host(o) for o in out)
